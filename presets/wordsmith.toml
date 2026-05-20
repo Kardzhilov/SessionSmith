@@ -1,0 +1,27 @@
+name = "Wordsmith"
+description = "Custom narrative system; see campaign overrides for mechanics."
+
+terminology = """
+Wordsmith is a custom narrative-leaning system. Lean on character intent and fictional
+consequence rather than codified mechanics. Use the terms introduced at the table. 
+A core mechanic of the system is words. Players have lists Words which they use to help them acieve things
+if a word relates to the situation it gives them an advantage.
+"""
+
+capture = """
+- Character intent and the consequences of their choices
+- Spotlight moments per player
+- Faction, location and NPC introductions
+- Ongoing competition / event progress (e.g. himbocompetition standings)
+- Cliffhangers and threads left for next session
+"""
+
+extra_sections = """
+### Standings
+Current standing in any ongoing competitions or rivalries.
+"""
+
+forbidden_phrases = [
+  "shadowy", "tapestry", "whisper", "realm", "delve",
+  "testament", "threads", "myriad", "pivotal", "vibrant", "bustling"
+]

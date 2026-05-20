@@ -1,0 +1,31 @@
+name = "D&D 5e"
+description = "Dungeons & Dragons 5th Edition."
+
+terminology = """
+Use D&D 5e terms: HP, AC, spell slots, advantage/disadvantage, short rest, long rest,
+inspiration, exhaustion levels, concentration. Class features and spells should be
+named explicitly when they meaningfully change the scene.
+"""
+
+capture = """
+- Combat: initiative order, big hits, crits, downed PCs, monsters defeated
+- Spells cast and concentration broken
+- Loot: magic items, gold, consumables (note attunement)
+- XP awarded or milestone advancements
+- Resources spent: spell slots of consequence, Hit Dice, class features
+- Quest hooks and faction reputation changes
+"""
+
+extra_sections = """
+### Loot & Treasure
+Itemise everything acquired: magic items (with attunement state), gold, gems, and
+consumables.
+
+### Combat Notes
+Notable rolls, downed characters, and any rulings made at the table.
+"""
+
+forbidden_phrases = [
+  "shadowy", "tapestry", "whisper", "realm", "delve",
+  "testament", "threads", "myriad", "pivotal", "vibrant", "bustling"
+]

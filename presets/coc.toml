@@ -1,0 +1,30 @@
+name = "Call of Cthulhu"
+description = "Chaosium's Call of Cthulhu — cosmic horror investigation."
+
+terminology = """
+Use CoC 7e terms: Sanity (SAN), Luck, pushed rolls, bonus/penalty dice, hard/extreme
+successes, temporary and indefinite insanity, phobias and manias. Skills are named
+explicitly (e.g. Spot Hidden, Library Use, Psychology).
+"""
+
+capture = """
+- Sanity losses: who, how much, what triggered them
+- Clues uncovered (and clues missed) — investigators die when leads run dry
+- New NPCs: motives, secrets the investigators suspect vs. know
+- Mythos exposure: tomes read, entities glimpsed, spells witnessed
+- Investigator condition: wounds, conditions, equipment lost or gained
+"""
+
+extra_sections = """
+### Sanity Tracker
+Per investigator: current SAN, losses this session, any new phobias/manias.
+
+### Clue Ledger
+Bullet list of every clue the investigators now possess and the open questions
+they could pursue next.
+"""
+
+forbidden_phrases = [
+  "shadowy", "tapestry", "whisper", "delve",
+  "testament", "threads", "myriad", "pivotal", "vibrant", "bustling"
+]

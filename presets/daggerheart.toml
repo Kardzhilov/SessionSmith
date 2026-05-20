@@ -1,0 +1,30 @@
+name = "Daggerheart"
+description = "Critical Role's Daggerheart — heroic fantasy with duality dice."
+
+terminology = """
+Use Daggerheart terms: Hope and Fear (and the Fear pool), duality dice, action rolls,
+reaction rolls, advantage/disadvantage, Stress, HP, armor slots, Experiences (and
+when they're tapped), countdown clocks, environments, adversaries.
+"""
+
+capture = """
+- Hope spent and Fear gained (with running totals)
+- Duality outcomes of note (with Hope / with Fear / critical)
+- Experiences invoked and what they accomplished
+- Stress, HP and armor slot changes per PC
+- Countdown clocks advanced or completed
+- Adversaries defeated or spotlighted
+"""
+
+extra_sections = """
+### Hope & Fear Tally
+Hope per PC at session end, plus current GM Fear pool.
+
+### Active Clocks
+List each clock with its current ticks and stakes.
+"""
+
+forbidden_phrases = [
+  "shadowy", "tapestry", "whisper", "realm", "delve",
+  "testament", "threads", "myriad", "pivotal", "vibrant", "bustling"
+]

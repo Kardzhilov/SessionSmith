@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# sessionsmith runtime (Rust)
+target/
+*.gguf
+*.ggml
+output/
+
+# session audio (large files, user-owned)
+audio/
+
+# campaign configs are personal — track only the example
+campaigns/*.toml
+!campaigns/.example.toml

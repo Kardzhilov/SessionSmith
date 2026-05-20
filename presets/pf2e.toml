@@ -1,0 +1,30 @@
+name = "Pathfinder 2e"
+description = "Pathfinder Second Edition."
+
+terminology = """
+Use Pathfinder 2e terms: actions (1/2/3-action costs), reactions, degrees of success
+(critical success/success/failure/critical failure), hero points, focus points,
+conditions (frightened, sickened, off-guard), and the four proficiency tiers.
+"""
+
+capture = """
+- Combat: initiative, MAP usage, critical successes/failures of note
+- Spells, focus spells and incapacitation interactions
+- Loot: items by level, runes, consumables, treasure value
+- XP (count by encounter level) or milestone progress
+- Hero points spent and earned
+- Skill challenges and exploration mode activity
+"""
+
+extra_sections = """
+### Loot & Treasure
+List items with level, gold value, and which PC took ownership.
+
+### Conditions Carried Over
+Lingering conditions, afflictions, or daily preparations still pending.
+"""
+
+forbidden_phrases = [
+  "shadowy", "tapestry", "whisper", "realm", "delve",
+  "testament", "threads", "myriad", "pivotal", "vibrant", "bustling"
+]

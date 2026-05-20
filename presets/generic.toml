@@ -1,0 +1,23 @@
+name = "Generic"
+description = "System-agnostic defaults that work for any TTRPG."
+
+terminology = """
+Use neutral, game-agnostic language. Refer to "checks", "rolls", "successes" and
+"failures" rather than specific dice mechanics.
+"""
+
+capture = """
+- Character actions, motivations and major decisions
+- New NPCs, locations and factions introduced
+- Resources gained or spent (items, currency, favours)
+- Story revelations and active threads
+- Cliffhangers and where the party ended the session
+"""
+
+extra_sections = """
+"""
+
+forbidden_phrases = [
+  "shadowy", "tapestry", "whisper", "realm", "delve",
+  "testament", "threads", "myriad", "pivotal", "vibrant", "bustling"
+]

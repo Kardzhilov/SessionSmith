@@ -1,0 +1,35 @@
+name = "Blades in the Dark"
+description = "Forged-in-the-Dark scoundrels in Doskvol."
+
+terminology = """
+Use Blades terms: position (controlled/risky/desperate), effect (limited/standard/great),
+stress, trauma, devil's bargains, flashbacks, gather information, engagement roll,
+downtime actions (acquire asset, indulge vice, long-term project, recover, reduce heat,
+train). Reference crew and PC playbooks by name.
+"""
+
+capture = """
+- Score: target, plan type, engagement roll outcome
+- Position/effect calls and consequences taken
+- Stress spent, trauma triggered, devil's bargains accepted
+- Heat gained and wanted level changes
+- Coin earned, claims taken, faction status shifts
+- Downtime actions and their outcomes
+"""
+
+extra_sections = """
+### Clocks & Heat
+Active clocks (project, faction, danger) with current ticks, plus heat and
+wanted level after the session.
+
+### Faction Status
+Any +/- shifts in faction standing this session.
+
+### Downtime
+Per PC: actions taken, vice indulged, projects advanced.
+"""
+
+forbidden_phrases = [
+  "shadowy", "tapestry", "whisper", "realm", "delve",
+  "testament", "threads", "myriad", "pivotal", "vibrant", "bustling"
+]
