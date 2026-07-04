@@ -297,6 +297,9 @@ pub struct App {
     pub job_stages: Vec<String>,
     /// When the current job started, for the elapsed-time readout.
     pub job_started: Option<std::time::Instant>,
+    /// Frozen elapsed time of the last-finished job (so the readout stops
+    /// counting once the job is done).
+    pub job_elapsed: Option<std::time::Duration>,
     /// Animation frame counter (advances each draw) for the working spinner.
     pub tick: u64,
     /// Pending model jobs waiting for the current one to finish.
@@ -367,6 +370,7 @@ impl App {
             job_progress: None,
             job_stages: Vec::new(),
             job_started: None,
+            job_elapsed: None,
             tick: 0,
             job_queue: VecDeque::new(),
             models: None,
@@ -660,6 +664,7 @@ impl App {
             self.job_running = false;
             self.job_rx = None;
             self.job_progress = None;
+            self.job_elapsed = self.job_started.map(|s| s.elapsed());
             match &res {
                 Ok(summary) => {
                     self.job_log.push((LogLevel::Ok, summary.clone()));
@@ -715,6 +720,7 @@ impl App {
         self.job_progress = None;
         self.job_stages.clear();
         self.job_started = Some(std::time::Instant::now());
+        self.job_elapsed = None;
         self.job_title = req_kind.title.clone();
         self.status = format!("Running: {}", req_kind.title);
 
@@ -1084,6 +1090,7 @@ impl App {
         self.job_progress = None;
         self.job_stages.clear();
         self.job_started = Some(std::time::Instant::now());
+        self.job_elapsed = None;
         self.job_title = title.clone();
         self.status = format!("Running: {title}");
         jobs::spawn_model(&self.handle, tx, self.global.clone(), job);

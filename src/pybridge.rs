@@ -179,7 +179,10 @@ pub fn run_asr(
         bail!("{} transcription failed:\n{tail}", engine.label());
     }
 
-    let txt = out_prefix.with_extension("txt");
+    // The bridge writes `<out_prefix>.txt` by *string* concatenation, so build
+    // the same path here — `Path::with_extension` would mangle stems that
+    // contain a dot (e.g. `session.part1`).
+    let txt = PathBuf::from(format!("{}.txt", out_prefix.display()));
     if !txt.exists() {
         bail!(
             "{} produced no transcript at {}",

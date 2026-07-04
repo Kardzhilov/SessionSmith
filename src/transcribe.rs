@@ -258,6 +258,11 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
                     // --no_align here. A HF token is required for the pyannote
                     // models; pass it when configured.
                     cmd.arg("--diarize");
+                    // Pin the diarization pipeline to community-1 (much better
+                    // than 3.1, unlimited speakers) rather than relying on the
+                    // whisperX default.
+                    let diar = crate::asr::diarize_spec(crate::asr::DEFAULT_DIARIZE);
+                    cmd.args(["--diarize_model", diar.model_ref]);
                     if let Some(tok) = &hf_token {
                         cmd.args(["--hf_token", tok]);
                     }

@@ -470,10 +470,12 @@ fn draw_welcome(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
 
 fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let elapsed = app
-        .job_started
-        .map(|s| human_time(s.elapsed().as_secs()))
-        .unwrap_or_default();
+    let elapsed = if app.job_running {
+        app.job_started.map(|s| human_time(s.elapsed().as_secs()))
+    } else {
+        app.job_elapsed.map(|d| human_time(d.as_secs()))
+    }
+    .unwrap_or_default();
     let title = if app.job_running {
         let g = SPIN[(app.tick as usize / 2) % SPIN.len()];
         if elapsed.is_empty() {
