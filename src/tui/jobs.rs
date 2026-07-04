@@ -142,6 +142,7 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
 
     for (i, sess) in req.sessions.iter().enumerate() {
         crate::ui::step(i + 1, total, &sess.name);
+        crate::ui::phase(&format!("Transcribe · {}", sess.name));
 
         // Single-file passthrough; multi-file sessions are concatenated.
         let audio_path = if sess.files.len() == 1 {

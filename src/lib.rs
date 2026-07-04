@@ -3,6 +3,7 @@
 //! Library entrypoint exposes the modules used by the binary and tests.
 
 pub mod audio;
+pub mod asr;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -14,6 +15,7 @@ pub mod models;
 pub mod pipeline;
 pub mod presets;
 pub mod prompts;
+pub mod pybridge;
 pub mod session;
 pub mod transcribe;
 pub mod tui;

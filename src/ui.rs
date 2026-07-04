@@ -28,6 +28,9 @@ pub enum UiEvent {
     Progress { label: String, pos: u64, total: u64 },
     /// A background job finished: `Ok(summary)` or `Err(message)`.
     JobDone(std::result::Result<String, String>),
+    /// A high-level pipeline phase started (e.g. `Transcribe`, `Outline`,
+    /// `Notes`, `Campaign log`). Drives the animated stage timeline in the TUI.
+    Phase(String),
 }
 
 static SINK: Lazy<Mutex<Option<UnboundedSender<UiEvent>>>> = Lazy::new(|| Mutex::new(None));
@@ -59,6 +62,15 @@ fn emit(ev: UiEvent) -> bool {
 /// marks the length as unknown.
 pub fn progress(label: &str, pos: u64, total: u64) {
     emit(UiEvent::Progress { label: label.to_string(), pos, total });
+}
+
+/// Announce a high-level pipeline phase. Drives the TUI stage timeline; a no-op
+/// (aside from an info line) on the plain CLI.
+pub fn phase(name: &str) {
+    if emit(UiEvent::Phase(name.to_string())) {
+        return;
+    }
+    println!("\n{} {}", "▶".cyan().bold(), name.bold());
 }
 
 /// Print a bordered panel with a title and body lines.

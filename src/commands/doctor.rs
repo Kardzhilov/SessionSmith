@@ -52,6 +52,7 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
         deps::check_ffprobe(),
         deps::check_whisper_cli(g.asr.binary.as_deref()),
         deps::check_whisper_model(&asr_model, &cache),
+        deps::check_uv(),
     ];
     checks.push(deps::check_backend(&g).await);
 
@@ -68,7 +69,7 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
     g_mut.hardware = Some(hw);
     g_mut.save().ok();
 
-    let any_fail = checks.iter().any(|c| !c.ok);
+    let any_fail = checks.iter().any(|c| !c.ok && !c.name.starts_with("uv"));
     if any_fail {
         ui::warn("Some dependencies are missing. See `sessionsmith models pull <name>` and `sessionsmith init`.");
     } else {

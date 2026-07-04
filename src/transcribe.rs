@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::asr::AsrEngine;
 use crate::config::GlobalConfig;
 use crate::models;
 
@@ -34,6 +35,10 @@ enum AsrBackend {
     /// In-process whisper.cpp via `whisper-rs` (no external process).
     #[cfg(feature = "local-whisper")]
     Local,
+    /// A modern engine run through the `uv` Python bridge (faster-whisper,
+    /// NVIDIA Parakeet / Canary, Voxtral). Carries the engine and its backend
+    /// model reference (HF / NeMo id).
+    Bridge(AsrEngine, String),
 }
 
 impl AsrBackend {
@@ -113,6 +118,37 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     };
     let vad_temp = if asr_input != *audio { Some(asr_input.clone()) } else { None };
 
+    // Modern engines run through the uv Python bridge and write the outputs
+    // themselves.
+    if let AsrBackend::Bridge(engine, model_ref) = &backend {
+        let device = g.asr.device.clone().unwrap_or_else(|| "auto".to_string());
+        let prefix = out_dir.join(&stem);
+        let pb = crate::ui::spinner(&format!(
+            "transcribing {stem} with {} ({})",
+            engine.label(),
+            model_ref
+        ));
+        let res = crate::pybridge::run_asr(
+            *engine,
+            model_ref,
+            &asr_input,
+            &prefix,
+            &device,
+            &opts.language,
+        );
+        pb.finish_and_clear();
+        if let Some(tmp) = &vad_temp {
+            std::fs::remove_file(tmp).ok();
+        }
+        res?;
+        crate::ui::info(&format!("ASR engine: {}", engine.label()));
+        crate::ui::ok(&format!("wrote {}", out_txt.display()));
+        if out_srt.exists() {
+            crate::ui::ok(&format!("wrote {}", out_srt.display()));
+        }
+        return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
+    }
+
     // In-process transcription via whisper-rs — handled entirely here.
     #[cfg(feature = "local-whisper")]
     if matches!(backend, AsrBackend::Local) {
@@ -177,6 +213,16 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
                 .filter(|p| p.exists())
                 .unwrap_or_else(|| binary.clone());
             let use_module = python != *binary; // true when we found a sibling python3
+            let via_uvx = binary.to_str() == Some("uvx:whisperx");
+
+            // whisperX expects a whisper model name; if the configured default
+            // is a non-whisper engine id (e.g. `parakeet-v3`), fall back to
+            // `large-v3` for the diarized transcription.
+            let wx_model: String = if crate::asr::engine_of(&opts.model).is_bridge() {
+                "large-v3".to_string()
+            } else {
+                opts.model.clone()
+            };
 
             let free_mb = free_vram_mb();
             let (device, compute): (&str, &str) = match g.asr.device.as_deref() {
@@ -187,7 +233,14 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             };
 
             let run_whisperx = |device: &str, compute: &str| -> std::io::Result<std::process::Output> {
-                let mut cmd = if use_module {
+                let mut cmd = if via_uvx {
+                    // `uv tool run whisperx …` — ephemeral, auto-installed env.
+                    let uv = crate::pybridge::uv_path()
+                        .unwrap_or_else(|| PathBuf::from("uv"));
+                    let mut c = Command::new(uv);
+                    c.args(["tool", "run", "whisperx"]);
+                    c
+                } else if use_module {
                     let mut c = Command::new(&python);
                     c.args(["-m", "whisperx"]);
                     c
@@ -195,7 +248,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
                     Command::new(binary)
                 };
                 cmd.arg(&asr_input)
-                    .args(["--model", &opts.model])
+                    .args(["--model", &wx_model])
                     .args(["--output_dir", out_dir.to_str().unwrap()])
                     .args(["--output_format", "all"])
                     .args(["--device", device, "--compute_type", compute])
@@ -248,6 +301,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         }
         #[cfg(feature = "local-whisper")]
         AsrBackend::Local => unreachable!("local engine handled before this match"),
+        AsrBackend::Bridge(..) => unreachable!("bridge engine handled before this match"),
     };
 
     spinner.finish_and_clear();
@@ -376,10 +430,22 @@ fn resolve_asr_backend(g: &GlobalConfig, opts: &TranscribeOpts) -> Result<AsrBac
     // Diarization is a whisperX-only capability.
     if opts.diarize {
         return resolve_whisperx(g).ok_or_else(|| anyhow!(
-            "diarization requires whisperX, but it was not found.\n  \
-             Install it (e.g. `python -m venv .venv && .venv/bin/pip install whisperx`) \
-             or disable diarization."
+            "diarization requires whisperX (pyannote community-1).\n  \
+             Install `uv` so it can run automatically \
+             (curl -LsSf https://astral.sh/uv/install.sh | sh), or install whisperX \
+             manually. It also needs a Hugging Face token in [asr] hf_token and \
+             acceptance of the community-1 model terms."
         ));
+    }
+
+    // Modern engines (faster-whisper, Parakeet, Canary, Voxtral) are selected
+    // by the model id and run through the `uv` Python bridge.
+    let engine = crate::asr::engine_of(&opts.model);
+    if engine.is_bridge() {
+        let model_ref = crate::asr::find(&opts.model)
+            .map(|m| m.model_ref.to_string())
+            .unwrap_or_else(|| opts.model.clone());
+        return Ok(AsrBackend::Bridge(engine, model_ref));
     }
 
     match g.asr.engine.as_deref().map(|s| s.to_lowercase()) {
@@ -465,7 +531,15 @@ fn resolve_whisperx(g: &GlobalConfig) -> Option<AsrBackend> {
         let abs = std::fs::canonicalize(venv_wx).unwrap_or_else(|_| venv_wx.to_path_buf());
         return Some(AsrBackend::WhisperX(abs));
     }
-    path_of("whisperx").map(AsrBackend::WhisperX)
+    if let Some(b) = path_of("whisperx") {
+        return Some(AsrBackend::WhisperX(b));
+    }
+    // Last resort: run whisperx ephemerally via `uv` (auto-installs on first
+    // use, like the other bridge engines). Uses pyannote community-1 by default.
+    if crate::pybridge::uv_path().is_some() {
+        return Some(AsrBackend::WhisperX(PathBuf::from("uvx:whisperx")));
+    }
+    None
 }
 
 /// Returns free VRAM in MiB on the first GPU, or 0 if no GPU / nvidia-smi unavailable.

@@ -352,5 +352,36 @@ mod tests {
         terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
         assert!(app.copy_pending.is_some() || !app.job_log.is_empty());
     }
+
+    #[test]
+    fn job_pane_renders_stages_and_bars() {
+        use super::app::LogLevel;
+        let (_rt, mut app) = new_app();
+
+        // Running job with a stage timeline + a determinate transcription bar.
+        app.job_running = true;
+        app.job_title = "Run".into();
+        app.job_started = Some(std::time::Instant::now());
+        app.job_stages = vec![
+            "Transcribe · session1".into(),
+            "Outline".into(),
+            "Notes".into(),
+        ];
+        app.job_progress = Some(("transcribing".into(), 45, 600));
+        app.job_log.push((LogLevel::Step, "Notes".into()));
+        for w in [40u16, 70, 110] {
+            let _ = render_to_buffer(&mut app, w, 24);
+        }
+
+        // Indeterminate (pulse) bar + byte-sized download counter.
+        app.job_progress = Some(("downloading model".into(), 0, 0));
+        let _ = render_to_buffer(&mut app, 80, 24);
+        app.job_progress = Some(("downloading model".into(), 5_000_000, 12_000_000));
+        let _ = render_to_buffer(&mut app, 80, 24);
+
+        // Finished: stages should all read as done without panicking.
+        app.job_running = false;
+        let _ = render_to_buffer(&mut app, 80, 24);
+    }
 }
 

@@ -67,6 +67,7 @@ pub async fn run_notes(
 
     let bullets_path = session.notes_dir.join(Artifact::Bullets.filename());
     let bullets = if want_bullets {
+        crate::ui::phase("Outline");
         if opts.resume && bullets_path.exists() && !opts.force {
             crate::ui::ok(&format!("bullets: reuse {}", bullets_path.display()));
             std::fs::read_to_string(&bullets_path)?
@@ -87,6 +88,7 @@ pub async fn run_notes(
         .collect();
 
     if !derived.is_empty() {
+        crate::ui::phase("Notes");
         let parallel = g.runtime.parallel_passes && backend.name() != "ollama";
         if parallel {
             let mut handles = Vec::new();
@@ -162,6 +164,7 @@ pub async fn run_notes(
 
     // --- Campaign log merge ---
     if opts.update_log {
+        crate::ui::phase("Campaign log");
         let summary_path = session.notes_dir.join(Artifact::Summary.filename());
         if summary_path.exists() {
             let summary = std::fs::read_to_string(&summary_path)?;

@@ -12,7 +12,7 @@ use ratatui::Frame;
 
 use crate::prompts::ALL_ARTIFACTS;
 
-use super::app::{App, LogLevel, Overlay, Pane};
+use super::app::{App, LogLevel, ModelKind, Overlay, Pane};
 use super::markdown;
 use super::theme::Theme;
 
@@ -470,11 +470,21 @@ fn draw_welcome(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
 
 fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let elapsed = app
+        .job_started
+        .map(|s| human_time(s.elapsed().as_secs()))
+        .unwrap_or_default();
     let title = if app.job_running {
         let g = SPIN[(app.tick as usize / 2) % SPIN.len()];
-        format!("Working · {} {g}", app.job_title)
-    } else {
+        if elapsed.is_empty() {
+            format!("Working · {} {g}", app.job_title)
+        } else {
+            format!("Working · {} {g}  ⏱ {elapsed}", app.job_title)
+        }
+    } else if elapsed.is_empty() {
         format!("Job · {}", app.job_title)
+    } else {
+        format!("Job · {}  ✓ {elapsed}", app.job_title)
     };
     let focused = matches!(app.pane, Pane::Content);
     let block = section_block(&title, th, focused);
@@ -482,41 +492,52 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     app.rects.job = area;
     frame.render_widget(block, area);
 
-    // Reserve a row for the progress bar/indicator while one is active.
-    let (bar_area, log_area) = if app.job_progress.is_some() && inner.height > 1 {
-        let parts = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(inner);
-        (Some(parts[0]), parts[1])
-    } else {
-        (None, inner)
-    };
+    // Compose the inner rows: [stage timeline] [progress bar] [log].
+    let has_stages = !app.job_stages.is_empty() && inner.height >= 3;
+    let has_bar = app.job_progress.is_some() && inner.height >= 2;
+    let mut constraints: Vec<Constraint> = Vec::new();
+    if has_stages {
+        constraints.push(Constraint::Length(1));
+    }
+    if has_bar {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(1));
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+    let mut ri = 0;
 
-    if let (Some(bar_area), Some((label, pos, total))) = (bar_area, app.job_progress.clone()) {
-        if total > 0 {
-            let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
-            let gauge = ratatui::widgets::Gauge::default()
-                .gauge_style(th.accent_style())
-                .ratio(ratio)
-                .label(format!(
-                    "{label}  {}/{}",
-                    crate::models::human_bytes(pos),
-                    crate::models::human_bytes(total)
-                ));
-            frame.render_widget(gauge, bar_area);
-        } else {
-            let g = SPIN[(app.tick as usize / 2) % SPIN.len()];
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!("{g} "), th.accent_style()),
-                    Span::styled(label, th.muted_style()),
-                ]))
-                .style(th.base()),
-                bar_area,
-            );
+    // --- Stage timeline -------------------------------------------------
+    if has_stages {
+        let strip = rows[ri];
+        ri += 1;
+        frame.render_widget(stage_timeline(app, th, strip.width as usize), strip);
+    }
+
+    // --- Progress bar ---------------------------------------------------
+    if has_bar {
+        let bar_area = rows[ri];
+        ri += 1;
+        if let Some((label, pos, total)) = app.job_progress.clone() {
+            if total > 0 {
+                let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
+                let pct = (ratio * 100.0).round() as u16;
+                let counts = fmt_counts(&label, pos, total);
+                let gauge = ratatui::widgets::Gauge::default()
+                    .gauge_style(th.accent_style())
+                    .ratio(ratio)
+                    .label(format!("{label}  {counts}  {pct}%"));
+                frame.render_widget(gauge, bar_area);
+            } else {
+                // Indeterminate: a marquee pulse gliding over a dim track.
+                frame.render_widget(pulse_line(&label, bar_area.width as usize, app.tick, th), bar_area);
+            }
         }
     }
+
+    let log_area = rows[ri];
 
     // Wrap every log entry to the inner width so long strings roll over.
     let width = (log_area.width as usize).max(1);
@@ -559,6 +580,119 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             area,
             &mut sb,
         );
+    }
+}
+
+/// Render the animated pipeline stage timeline (e.g.
+/// `✓ Transcribe → ✓ Outline → ◐ Notes`). Older stages are dropped with a
+/// leading ellipsis when the strip is too narrow.
+fn stage_timeline(app: &App, th: &Theme, width: usize) -> Paragraph<'static> {
+    const DOTS: [&str; 4] = ["◐", "◓", "◑", "◒"];
+    struct Seg {
+        sym: String,
+        sym_style: Style,
+        name: String,
+        name_style: Style,
+    }
+    let n = app.job_stages.len();
+    let mut segs: Vec<Seg> = Vec::with_capacity(n);
+    for (i, name) in app.job_stages.iter().enumerate() {
+        let active = app.job_running && i + 1 == n;
+        let (sym, sym_style) = if active {
+            (
+                DOTS[(app.tick as usize / 2) % DOTS.len()].to_string(),
+                th.accent_style().add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("✓".to_string(), th.success_style())
+        };
+        let name_style = if active { th.title_style(false) } else { th.muted_style() };
+        segs.push(Seg { sym, sym_style, name: name.clone(), name_style });
+    }
+
+    let seg_w = |s: &Seg| 2 + s.name.chars().count(); // "SYM NAME"
+    const SEP_W: usize = 3; // " → "
+    let mut start = 0;
+    loop {
+        let mut total = 0usize;
+        for (idx, s) in segs.iter().enumerate().skip(start) {
+            if idx > start {
+                total += SEP_W;
+            }
+            total += seg_w(s);
+        }
+        let prefix = if start > 0 { 2 } else { 0 };
+        if total + prefix <= width || start + 1 >= segs.len().max(1) {
+            break;
+        }
+        start += 1;
+    }
+
+    let mut spans: Vec<Span> = Vec::new();
+    if start > 0 {
+        spans.push(Span::styled("… ".to_string(), th.muted_style()));
+    }
+    for (idx, s) in segs.into_iter().enumerate().skip(start) {
+        if idx > start {
+            spans.push(Span::styled(" → ".to_string(), th.muted_style()));
+        }
+        spans.push(Span::styled(format!("{} ", s.sym), s.sym_style));
+        spans.push(Span::styled(s.name, s.name_style));
+    }
+    Paragraph::new(Line::from(spans)).style(th.base())
+}
+
+/// An indeterminate progress row: a bright block gliding over a dim track,
+/// prefixed by the current label.
+fn pulse_line(label: &str, width: usize, tick: u64, th: &Theme) -> Paragraph<'static> {
+    let prefix = format!("{label} ");
+    let pw = prefix.chars().count();
+    let bar_w = width.saturating_sub(pw).max(4);
+    let win = (bar_w / 4).max(3);
+    let period = (bar_w + win).max(1);
+    let phase = (tick as usize) % period;
+    let mut bar = String::with_capacity(bar_w);
+    for i in 0..bar_w {
+        let pos = phase as isize - win as isize;
+        let bright = (i as isize) >= pos && (i as isize) < pos + win as isize;
+        bar.push(if bright { '█' } else { '░' });
+    }
+    Paragraph::new(Line::from(vec![
+        Span::styled(prefix, th.muted_style()),
+        Span::styled(bar, th.accent_style()),
+    ]))
+    .style(th.base())
+}
+
+/// Format a progress counter, guessing the unit from the label / magnitude:
+/// byte sizes for downloads, `m:ss` for transcription, plain counts otherwise.
+fn fmt_counts(label: &str, pos: u64, total: u64) -> String {
+    if total == 0 {
+        return String::new();
+    }
+    let l = label.to_lowercase();
+    if total >= 1_000_000 || l.contains("download") || l.contains("pull") {
+        format!(
+            "{}/{}",
+            crate::models::human_bytes(pos),
+            crate::models::human_bytes(total)
+        )
+    } else if l.contains("transcrib") {
+        format!("{}/{}", human_time(pos), human_time(total))
+    } else {
+        format!("{pos}/{total}")
+    }
+}
+
+/// Format seconds as `m:ss` (or `h:mm:ss` past an hour).
+fn human_time(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
     }
 }
 
@@ -998,6 +1132,17 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             let sw = size_field.chars().count() as u16;
             spans.push(Span::styled(size_field, th.muted_style()));
             x += sw;
+
+            // ASR bridge engines are prepared lazily by uv — no install/delete
+            // buttons; show the engine tag and allow ⏎ to set as default.
+            if r.kind == ModelKind::Asr {
+                let tag = crate::asr::find(&r.id)
+                    .map(|m| format!("via {}", m.engine.label()))
+                    .unwrap_or_else(|| "via uv".to_string());
+                spans.push(Span::styled(tag, th.accent_style()));
+                lines.push(Line::from(spans));
+                continue;
+            }
 
             // [install/update] button.
             let inst_label = if r.installed { "[ update ]" } else { "[ install ]" };

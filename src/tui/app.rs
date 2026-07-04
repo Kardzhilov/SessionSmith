@@ -156,6 +156,9 @@ pub enum ModelKind {
     #[default]
     Whisper,
     Ollama,
+    /// A modern ASR engine run via the uv bridge (faster-whisper, Parakeet,
+    /// Canary, Voxtral). Selectable as the default; prepared lazily on first use.
+    Asr,
 }
 
 #[derive(Default)]
@@ -289,6 +292,11 @@ pub struct App {
     pub job_follow: bool,
     /// Latest progress update `(label, pos, total)`; `total == 0` = indeterminate.
     pub job_progress: Option<(String, u64, u64)>,
+    /// Ordered high-level pipeline phases seen during the current job (for the
+    /// animated stage timeline). The last entry is the active phase.
+    pub job_stages: Vec<String>,
+    /// When the current job started, for the elapsed-time readout.
+    pub job_started: Option<std::time::Instant>,
     /// Animation frame counter (advances each draw) for the working spinner.
     pub tick: u64,
     /// Pending model jobs waiting for the current one to finish.
@@ -357,6 +365,8 @@ impl App {
             job_scroll: 0,
             job_follow: true,
             job_progress: None,
+            job_stages: Vec::new(),
+            job_started: None,
             tick: 0,
             job_queue: VecDeque::new(),
             models: None,
@@ -635,6 +645,13 @@ impl App {
                     UiEvent::Progress { label, pos, total } => {
                         self.job_progress = Some((label, pos, total));
                     }
+                    UiEvent::Phase(name) => {
+                        if self.job_stages.last().map(|s| s != &name).unwrap_or(true) {
+                            self.job_stages.push(name.clone());
+                        }
+                        self.job_log.push((LogLevel::Step, name));
+                        self.job_progress = None;
+                    }
                     UiEvent::JobDone(res) => done = Some(res),
                 }
             }
@@ -696,6 +713,8 @@ impl App {
         self.job_scroll = 0;
         self.job_follow = true;
         self.job_progress = None;
+        self.job_stages.clear();
+        self.job_started = Some(std::time::Instant::now());
         self.job_title = req_kind.title.clone();
         self.status = format!("Running: {}", req_kind.title);
 
@@ -819,6 +838,25 @@ impl App {
             });
         }
 
+        // --- Advanced ASR engines (via uv bridge; select as default only) ---
+        rows.push(header_row("Transcription (ASR) · advanced engines"));
+        rows.push(col_header_row());
+        for m in crate::asr::ASR_CATALOG {
+            if !m.engine.is_bridge() {
+                continue; // whisper.cpp ggml models are listed above
+            }
+            rows.push(ModelRow {
+                kind: ModelKind::Asr,
+                display: m.display.to_string(),
+                id: m.id.to_string(),
+                installed: false,
+                is_default: m.id == asr_default,
+                size: m.size,
+                released: m.released.to_string(),
+                ..Default::default()
+            });
+        }
+
         // --- Ollama (expandable families) ---
         let llm_default = self.global.backend.model.clone().unwrap_or_default();
         rows.push(header_row("Ollama · language model"));
@@ -931,6 +969,7 @@ impl App {
         let Some((kind, id)) = self.selected_model() else { return };
         match kind {
             ModelKind::Whisper => self.global.asr.model = Some(id.clone()),
+            ModelKind::Asr => self.global.asr.model = Some(id.clone()),
             ModelKind::Ollama => self.global.backend.model = Some(id.clone()),
         }
         self.global.save().ok();
@@ -1014,6 +1053,12 @@ impl App {
             (ModelKind::Whisper, false) => ModelJob::DeleteWhisper(id.clone()),
             (ModelKind::Ollama, true) => ModelJob::PullOllama(id.clone()),
             (ModelKind::Ollama, false) => ModelJob::DeleteOllama(id.clone()),
+            (ModelKind::Asr, _) => {
+                self.status = format!(
+                    "{id}: prepared automatically on first transcription — press ⏎ to set as default"
+                );
+                return;
+            }
         };
         let title = format!("{} {id}", if install { "Install" } else { "Delete" });
         self.enqueue_model_job(job, title);
@@ -1037,6 +1082,8 @@ impl App {
         self.job_scroll = 0;
         self.job_follow = true;
         self.job_progress = None;
+        self.job_stages.clear();
+        self.job_started = Some(std::time::Instant::now());
         self.job_title = title.clone();
         self.status = format!("Running: {title}");
         jobs::spawn_model(&self.handle, tx, self.global.clone(), job);
