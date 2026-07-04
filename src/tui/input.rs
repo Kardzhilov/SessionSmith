@@ -64,6 +64,12 @@ impl App {
             self.open_palette();
             return;
         }
+        // Model manager owns navigation keys while it occupies the content pane.
+        if self.models.is_some() && matches!(self.pane, Pane::Content) {
+            if self.on_key_models_view(key) {
+                return;
+            }
+        }
         // Reorder campaigns (Campaigns pane): Shift+↑/↓ or K/J.
         if matches!(self.pane, Pane::Campaigns) {
             let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -108,6 +114,7 @@ impl App {
             KeyCode::Char('T') => self.dispatch(Action::CycleTheme),
             KeyCode::Char('y') => self.copy_current(),
             KeyCode::Char('s') => self.toggle_select(),
+            KeyCode::Char('m') => self.dispatch(Action::ManageModels),
             KeyCode::Char(c @ '1'..='6') => {
                 let idx = (c as u8 - b'1') as usize;
                 if self.open_session.is_some() && idx < ALL_ARTIFACTS.len() {
@@ -221,6 +228,40 @@ impl App {
                 self.overlay = Overlay::None;
             }
             _ => {}
+        }
+    }
+
+    // ---- model manager (content view) -----------------------------------
+
+    /// Handle a key while the model manager occupies the content pane. Returns
+    /// `true` if the key was consumed (so global keys still work otherwise).
+    fn on_key_models_view(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.models = None;
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.models_move(-1);
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.models_move(1);
+                true
+            }
+            KeyCode::Enter => {
+                self.set_model_default();
+                true
+            }
+            KeyCode::Char('i') => {
+                self.model_action(true);
+                true
+            }
+            KeyCode::Char('d') => {
+                self.model_action(false);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -339,9 +380,9 @@ impl App {
             checked[self.audio_idx] = true;
         }
         let title = match kind {
-            PickerKind::AudioRun => "Run pipeline — space to toggle, ⏎ to run",
+            PickerKind::AudioRun => "Run pipeline — space to toggle, ⏎ to choose artifacts",
             PickerKind::AudioTranscribe => "Transcribe — space to toggle, ⏎ to run",
-            PickerKind::Artifacts => "",
+            PickerKind::Artifacts | PickerKind::RunArtifacts => "",
         }
         .to_string();
         self.overlay = Overlay::Picker(PickerState {
@@ -370,6 +411,34 @@ impl App {
             checked,
             cursor: 0,
             target: Some(target),
+        });
+    }
+
+    /// Artifact picker shown after choosing audio for a full run. Summary is the
+    /// required minimum; the rest can be generated later from the transcript.
+    fn open_run_artifact_picker(&mut self) {
+        let defaults = self.default_artifacts();
+        let items: Vec<String> = ALL_ARTIFACTS
+            .iter()
+            .map(|a| {
+                if *a == Artifact::Summary {
+                    format!("{} (always)", a.label())
+                } else {
+                    a.label().to_string()
+                }
+            })
+            .collect();
+        let checked: Vec<bool> = ALL_ARTIFACTS
+            .iter()
+            .map(|a| *a == Artifact::Summary || defaults.contains(a))
+            .collect();
+        self.overlay = Overlay::Picker(PickerState {
+            title: "Artifacts to create now — space to toggle, ⏎ to run".to_string(),
+            kind: PickerKind::RunArtifacts,
+            items,
+            checked,
+            cursor: 0,
+            target: None,
         });
     }
 
@@ -429,18 +498,44 @@ impl App {
                     self.message("Nothing selected", "Select at least one audio file (space).", true);
                     return;
                 }
-                let (kind, title) = if p.kind == PickerKind::AudioRun {
-                    (JobKind::Run, "Run pipeline")
+                if p.kind == PickerKind::AudioRun {
+                    // Choose which artifacts to generate before running.
+                    self.pending_run_sessions = sessions;
+                    self.open_run_artifact_picker();
                 } else {
-                    (JobKind::Transcribe, "Transcribe")
-                };
+                    self.overlay = Overlay::None;
+                    self.start_job(JobRequestBuilder {
+                        title: "Transcribe".into(),
+                        kind: JobKind::Transcribe,
+                        sessions,
+                        transcripts: Vec::new(),
+                        artifacts: Vec::new(),
+                    });
+                }
+            }
+            PickerKind::RunArtifacts => {
+                let mut artifacts: Vec<Artifact> = ALL_ARTIFACTS
+                    .iter()
+                    .zip(p.checked.iter())
+                    .filter(|(_, &c)| c)
+                    .map(|(a, _)| *a)
+                    .collect();
+                // Summary is the guaranteed minimum.
+                if !artifacts.contains(&Artifact::Summary) {
+                    artifacts.push(Artifact::Summary);
+                }
+                let sessions = std::mem::take(&mut self.pending_run_sessions);
+                if sessions.is_empty() {
+                    self.overlay = Overlay::None;
+                    return;
+                }
                 self.overlay = Overlay::None;
                 self.start_job(JobRequestBuilder {
-                    title: title.into(),
-                    kind,
+                    title: "Run pipeline".into(),
+                    kind: JobKind::Run,
                     sessions,
                     transcripts: Vec::new(),
-                    artifacts: self.default_artifacts(),
+                    artifacts,
                 });
             }
             PickerKind::Artifacts => {
@@ -546,6 +641,7 @@ impl App {
 
     fn open_selected_session(&mut self) {
         if self.session_idx < self.sessions.len() {
+            self.models = None;
             self.viewing_log = false;
             self.open_session = Some(self.session_idx);
             self.artifact_tab = 0;
@@ -555,6 +651,7 @@ impl App {
     }
 
     fn open_log(&mut self) {
+        self.models = None;
         self.viewing_log = true;
         self.open_session = None;
         self.pane = Pane::Content;
@@ -593,6 +690,7 @@ impl App {
                 }
             }
             Action::CycleTheme => self.open_theme_picker(),
+            Action::ManageModels => self.open_models(),
             Action::RebuildLog => self.start_job(JobRequestBuilder {
                 title: "Rebuild campaign log".into(),
                 kind: JobKind::RebuildLog,
@@ -631,7 +729,9 @@ impl App {
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => self.on_click(ev.column, ev.row),
             MouseEventKind::ScrollDown => {
-                if rect_contains(self.rects.job, ev.column, ev.row) {
+                if self.models.is_some() && rect_contains(self.rects.models_pane, ev.column, ev.row) {
+                    self.models_move(1);
+                } else if rect_contains(self.rects.job, ev.column, ev.row) {
                     self.job_scroll_by(3);
                 } else if rect_contains(self.rects.viewer, ev.column, ev.row) {
                     self.scroll_viewer(3);
@@ -640,7 +740,9 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
-                if rect_contains(self.rects.job, ev.column, ev.row) {
+                if self.models.is_some() && rect_contains(self.rects.models_pane, ev.column, ev.row) {
+                    self.models_move(-1);
+                } else if rect_contains(self.rects.job, ev.column, ev.row) {
                     self.job_scroll_by(-3);
                 } else if rect_contains(self.rects.viewer, ev.column, ev.row) {
                     self.scroll_viewer(-3);
@@ -830,6 +932,25 @@ impl App {
                     self.artifact_tab = idx;
                     self.pane = Pane::Content;
                     self.refresh_viewer();
+                }
+            }
+        } else if self.models.is_some() && rect_contains(r.models_pane, col, row) {
+            self.pane = Pane::Content;
+            // A per-row [install]/[delete] button?
+            if let Some((_, _, _, ri, install)) = r
+                .model_buttons
+                .iter()
+                .find(|(a, b, by, _, _)| row == *by && col >= *a && col < *b)
+            {
+                self.model_action_at(*ri, *install);
+            } else if let Some(s) = &mut self.models {
+                // Otherwise select the clicked row.
+                let inner_top = r.models_pane.y;
+                if row >= inner_top {
+                    let ri = s.scroll + (row - inner_top) as usize;
+                    if s.rows.get(ri).map(|x| !x.header).unwrap_or(false) {
+                        s.cursor = ri;
+                    }
                 }
             }
         } else if rect_contains(r.viewer, col, row) {

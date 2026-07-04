@@ -60,6 +60,61 @@ pub fn spawn(handle: &tokio::runtime::Handle, tx: UnboundedSender<UiEvent>, req:
     });
 }
 
+/// A model install/update/delete operation (does not need a campaign).
+pub enum ModelJob {
+    PullWhisper(String),
+    DeleteWhisper(String),
+    PullOllama(String),
+    DeleteOllama(String),
+}
+
+/// Spawn a model-management job.
+pub fn spawn_model(
+    handle: &tokio::runtime::Handle,
+    tx: UnboundedSender<UiEvent>,
+    g: GlobalConfig,
+    job: ModelJob,
+) {
+    let tx2 = tx.clone();
+    handle.spawn(async move {
+        crate::ui::set_event_sink(Some(tx.clone()));
+        let res = run_model(&g, job).await;
+        crate::ui::set_event_sink(None);
+        let _ = tx2.send(UiEvent::JobDone(res.map_err(|e| format!("{e:#}"))));
+    });
+}
+
+async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
+    use crate::models;
+    let base = g
+        .backend
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:11434".into());
+    match job {
+        ModelJob::PullWhisper(id) => {
+            let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
+            crate::ui::header(&format!("Downloading whisper · {id}"));
+            models::download_whisper(&id, &cache).await?;
+            Ok(format!("whisper '{id}' ready"))
+        }
+        ModelJob::DeleteWhisper(id) => {
+            let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
+            models::delete_whisper(&id, &cache)?;
+            Ok(format!("deleted whisper '{id}'"))
+        }
+        ModelJob::PullOllama(name) => {
+            crate::ui::header(&format!("Pulling Ollama model · {name}"));
+            models::ollama_pull_stream(&name, &base).await?;
+            Ok(format!("model '{name}' ready"))
+        }
+        ModelJob::DeleteOllama(name) => {
+            models::ollama_delete(&name, &base).await?;
+            Ok(format!("deleted '{name}'"))
+        }
+    }
+}
+
 async fn run(req: JobRequest) -> anyhow::Result<String> {
     match req.kind {
         JobKind::Run => run_pipeline(req, true).await,

@@ -2,6 +2,7 @@
 //! background work lives in [`super::jobs`].
 
 use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use ratatui::layout::Rect;
@@ -16,7 +17,7 @@ use crate::prompts::{Artifact, ALL_ARTIFACTS};
 use crate::session::SessionInput;
 use crate::ui::UiEvent;
 
-use super::jobs::{self, JobKind, JobRequest};
+use super::jobs::{self, JobKind, JobRequest, ModelJob};
 use super::theme::{self, Theme};
 
 /// Which pane currently has keyboard focus.
@@ -63,6 +64,7 @@ pub enum Action {
     Search,
     NextCampaign,
     CycleTheme,
+    ManageModels,
     RebuildLog,
     SystemCheck,
     Quit,
@@ -79,6 +81,7 @@ impl Action {
             Action::Search => "Search notes",
             Action::NextCampaign => "Switch campaign",
             Action::CycleTheme => "Change theme",
+            Action::ManageModels => "Manage models — install / update / delete",
             Action::RebuildLog => "Rebuild campaign log",
             Action::SystemCheck => "System check (doctor)",
             Action::Quit => "Quit",
@@ -94,6 +97,7 @@ impl Action {
             Action::Search,
             Action::NextCampaign,
             Action::CycleTheme,
+            Action::ManageModels,
             Action::RebuildLog,
             Action::SystemCheck,
             Action::Quit,
@@ -118,6 +122,8 @@ pub enum PickerKind {
     AudioRun,
     AudioTranscribe,
     Artifacts,
+    /// Artifact selection shown after choosing audio for a full run.
+    RunArtifacts,
 }
 
 pub struct PickerState {
@@ -141,6 +147,29 @@ pub enum Overlay {
     Message { title: String, body: String, error: bool },
 }
 
+/// Which family a model row belongs to.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ModelKind {
+    Whisper,
+    Ollama,
+}
+
+pub struct ModelRow {
+    /// A non-selectable section header when true.
+    pub header: bool,
+    pub kind: ModelKind,
+    pub id: String,
+    pub installed: bool,
+    pub is_default: bool,
+    pub size: u64,
+}
+
+pub struct ModelsState {
+    pub rows: Vec<ModelRow>,
+    pub cursor: usize,
+    pub scroll: usize,
+}
+
 #[derive(Default, Clone)]
 pub struct Rects {
     pub campaigns: Rect,
@@ -157,6 +186,10 @@ pub struct Rects {
     pub footer_hits: Vec<(u16, u16, u16, FooterCmd)>,
     /// The live-job log pane.
     pub job: Rect,
+    /// The interactive model-manager content pane (inner area).
+    pub models_pane: Rect,
+    /// Clickable model-row buttons: `(x0, x1, row_y, row_index, install)`.
+    pub model_buttons: Vec<(u16, u16, u16, usize, bool)>,
 }
 
 /// A clickable footer shortcut.
@@ -205,6 +238,8 @@ pub struct App {
     /// True when the viewer is showing the rolling campaign log.
     pub viewing_log: bool,
     pub artifact_tab: usize,
+    /// Audio selected for a run, held while the artifact picker is shown.
+    pub pending_run_sessions: Vec<SessionInput>,
     pub viewer_lines: Vec<String>,
     pub viewer_scroll: u16,
 
@@ -216,6 +251,14 @@ pub struct App {
     pub job_scroll: u16,
     /// When true, the job pane stays pinned to the newest output.
     pub job_follow: bool,
+    /// Latest progress update `(label, pos, total)`; `total == 0` = indeterminate.
+    pub job_progress: Option<(String, u64, u64)>,
+    /// Animation frame counter (advances each draw) for the working spinner.
+    pub tick: u64,
+    /// Pending model jobs waiting for the current one to finish.
+    pub job_queue: VecDeque<(ModelJob, String)>,
+    /// When set, the content area shows the interactive model manager.
+    pub models: Option<ModelsState>,
 
     /// Last known mouse position, for hover highlighting.
     pub hover_col: u16,
@@ -265,6 +308,7 @@ impl App {
             open_session: None,
             viewing_log: false,
             artifact_tab: 0,
+            pending_run_sessions: Vec::new(),
             viewer_lines: Vec::new(),
             viewer_scroll: 0,
             job_running: false,
@@ -273,6 +317,10 @@ impl App {
             job_rx: None,
             job_scroll: 0,
             job_follow: true,
+            job_progress: None,
+            tick: 0,
+            job_queue: VecDeque::new(),
+            models: None,
             hover_col: 0,
             hover_row: 0,
             mouse_enabled: true,
@@ -533,6 +581,9 @@ impl App {
                     UiEvent::Warn(m) => self.job_log.push((LogLevel::Warn, m)),
                     UiEvent::Error(m) => self.job_log.push((LogLevel::Error, m)),
                     UiEvent::Info(m) => self.job_log.push((LogLevel::Info, m)),
+                    UiEvent::Progress { label, pos, total } => {
+                        self.job_progress = Some((label, pos, total));
+                    }
                     UiEvent::JobDone(res) => done = Some(res),
                 }
             }
@@ -540,6 +591,7 @@ impl App {
         if let Some(res) = done {
             self.job_running = false;
             self.job_rx = None;
+            self.job_progress = None;
             match &res {
                 Ok(summary) => {
                     self.job_log.push((LogLevel::Ok, format!("✓ {summary}")));
@@ -554,10 +606,17 @@ impl App {
             let camp_idx = self.campaign_idx;
             self.load_campaign_data();
             self.campaign_idx = camp_idx;
+            if self.models.is_some() {
+                self.refresh_model_rows();
+            }
             if let Some(si) = self.open_session {
                 if si < self.sessions.len() {
                     self.refresh_viewer();
                 }
+            }
+            // Start the next queued model job, if any.
+            if let Some((job, title)) = self.job_queue.pop_front() {
+                self.start_model_job(job, title);
             }
         }
     }
@@ -584,6 +643,7 @@ impl App {
         self.job_log.clear();
         self.job_scroll = 0;
         self.job_follow = true;
+        self.job_progress = None;
         self.job_title = req_kind.title.clone();
         self.status = format!("Running: {}", req_kind.title);
 
@@ -627,6 +687,172 @@ impl App {
         }
         out
     }
+
+    // ---- model management ------------------------------------------------
+
+    /// Open the interactive model manager in the content area (no network, so it
+    /// opens instantly). It stays visible while install/delete jobs run in the
+    /// Working pane, so several can be queued and monitored at once.
+    pub(super) fn open_models(&mut self) {
+        self.viewing_log = false;
+        self.open_session = None;
+        let cursor = self
+            .build_model_rows()
+            .iter()
+            .position(|r| !r.header)
+            .unwrap_or(0);
+        self.models = Some(ModelsState {
+            rows: self.build_model_rows(),
+            cursor,
+            scroll: 0,
+        });
+        self.pane = Pane::Content;
+    }
+
+    fn build_model_rows(&self) -> Vec<ModelRow> {
+        let mut rows: Vec<ModelRow> = Vec::new();
+        let cache = crate::models::whisper_cache_dir(self.global.asr.model_dir.as_deref()).ok();
+        let asr_default = self.global.asr.model.clone().unwrap_or_default();
+
+        rows.push(header_row("Whisper · speech-to-text"));
+        for m in crate::models::WHISPER_MODELS {
+            let installed = cache
+                .as_ref()
+                .and_then(|c| crate::models::whisper_path(m.id, c).ok())
+                .map(|p| p.exists())
+                .unwrap_or(false);
+            let size = cache
+                .as_ref()
+                .and_then(|c| std::fs::metadata(c.join(m.filename)).ok())
+                .map(|md| md.len())
+                .unwrap_or_else(|| crate::models::whisper_approx_size(m.id));
+            rows.push(ModelRow {
+                header: false,
+                kind: ModelKind::Whisper,
+                id: m.id.to_string(),
+                installed,
+                is_default: m.id == asr_default,
+                size,
+            });
+        }
+
+        let llm_default = self.global.backend.model.clone().unwrap_or_default();
+        rows.push(header_row("Ollama · language model"));
+        let mut seen = std::collections::HashSet::new();
+        for (name, size) in crate::models::OLLAMA_KNOWN_SIZES {
+            seen.insert(*name);
+            rows.push(ModelRow {
+                header: false,
+                kind: ModelKind::Ollama,
+                id: (*name).to_string(),
+                installed: false,
+                is_default: *name == llm_default,
+                size: *size,
+            });
+        }
+        if !llm_default.is_empty() && !seen.contains(llm_default.as_str()) {
+            rows.push(ModelRow {
+                header: false,
+                kind: ModelKind::Ollama,
+                id: llm_default,
+                installed: true,
+                is_default: true,
+                size: 0,
+            });
+        }
+        rows
+    }
+
+    /// Move the model-manager cursor by `delta`, skipping section headers.
+    pub(super) fn models_move(&mut self, delta: i32) {
+        let Some(s) = &mut self.models else { return };
+        let n = s.rows.len() as i32;
+        let mut i = s.cursor as i32;
+        loop {
+            i += delta;
+            if i < 0 || i >= n {
+                return;
+            }
+            if !s.rows[i as usize].header {
+                s.cursor = i as usize;
+                return;
+            }
+        }
+    }
+
+    /// The (kind, id) of the highlighted model row, if any.
+    fn selected_model(&self) -> Option<(ModelKind, String)> {
+        let s = self.models.as_ref()?;
+        s.rows.get(s.cursor).filter(|r| !r.header).map(|r| (r.kind, r.id.clone()))
+    }
+
+    /// Set the highlighted model as the default (ASR or LLM) and persist it.
+    pub(super) fn set_model_default(&mut self) {
+        let Some((kind, id)) = self.selected_model() else { return };
+        match kind {
+            ModelKind::Whisper => self.global.asr.model = Some(id.clone()),
+            ModelKind::Ollama => self.global.backend.model = Some(id.clone()),
+        }
+        self.global.save().ok();
+        self.status = format!("Default set: {id} (saved)");
+        self.refresh_model_rows();
+    }
+
+    /// Rebuild rows in place (preserving cursor/scroll) after a change.
+    pub(super) fn refresh_model_rows(&mut self) {
+        let rows = self.build_model_rows();
+        if let Some(s) = &mut self.models {
+            s.cursor = s.cursor.min(rows.len().saturating_sub(1));
+            s.rows = rows;
+        }
+    }
+
+    /// Queue an install/update (`install = true`) or delete of a specific row.
+    pub(super) fn model_action_at(&mut self, row_idx: usize, install: bool) {
+        if let Some(s) = &mut self.models {
+            if row_idx < s.rows.len() && !s.rows[row_idx].header {
+                s.cursor = row_idx;
+            }
+        }
+        self.model_action(install);
+    }
+
+    /// Queue an install/update or delete of the highlighted model. Multiple
+    /// actions can be queued; they run one at a time in the Working pane.
+    pub(super) fn model_action(&mut self, install: bool) {
+        let Some((kind, id)) = self.selected_model() else { return };
+        let job = match (kind, install) {
+            (ModelKind::Whisper, true) => ModelJob::PullWhisper(id.clone()),
+            (ModelKind::Whisper, false) => ModelJob::DeleteWhisper(id.clone()),
+            (ModelKind::Ollama, true) => ModelJob::PullOllama(id.clone()),
+            (ModelKind::Ollama, false) => ModelJob::DeleteOllama(id.clone()),
+        };
+        let title = format!("{} {id}", if install { "Install" } else { "Delete" });
+        self.enqueue_model_job(job, title);
+    }
+
+    fn enqueue_model_job(&mut self, job: ModelJob, title: String) {
+        if self.job_running {
+            self.job_queue.push_back((job, title.clone()));
+            self.status = format!("Queued: {title} ({} in queue)", self.job_queue.len());
+        } else {
+            // Fresh batch — start with a clean log.
+            self.job_log.clear();
+            self.start_model_job(job, title);
+        }
+    }
+
+    fn start_model_job(&mut self, job: ModelJob, title: String) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.job_rx = Some(rx);
+        self.job_running = true;
+        self.job_scroll = 0;
+        self.job_follow = true;
+        self.job_progress = None;
+        self.job_title = title.clone();
+        self.status = format!("Running: {title}");
+        jobs::spawn_model(&self.handle, tx, self.global.clone(), job);
+    }
 }
 
 /// Small builder used to hand a job over to [`App::start_job`].
@@ -643,4 +869,15 @@ fn campaign_stem(path: &std::path::Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+fn header_row(title: &str) -> ModelRow {
+    ModelRow {
+        header: true,
+        kind: ModelKind::Whisper,
+        id: title.to_string(),
+        installed: false,
+        is_default: false,
+        size: 0,
+    }
 }

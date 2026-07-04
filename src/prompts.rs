@@ -141,10 +141,15 @@ const CAMPAIGN_LOG_BASE: &str = "\
 You are maintaining a long-running campaign log. You will be given the current log \
 (or an empty slate) and a new session summary. Produce the COMPLETE updated log:
 
-- Preserve all existing `## Session N — …` sections verbatim and in order.
-- Append a new section for this session with the next index, the date, and a short title.
-- Maintain a `## Ongoing Threads` block at the top, updated to reflect what is now \
-open vs. resolved (add, edit or remove bullets as appropriate).
+- Keep a `## Ongoing Threads` block as the VERY FIRST section, updated to reflect what \
+is now open vs. resolved (add, edit or remove bullets as appropriate).
+- Below Ongoing Threads, list the `## Session N — …` sections in REVERSE chronological \
+order: the most recent session directly under Ongoing Threads, then progressively older \
+sessions, with the oldest at the very bottom.
+- Add a section for this new session with the next-highest index, its date and a short \
+title, placed immediately below Ongoing Threads (above all older sessions).
+- Preserve the content of every existing session section; you may only reorder them so \
+that the newest is on top and the oldest is at the bottom.
 
 Output the entire updated markdown file. No preamble.";
 

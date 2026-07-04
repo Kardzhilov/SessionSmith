@@ -23,6 +23,9 @@ pub enum UiEvent {
     Warn(String),
     Error(String),
     Info(String),
+    /// A determinate/indeterminate progress update. `total == 0` means the
+    /// length is unknown (render as an animated/indeterminate indicator).
+    Progress { label: String, pos: u64, total: u64 },
     /// A background job finished: `Ok(summary)` or `Err(message)`.
     JobDone(std::result::Result<String, String>),
 }
@@ -50,6 +53,12 @@ fn emit(ev: UiEvent) -> bool {
         }
     }
     false
+}
+
+/// Emit a progress update to the TUI (no-op outside the TUI). `total == 0`
+/// marks the length as unknown.
+pub fn progress(label: &str, pos: u64, total: u64) {
+    emit(UiEvent::Progress { label: label.to_string(), pos, total });
 }
 
 /// Print a bordered panel with a title and body lines.

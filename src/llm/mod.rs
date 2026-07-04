@@ -84,15 +84,17 @@ pub async fn collect(
     let mut rx = backend.stream_chat(messages, opts).await?;
     let mut out = String::new();
     let mut tokens = 0usize;
+    let mut last_emit = 0usize;
     while let Some(chunk) = rx.recv().await {
         let chunk = chunk?;
         // Sentinel chunks starting with NUL are spinner-only progress updates
         // (e.g. thinking-token counts from Qwen3). Don't include in output.
         if let Some(rest) = chunk.strip_prefix('\x00') {
-            if let Some(pb) = spinner {
-                if let Some(n) = rest.strip_prefix("thinking:") {
+            if let Some(n) = rest.strip_prefix("thinking:") {
+                if let Some(pb) = spinner {
                     pb.set_message(format!("thinking · ~{n} tokens (reasoning…)"));
                 }
+                crate::ui::progress(&format!("thinking · ~{n} tokens (reasoning…)"), 0, 0);
             }
             continue;
         }
@@ -100,6 +102,11 @@ pub async fn collect(
         out.push_str(&chunk);
         if let Some(pb) = spinner {
             pb.set_message(format!("streaming · ~{tokens} tokens"));
+        }
+        // Throttle progress events to the TUI so we don't flood the channel.
+        if tokens >= last_emit + 16 {
+            last_emit = tokens;
+            crate::ui::progress(&format!("generating · ~{tokens} tokens"), 0, 0);
         }
     }
     Ok(out)

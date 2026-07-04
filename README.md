@@ -48,7 +48,9 @@ output/<campaign>/notes/_campaign-log.md   ← auto‑merged after each session
 
 - 🖥️ **Full‑screen TUI** — a clickable, resizable, themeable terminal app with a
   command palette, live progress, and an in‑app markdown viewer.
-- 🔒 **Local‑first** — Ollama + built‑in whisper.cpp by default. No account, no upload.
+- � **Manage models in‑app** — install, update and delete whisper/Ollama models
+  with a live progress bar, and set defaults that are saved to your config.
+- �🔒 **Local‑first** — Ollama + built‑in whisper.cpp by default. No account, no upload.
 - 🎛️ **System‑aware** — bundled presets for D&D 5e, PF2e, Call of Cthulhu, Blades,
   Daggerheart & more inject the right terminology into every prompt.
 - 🧵 **A living campaign log** — each session is merged into a rolling, arc‑aware log.
@@ -101,6 +103,7 @@ drop in `~/.config/sessionsmith/themes/*.toml`.
 | Command palette | `:` / `Ctrl‑P` | click footer |
 | Search notes | `/` | click footer |
 | Run / transcribe / notes | `r` / `t` / `n` | click footer |
+| Manage models (install/delete/default) | `m` | palette |
 | Copy current view (OSC 52) | `y` | click **copy** |
 | Select mode (native drag‑select) | `s` | click **select** |
 | Open in `$EDITOR` | `e` | — |

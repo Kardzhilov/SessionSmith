@@ -76,12 +76,19 @@ pub async fn download_whisper(id: &str, cache_dir: &Path) -> Result<PathBuf> {
     let mut file = tokio::fs::File::create(&tmp).await?;
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
+    let mut last_emit: u64 = 0;
+    let label = format!("downloading {}", model.filename);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         hasher.update(&chunk);
         file.write_all(&chunk).await?;
         received += chunk.len() as u64;
         pb.set_position(received);
+        // Emit a throttled progress event for the TUI (~every 4 MB).
+        if received >= last_emit + 4_194_304 || received == total {
+            last_emit = received;
+            crate::ui::progress(&label, received, total);
+        }
     }
     file.flush().await?;
     drop(file);
@@ -107,6 +114,111 @@ pub fn ollama_pull(name: &str) -> Result<()> {
         bail!("ollama pull {name} failed");
     }
     Ok(())
+}
+
+/// Delete a downloaded whisper ggml model. No error if it isn't present.
+pub fn delete_whisper(id: &str, cache_dir: &Path) -> Result<()> {
+    let path = whisper_path(id, cache_dir)?;
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("deleting {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Approximate on-disk size of a whisper ggml model, for display before it is
+/// downloaded (bytes).
+pub fn whisper_approx_size(id: &str) -> u64 {
+    match id {
+        "tiny" => 78_000_000,
+        "base" => 148_000_000,
+        "small" => 488_000_000,
+        "medium" => 1_530_000_000,
+        "large-v3" => 3_100_000_000,
+        "large-v3-turbo" => 1_620_000_000,
+        _ => 0,
+    }
+}
+
+/// Pull (or update) an Ollama model over the HTTP API, streaming progress via
+/// [`crate::ui::progress`]. Used by the TUI so nothing writes to the terminal.
+pub async fn ollama_pull_stream(name: &str, base_url: &str) -> Result<()> {
+    let client = reqwest::Client::builder().user_agent("sessionsmith/0.1").build()?;
+    let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "name": name, "stream": true }))
+        .send()
+        .await
+        .with_context(|| format!("POST {url} (is Ollama running?)"))?;
+    if !resp.status().is_success() {
+        bail!("ollama pull {name}: HTTP {}", resp.status());
+    }
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buf.find('\n') {
+            let line: String = buf.drain(..=pos).collect();
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                    bail!("ollama: {err}");
+                }
+                let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("pulling");
+                let completed = v.get("completed").and_then(|s| s.as_u64()).unwrap_or(0);
+                let total = v.get("total").and_then(|s| s.as_u64()).unwrap_or(0);
+                crate::ui::progress(&format!("{name}: {status}"), completed, total);
+            }
+        }
+    }
+    crate::ui::ok(&format!("pulled {name}"));
+    Ok(())
+}
+
+/// Delete an Ollama model over the HTTP API.
+pub async fn ollama_delete(name: &str, base_url: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/delete", base_url.trim_end_matches('/'));
+    let resp = client
+        .delete(&url)
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .with_context(|| format!("DELETE {url} (is Ollama running?)"))?;
+    if !resp.status().is_success() {
+        bail!("ollama delete {name}: HTTP {}", resp.status());
+    }
+    Ok(())
+}
+
+/// Names of Ollama models currently installed locally (via `/api/tags`).
+pub async fn ollama_local_names(base_url: &str) -> Vec<String> {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let mut out = Vec::new();
+    if let Ok(resp) = client.get(&url).send().await {
+        if let Ok(v) = resp.json::<serde_json::Value>().await {
+            if let Some(arr) = v.get("models").and_then(|m| m.as_array()) {
+                for m in arr {
+                    if let Some(n) = m.get("name").and_then(|n| n.as_str()) {
+                        out.push(n.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ use super::theme::Theme;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let th = app.theme().clone();
+    app.tick = app.tick.wrapping_add(1);
 
     // Minimum-size guard.
     if area.width < 44 || area.height < 12 {
@@ -121,8 +122,8 @@ struct FTok {
 }
 
 fn tok_width(t: &FTok) -> u16 {
-    // " {key} " + "{label}  "
-    (3 + t.key.chars().count() + t.label.chars().count() + 2) as u16
+    // Rendered as " {key} " + "{label}  " → (key + 2) + (label + 2).
+    (t.key.chars().count() + 2 + t.label.chars().count() + 2) as u16
 }
 
 fn footer_hints(pane: Pane) -> Vec<FTok> {
@@ -318,17 +319,25 @@ fn draw_content(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         (area, None)
     };
 
-    if app.viewing_log {
+    if app.models.is_some() {
+        draw_models_pane(frame, app, th, main_area);
+        app.rects.tabs = Rect::default();
+        app.rects.viewer = Rect::default();
+        app.rects.tab_ranges.clear();
+    } else if app.viewing_log {
         draw_log_viewer(frame, app, th, main_area);
         app.rects.tabs = Rect::default();
         app.rects.tab_ranges.clear();
+        app.rects.models_pane = Rect::default();
     } else if app.open_session.is_some() {
         draw_viewer(frame, app, th, main_area);
+        app.rects.models_pane = Rect::default();
     } else {
         draw_welcome(frame, app, th, main_area);
         app.rects.tabs = Rect::default();
         app.rects.viewer = Rect::default();
         app.rects.tab_ranges.clear();
+        app.rects.models_pane = Rect::default();
     }
 
     if let Some(job_area) = job_area {
@@ -460,8 +469,10 @@ fn draw_welcome(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
 }
 
 fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
+    const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let title = if app.job_running {
-        format!("Working · {} ⠿", app.job_title)
+        let g = SPIN[(app.tick as usize / 2) % SPIN.len()];
+        format!("Working · {} {g}", app.job_title)
     } else {
         format!("Job · {}", app.job_title)
     };
@@ -471,8 +482,44 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     app.rects.job = area;
     frame.render_widget(block, area);
 
+    // Reserve a row for the progress bar/indicator while one is active.
+    let (bar_area, log_area) = if app.job_progress.is_some() && inner.height > 1 {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        (Some(parts[0]), parts[1])
+    } else {
+        (None, inner)
+    };
+
+    if let (Some(bar_area), Some((label, pos, total))) = (bar_area, app.job_progress.clone()) {
+        if total > 0 {
+            let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
+            let gauge = ratatui::widgets::Gauge::default()
+                .gauge_style(th.accent_style())
+                .ratio(ratio)
+                .label(format!(
+                    "{label}  {}/{}",
+                    crate::models::human_bytes(pos),
+                    crate::models::human_bytes(total)
+                ));
+            frame.render_widget(gauge, bar_area);
+        } else {
+            let g = SPIN[(app.tick as usize / 2) % SPIN.len()];
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{g} "), th.accent_style()),
+                    Span::styled(label, th.muted_style()),
+                ]))
+                .style(th.base()),
+                bar_area,
+            );
+        }
+    }
+
     // Wrap every log entry to the inner width so long strings roll over.
-    let width = (inner.width as usize).max(1);
+    let width = (log_area.width as usize).max(1);
     let mut rows: Vec<Line> = Vec::new();
     for (lvl, msg) in &app.job_log {
         let (sym, style) = match lvl {
@@ -488,7 +535,7 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         }
     }
 
-    let visible = inner.height as usize;
+    let visible = log_area.height as usize;
     let max_off = rows.len().saturating_sub(visible);
     // Re-pin to the bottom when scrolled to (or past) the end.
     if app.job_scroll as usize >= max_off {
@@ -503,7 +550,7 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
 
     let end = (off + visible).min(rows.len());
     let slice: Vec<Line> = rows[off..end].to_vec();
-    frame.render_widget(Paragraph::new(slice).style(th.base()), inner);
+    frame.render_widget(Paragraph::new(slice).style(th.base()), log_area);
 
     if rows.len() > visible {
         let mut sb = ScrollbarState::new(rows.len()).position(off);
@@ -772,6 +819,133 @@ fn draw_theme_picker(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
+    let queued = app.job_queue.len();
+    let title = if queued > 0 {
+        format!("Models — {queued} queued · ⏎ default · i install · d delete · Esc")
+    } else {
+        "Models — ⏎ default · i install · d delete · Esc".to_string()
+    };
+    let focused = matches!(app.pane, Pane::Content);
+    let block = section_block(&title, th, focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.rects.models_pane = inner;
+
+    let visible = inner.height as usize;
+    let (rows_len, _) = {
+        let s = app.models.as_ref().unwrap();
+        (s.rows.len(), s.cursor)
+    };
+    // Keep the cursor visible.
+    if let Some(s) = &mut app.models {
+        if visible > 0 {
+            if s.cursor < s.scroll {
+                s.scroll = s.cursor;
+            } else if s.cursor >= s.scroll + visible {
+                s.scroll = s.cursor + 1 - visible;
+            }
+        }
+        if s.scroll >= rows_len {
+            s.scroll = 0;
+        }
+    }
+    let scroll = app.models.as_ref().unwrap().scroll;
+    let (hc, hr) = (app.hover_col, app.hover_row);
+
+    let mut buttons: Vec<(u16, u16, u16, usize, bool)> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
+    {
+        let s = app.models.as_ref().unwrap();
+        for vi in 0..visible {
+            let ri = scroll + vi;
+            if ri >= s.rows.len() {
+                break;
+            }
+            let r = &s.rows[ri];
+            let y = inner.y + vi as u16;
+            if r.header {
+                lines.push(Line::from(Span::styled(r.id.clone(), th.title_style(true))));
+                continue;
+            }
+            let selected = ri == s.cursor;
+            let mark = if r.is_default {
+                "● "
+            } else if r.installed {
+                "✓ "
+            } else {
+                "· "
+            };
+            let mark_style = if r.is_default {
+                th.accent_style()
+            } else if r.installed {
+                th.success_style()
+            } else {
+                th.muted_style()
+            };
+            let size = if r.size > 0 {
+                crate::models::human_bytes(r.size)
+            } else {
+                String::new()
+            };
+
+            let mut spans: Vec<Span> = Vec::new();
+            let mut x = inner.x;
+            spans.push(Span::styled(if selected { "▸ " } else { "  " }, th.accent_style()));
+            x += 2;
+            spans.push(Span::styled(mark.to_string(), mark_style));
+            x += 2;
+            let id_field = format!("{:<18}", r.id);
+            let idw = id_field.chars().count() as u16;
+            spans.push(Span::styled(
+                id_field,
+                if selected { th.selection() } else { th.base() },
+            ));
+            x += idw;
+            let size_field = format!("{size:>9}  ");
+            let sw = size_field.chars().count() as u16;
+            spans.push(Span::styled(size_field, th.muted_style()));
+            x += sw;
+
+            // [install/update] button.
+            let inst_label = if r.installed { "[ update ]" } else { "[ install ]" };
+            let iw = inst_label.chars().count() as u16;
+            let mut inst_style = th.success_style();
+            if hr == y && hc >= x && hc < x + iw {
+                inst_style = inst_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            }
+            spans.push(Span::styled(inst_label.to_string(), inst_style));
+            buttons.push((x, x + iw, y, ri, true));
+            x += iw;
+            spans.push(Span::raw(" "));
+            x += 1;
+
+            // [delete] button.
+            let del_label = "[ delete ]";
+            let dw = del_label.chars().count() as u16;
+            let mut del_style = th.error_style();
+            if hr == y && hc >= x && hc < x + dw {
+                del_style = del_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            }
+            spans.push(Span::styled(del_label.to_string(), del_style));
+            buttons.push((x, x + dw, y, ri, false));
+
+            lines.push(Line::from(spans));
+        }
+    }
+    app.rects.model_buttons = buttons;
+    frame.render_widget(Paragraph::new(lines).style(th.base()), inner);
+
+    if rows_len > visible {
+        let mut sb = ScrollbarState::new(rows_len).position(scroll);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(th.muted_style()),
+            area,
+            &mut sb,
+        );
+    }
+}
+
 fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
     let rect = centered(area, 64, 80);
     frame.render_widget(Clear, rect);
@@ -785,6 +959,7 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
         ("e", "open current artifact in $EDITOR"),
         ("y", "copy current view to clipboard"),
         ("s", "select mode (mouse off, drag to select)"),
+        ("m", "manage models (install / delete / default)"),
         ("/", "search notes"),
         (": or Ctrl-P", "command palette"),
         ("T", "cycle theme"),
