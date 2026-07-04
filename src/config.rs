@@ -43,10 +43,17 @@ pub struct UiConfig {
     /// appended in alphabetical order.
     #[serde(default)]
     pub campaign_order: Vec<String>,
+    /// Last audio-player volume (0–100). Starts at 50 and persists across runs.
+    #[serde(default = "default_volume")]
+    pub player_volume: u8,
 }
 
 fn default_theme() -> String {
     "midnight".into()
+}
+
+fn default_volume() -> u8 {
+    50
 }
 
 impl Default for UiConfig {
@@ -55,6 +62,7 @@ impl Default for UiConfig {
             theme: default_theme(),
             legacy_menu: false,
             campaign_order: Vec::new(),
+            player_volume: default_volume(),
         }
     }
 }

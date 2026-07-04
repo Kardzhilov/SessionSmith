@@ -1,21 +1,19 @@
 //! Deterministic campaign-log assembly.
 //!
-//! The rolling campaign log is stored as an `## Ongoing Threads` section
-//! followed by one section per session. Each session section is fenced by
-//! HTML-comment markers carrying the session's **stem** as a stable key:
+//! The structured log (per-session entries keyed by their **stem**) is stored
+//! as a JSON sidecar `notes/_campaign-log.json`, which is the source of truth
+//! for deduplication. From it we render a **clean** human-readable
+//! `notes/_campaign-log.md` — no machine markers — for viewing.
 //!
-//! ```text
-//! <!-- ss:session id=DnD1 date=2026-01-01 -->
-//! ## Session 2 — The Drowned Bell (2026-01-01)
-//! ...body...
-//! <!-- ss:end -->
-//! ```
-//!
-//! Keying by stem means re-running the same recording *updates* its section in
-//! place instead of appending a duplicate.
+//! Older logs used inline `<!-- ss:session … -->` HTML-comment markers in the
+//! markdown; [`parse`] still understands them so those files migrate cleanly
+//! into the JSON sidecar on the next update.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// One session's entry in the log.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionBlock {
     /// Session stem — the stable dedup key.
     pub id: String,
@@ -28,15 +26,49 @@ pub struct SessionBlock {
 }
 
 /// A parsed campaign log.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CampaignLog {
     /// Body of the `## Ongoing Threads` section (markdown, no header).
+    #[serde(default)]
     pub threads: String,
     /// Session blocks in file order (newest first).
+    #[serde(default)]
     pub blocks: Vec<SessionBlock>,
 }
 
-/// Whether `text` is in the marker-based v2 format.
+/// Path of the JSON state sidecar (dedup source of truth).
+pub fn state_path(notes_dir: &Path) -> PathBuf {
+    notes_dir.join("_campaign-log.json")
+}
+
+/// Path of the human-readable markdown log.
+pub fn md_path(notes_dir: &Path) -> PathBuf {
+    notes_dir.join("_campaign-log.md")
+}
+
+/// Load the structured log from the JSON sidecar, if present and valid.
+pub fn load_json(notes_dir: &Path) -> Option<CampaignLog> {
+    let text = std::fs::read_to_string(state_path(notes_dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Persist the structured log: write the JSON sidecar **and** a clean markdown
+/// render, each via a temp file + atomic rename.
+pub fn persist(notes_dir: &Path, log: &CampaignLog) -> std::io::Result<()> {
+    std::fs::create_dir_all(notes_dir)?;
+    let json = state_path(notes_dir);
+    let jtmp = json.with_extension("json.tmp");
+    std::fs::write(&jtmp, serde_json::to_string_pretty(log).unwrap_or_default())?;
+    std::fs::rename(&jtmp, &json)?;
+
+    let md = md_path(notes_dir);
+    let mtmp = md.with_extension("md.tmp");
+    std::fs::write(&mtmp, log.render())?;
+    std::fs::rename(&mtmp, &md)?;
+    Ok(())
+}
+
+/// Whether `text` is in the legacy marker-based format.
 pub fn is_v2(text: &str) -> bool {
     text.contains("<!-- ss:session")
 }
@@ -152,7 +184,7 @@ impl CampaignLog {
         self.blocks.iter().find(|b| b.id == id).map(|b| b.body.as_str())
     }
 
-    /// Render the full markdown document.
+    /// Render the clean, human-readable markdown document (no machine markers).
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str("# Campaign Log\n\n");
@@ -167,10 +199,9 @@ impl CampaignLog {
         for (i, b) in self.blocks.iter().enumerate() {
             let num = n - i; // newest first → highest number on top
             out.push('\n');
-            out.push_str(&format!("<!-- ss:session id={} date={} -->\n", b.id, b.date));
             out.push_str(&format!("## Session {num} — {} ({})\n\n", b.title, b.date));
             out.push_str(b.body.trim());
-            out.push_str("\n<!-- ss:end -->\n");
+            out.push('\n');
         }
         out
     }
@@ -194,18 +225,43 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_parse_render() {
+    fn render_is_clean_markdown() {
         let mut log = CampaignLog {
             threads: "- Find the bell".into(),
             ..Default::default()
         };
         log.upsert("DnD1", "2026-01-01", "The Bell".into(), "They found it.".into());
         let text = log.render();
-        assert!(is_v2(&text));
-        let parsed = parse(&text);
+        // No machine markers leak into the human-facing markdown.
+        assert!(!text.contains("<!-- ss:session"), "markers leaked: {text}");
+        assert!(!text.contains("ss:end"), "markers leaked: {text}");
+        assert!(text.contains("## Session 1 — The Bell (2026-01-01)"));
+        assert!(text.contains("They found it."));
+    }
+
+    #[test]
+    fn json_round_trip_preserves_blocks() {
+        let mut log = CampaignLog {
+            threads: "- open thread".into(),
+            ..Default::default()
+        };
+        log.upsert("DnD1", "2026-01-01", "The Bell".into(), "They found it.".into());
+        let json = serde_json::to_string(&log).unwrap();
+        let back: CampaignLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.blocks.len(), 1);
+        assert_eq!(back.blocks[0].id, "DnD1");
+        assert_eq!(back.blocks[0].title, "The Bell");
+        assert!(back.threads.contains("open thread"));
+    }
+
+    #[test]
+    fn legacy_markers_still_parse_for_migration() {
+        let legacy = "# Campaign Log\n\n## Ongoing Threads\n- t\n\n\
+                      <!-- ss:session id=DnD1 date=2026-01-01 -->\n\
+                      ## Session 1 — The Bell (2026-01-01)\n\nBody.\n<!-- ss:end -->\n";
+        assert!(is_v2(legacy));
+        let parsed = parse(legacy);
         assert_eq!(parsed.blocks.len(), 1);
         assert_eq!(parsed.blocks[0].id, "DnD1");
-        assert_eq!(parsed.blocks[0].title, "The Bell");
-        assert!(parsed.threads.contains("Find the bell"));
     }
 }

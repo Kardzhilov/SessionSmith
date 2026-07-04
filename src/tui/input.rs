@@ -53,6 +53,10 @@ impl App {
                 self.on_key_theme_picker(key);
                 return;
             }
+            Overlay::Confirm { .. } => {
+                self.on_key_confirm(key);
+                return;
+            }
             Overlay::None => {}
         }
 
@@ -117,10 +121,21 @@ impl App {
             KeyCode::Char('s') => self.toggle_select(),
             KeyCode::Char('m') => self.dispatch(Action::ManageModels),
             KeyCode::Char('R') => self.dispatch(Action::RerunReplace),
-            KeyCode::Char('p') => self.toggle_play_quote(),
+            KeyCode::Char('p') => self.play_context(),
+            // Audio player transport (active only while something is playing).
+            KeyCode::Char(' ') if self.player.is_some() => self.player_toggle_pause(),
+            KeyCode::Char(',') if self.player.is_some() => self.player_seek(-10.0),
+            KeyCode::Char('.') if self.player.is_some() => self.player_seek(10.0),
+            KeyCode::Char('<') if self.player.is_some() => self.player_seek(-30.0),
+            KeyCode::Char('>') if self.player.is_some() => self.player_seek(30.0),
+            KeyCode::Char('-') if self.player.is_some() => self.player_volume_change(-10),
+            KeyCode::Char('+') | KeyCode::Char('=') if self.player.is_some() => {
+                self.player_volume_change(10)
+            }
+            KeyCode::Char('S') => self.stop_audio(),
+            KeyCode::Esc if self.player.is_some() => self.stop_audio(),
             KeyCode::Char('c') => self.toggle_candidate_view(),
-            KeyCode::Char('a') => self.accept_candidate(),
-            KeyCode::Char('x') => self.discard_candidate(),
+            KeyCode::Char('a') => self.keep_shown_version(),
             KeyCode::Char(c @ '1'..='6') => {
                 let idx = (c as u8 - b'1') as usize;
                 if self.open_session.is_some() && idx < ALL_ARTIFACTS.len() {
@@ -225,6 +240,30 @@ impl App {
                 self.global.save().ok();
                 self.status = format!("Theme: {name}");
                 self.overlay = Overlay::None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle the re-transcribe confirmation prompt. `Y`/Enter re-transcribes,
+    /// `N` keeps the existing transcript, and `Esc` cancels the re-run entirely.
+    fn on_key_confirm(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                self.overlay = Overlay::None;
+                if let Some((target, artifacts, candidate)) = self.pending_rerun.take() {
+                    self.start_rerun(target, artifacts, candidate, true);
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.overlay = Overlay::None;
+                if let Some((target, artifacts, candidate)) = self.pending_rerun.take() {
+                    self.start_rerun(target, artifacts, candidate, false);
+                }
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                self.pending_rerun = None;
             }
             _ => {}
         }
@@ -635,7 +674,20 @@ impl App {
                 }
                 let Some(target) = target else { return };
                 self.overlay = Overlay::None;
-                self.start_rerun(target, artifacts, candidate);
+                // If the ASR model changed since this session was transcribed
+                // (and audio is available), ask whether to re-transcribe.
+                let stem = target.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                if let Some((old_model, new_model)) = self.rerun_model_change(&stem) {
+                    self.pending_rerun = Some((target, artifacts, candidate));
+                    self.overlay = Overlay::Confirm {
+                        title: "Re-transcribe?".into(),
+                        body: format!(
+                            "The audio model changed (was {old_model}, now {new_model}).\n\nRe-transcribe the audio with the new model, or reuse the existing transcript?"
+                        ),
+                    };
+                } else {
+                    self.start_rerun(target, artifacts, candidate, false);
+                }
             }
         }
     }
@@ -673,7 +725,14 @@ impl App {
                 self.audio_idx = step_idx(self.audio_idx, delta, self.audio.len());
                 self.audio_state.select(Some(self.audio_idx));
             }
-            Pane::Content => self.scroll_viewer(delta),
+            Pane::Content => {
+                // In the Quotes tab, arrows move between quotes (highlighting +
+                // scrolling to each); elsewhere they scroll the viewer.
+                if self.viewing_quotes() && self.move_quote(delta) {
+                    return;
+                }
+                self.scroll_viewer(delta);
+            }
         }
     }
 
@@ -773,6 +832,7 @@ impl App {
             Action::UpdateOllama => self.request_ollama_update(),
             Action::RerunReplace => self.open_rerun_picker(false),
             Action::RerunKeepBoth => self.open_rerun_picker(true),
+            Action::ToggleDiarize => self.toggle_diarize(),
             Action::RebuildLog => self.start_job(JobRequestBuilder {
                 title: "Rebuild campaign log".into(),
                 kind: JobKind::RebuildLog,

@@ -68,6 +68,7 @@ pub enum Action {
     UpdateOllama,
     RerunReplace,
     RerunKeepBoth,
+    ToggleDiarize,
     RebuildLog,
     SystemCheck,
     Quit,
@@ -88,6 +89,7 @@ impl Action {
             Action::UpdateOllama => "Update Ollama — run the official installer",
             Action::RerunReplace => "Re-run session — regenerate & replace artifacts",
             Action::RerunKeepBoth => "Re-run session — keep both to compare",
+            Action::ToggleDiarize => "Toggle speaker diarization (on/off)",
             Action::RebuildLog => "Rebuild campaign log",
             Action::SystemCheck => "System check (doctor)",
             Action::Quit => "Quit",
@@ -107,6 +109,7 @@ impl Action {
             Action::UpdateOllama,
             Action::RerunReplace,
             Action::RerunKeepBoth,
+            Action::ToggleDiarize,
             Action::RebuildLog,
             Action::SystemCheck,
             Action::Quit,
@@ -158,6 +161,8 @@ pub enum Overlay {
     /// Theme chooser with live preview. `original` is restored on Esc.
     ThemePicker { cursor: usize, original: usize },
     Message { title: String, body: String, error: bool },
+    /// A yes/no prompt. On confirm, `App::pending_rerun` drives the action.
+    Confirm { title: String, body: String },
 }
 
 /// Which family a model row belongs to.
@@ -264,10 +269,12 @@ pub struct App {
     /// A shell command to run with the TUI suspended (e.g. the Ollama updater):
     /// `(title, command)`.
     pub pending_shell: Option<(String, String)>,
-    /// Background audio player process (ffplay/mpv) for quote playback.
-    pub audio_child: Option<std::process::Child>,
-    /// Human status of the audio player while active (e.g. `▶ 12:34`).
-    pub audio_status: Option<String>,
+    /// Active audio player (quote playback / audio scrubbing), if any.
+    pub player: Option<super::player::Player>,
+
+    /// A re-run awaiting a re-transcribe confirmation:
+    /// `(transcript, artifacts, candidate)`. Set when `Overlay::Confirm` is up.
+    pub pending_rerun: Option<(PathBuf, Vec<Artifact>, bool)>,
 
     pub campaigns: Vec<CampaignEntry>,
     pub campaign_idx: usize,
@@ -298,6 +305,8 @@ pub struct App {
     pub pending_run_sessions: Vec<SessionInput>,
     pub viewer_lines: Vec<String>,
     pub viewer_scroll: u16,
+    /// Selected quote index in the Quotes tab (for navigation + playback).
+    pub quote_idx: usize,
 
     pub job_running: bool,
     pub job_title: String,
@@ -360,8 +369,8 @@ impl App {
             should_quit: false,
             pending_editor: None,
             pending_shell: None,
-            audio_child: None,
-            audio_status: None,
+            player: None,
+            pending_rerun: None,
             campaigns: Vec::new(),
             campaign_idx: 0,
             campaign: None,
@@ -381,6 +390,7 @@ impl App {
             pending_run_sessions: Vec::new(),
             viewer_lines: Vec::new(),
             viewer_scroll: 0,
+            quote_idx: 0,
             job_running: false,
             job_title: String::new(),
             job_log: Vec::new(),
@@ -531,30 +541,52 @@ impl App {
         self.audio_idx = 0;
         self.audio_state.select(if self.audio.is_empty() { None } else { Some(0) });
 
-        // Sessions = existing transcripts + which artifacts exist.
+        // A session exists if it has a transcript OR a notes/<stem>/ directory,
+        // so deleting transcripts doesn't hide sessions whose notes remain.
         let notes_dir = cfg.notes_dir();
-        let mut sessions = Vec::new();
+        let mut stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         if let Ok(rd) = std::fs::read_dir(&tx_dir) {
-            let mut txts: Vec<PathBuf> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
-                .collect();
-            txts.sort_by_key(|p| {
-                std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok())
-            });
-            for t in txts {
-                let stem = t.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                let modified = std::fs::metadata(&t)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                let artifacts = ALL_ARTIFACTS
-                    .iter()
-                    .map(|a| notes_dir.join(&stem).join(a.filename()).exists())
-                    .collect();
-                sessions.push(SessionEntry { stem, transcript: t, modified, artifacts });
+            for p in rd.flatten().map(|e| e.path()) {
+                if p.extension().and_then(|e| e.to_str()) == Some("txt") {
+                    if let Some(s) = p.file_stem().and_then(|s| s.to_str()) {
+                        stems.insert(s.to_string());
+                    }
+                }
             }
         }
+        if let Ok(rd) = std::fs::read_dir(&notes_dir) {
+            for e in rd.flatten() {
+                if e.path().is_dir() {
+                    if let Some(s) = e.file_name().to_str() {
+                        // Skip reserved entries like `_campaign-log.*`.
+                        if !s.starts_with('_') && !s.starts_with('.') {
+                            stems.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let mut sessions: Vec<SessionEntry> = stems
+            .into_iter()
+            .map(|stem| {
+                let transcript = tx_dir.join(format!("{stem}.txt"));
+                let nd = notes_dir.join(&stem);
+                let artifacts: Vec<bool> = ALL_ARTIFACTS
+                    .iter()
+                    .map(|a| nd.join(a.filename()).exists())
+                    .collect();
+                // Newest mtime among the transcript and any artifact.
+                let mut modified = std::fs::metadata(&transcript).and_then(|m| m.modified()).ok();
+                for a in ALL_ARTIFACTS {
+                    if let Ok(m) = std::fs::metadata(nd.join(a.filename())).and_then(|m| m.modified()) {
+                        modified = Some(modified.map_or(m, |cur| cur.max(m)));
+                    }
+                }
+                let modified = modified.unwrap_or(SystemTime::UNIX_EPOCH);
+                SessionEntry { stem, transcript, modified, artifacts }
+            })
+            .collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         self.sessions = sessions;
         self.session_idx = 0;
         // Row 0 is the synthetic "Campaign Log"; default to the latest session.
@@ -581,6 +613,31 @@ impl App {
         self.asr_model()
     }
 
+    /// If re-running `stem` could change the transcript — i.e. the source audio
+    /// is still available *and* the current ASR model differs from the one that
+    /// produced the existing transcript — return `(old_model, new_model)` so the
+    /// caller can prompt the user. Returns `None` when re-transcribing isn't
+    /// possible or wouldn't change anything.
+    pub(super) fn rerun_model_change(&self, stem: &str) -> Option<(String, String)> {
+        let cfg = self.campaign.as_ref()?;
+        let meta = crate::meta::load(&cfg.transcripts_dir(), stem);
+        let has_audio = meta
+            .as_ref()
+            .and_then(|m| m.source_audio.clone())
+            .map(|p| p.exists())
+            .unwrap_or(false)
+            || find_audio_by_stem(&crate::config::audio_dir(), stem).is_some();
+        if !has_audio {
+            return None;
+        }
+        let new_model = self.asr_model();
+        let old_model = meta.map(|m| m.model).filter(|s| !s.is_empty());
+        if old_model.as_deref() == Some(new_model.as_str()) {
+            return None;
+        }
+        Some((old_model.unwrap_or_else(|| "unknown".into()), new_model))
+    }
+
     pub fn backend_summary(&self) -> String {
         let model = self.global.backend.model.clone().unwrap_or_else(|| "(not set)".into());
         format!("{} / {}", self.global.backend.kind, model)
@@ -591,6 +648,7 @@ impl App {
     pub fn refresh_viewer(&mut self) {
         self.viewer_lines.clear();
         self.viewer_scroll = 0;
+        self.quote_idx = 0;
 
         // Campaign log view.
         if self.viewing_log {
@@ -598,7 +656,13 @@ impl App {
             let path = cfg.notes_dir().join("_campaign-log.md");
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
-                    self.viewer_lines = text.lines().map(|l| l.to_string()).collect();
+                    // Hide any legacy machine markers from the reader (files
+                    // written before the clean-render change).
+                    self.viewer_lines = text
+                        .lines()
+                        .filter(|l| !l.trim_start().starts_with("<!-- ss:"))
+                        .map(|l| l.to_string())
+                        .collect();
                     if self.viewer_lines.is_empty() {
                         self.viewer_lines.push("(empty)".into());
                     }
@@ -657,59 +721,177 @@ impl App {
             && ALL_ARTIFACTS[self.artifact_tab] == Artifact::Quotes
     }
 
-    /// Source audio file recorded for the open session, if it still exists.
+    /// Source audio for the open session: the file recorded in metadata, or a
+    /// best-effort match by stem in the audio dir (for sessions transcribed
+    /// before metadata existed).
     fn session_source_audio(&self) -> Option<PathBuf> {
         let si = self.open_session?;
         let sess = self.sessions.get(si)?;
         let cfg = self.campaign.as_ref()?;
-        let meta = crate::meta::load(&cfg.transcripts_dir(), &sess.stem)?;
-        let audio = meta.source_audio?;
-        audio.exists().then_some(audio)
-    }
-
-    /// The first `[HH:MM:SS]` timestamp at or below the current scroll position
-    /// (wrapping to the top), in seconds.
-    fn current_quote_timestamp(&self) -> Option<f64> {
-        let start = (self.viewer_scroll as usize).min(self.viewer_lines.len());
-        self.viewer_lines[start..]
-            .iter()
-            .chain(self.viewer_lines[..start].iter())
-            .find_map(|l| parse_hms_bracket(l))
-    }
-
-    /// Toggle audio playback: stop if playing, else play the source audio from
-    /// the timestamp of the quote nearest the top of the view.
-    pub(super) fn toggle_play_quote(&mut self) {
-        if self.audio_child.is_some() {
-            self.stop_audio();
-            return;
+        // 1) Recorded metadata.
+        if let Some(meta) = crate::meta::load(&cfg.transcripts_dir(), &sess.stem) {
+            if let Some(audio) = meta.source_audio {
+                if audio.exists() {
+                    return Some(audio);
+                }
+            }
         }
+        // 2) Fallback: an audio file in the audio dir whose stem matches.
+        find_audio_by_stem(&crate::config::audio_dir(), &sess.stem)
+    }
+
+    /// All quote positions in the current view as `(line_index, seconds)`,
+    /// in document order.
+    pub(super) fn quote_positions(&self) -> Vec<(usize, f64)> {
+        self.viewer_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| parse_hms_bracket(l).map(|s| (i, s)))
+            .collect()
+    }
+
+    /// Move the selected quote by `delta` (Quotes tab), scrolling it into view.
+    /// Returns false if there are no quotes to navigate.
+    pub(super) fn move_quote(&mut self, delta: i32) -> bool {
+        let positions = self.quote_positions();
+        if positions.is_empty() {
+            return false;
+        }
+        let n = positions.len() as i32;
+        let idx = (self.quote_idx as i32 + delta).clamp(0, n - 1);
+        self.quote_idx = idx as usize;
+        // Scroll so the selected quote (its text line, just above the timestamp)
+        // sits near the top of the viewer.
+        let ts_line = positions[self.quote_idx].0;
+        let top = ts_line.saturating_sub(1);
+        self.viewer_scroll = top as u16;
+        self.status = format!("quote {}/{}  ·  p to play", self.quote_idx + 1, positions.len());
+        true
+    }
+
+    /// The raw line-index range (inclusive) of the selected quote, for
+    /// highlighting: the quote text line and its attribution/timestamp line.
+    pub(super) fn selected_quote_range(&self) -> Option<(usize, usize)> {
+        let positions = self.quote_positions();
+        let (ts_line, _) = positions.get(self.quote_idx).copied()?;
+        Some((ts_line.saturating_sub(1), ts_line))
+    }
+
+    /// The timestamp (seconds) of the currently-selected quote.
+    fn current_quote_timestamp(&self) -> Option<f64> {
+        let positions = self.quote_positions();
+        positions
+            .get(self.quote_idx)
+            .or_else(|| positions.first())
+            .map(|(_, s)| *s)
+    }
+
+    /// `p` in the Quotes view: play the source audio from the timestamp of the
+    /// selected quote. Gives clear feedback on failure.
+    pub(super) fn play_quote_here(&mut self) {
         let Some(secs) = self.current_quote_timestamp() else {
-            self.status = "No timestamp in view to play from".into();
+            self.status =
+                "No [timestamp] in view — re-run Quotes to add timestamps, then try again".into();
             return;
         };
         let Some(audio) = self.session_source_audio() else {
-            self.status = "No source audio recorded for this session (re-transcribe to enable playback)".into();
+            self.status =
+                "No source audio found for this session (looked in metadata and audio/)".into();
             return;
         };
-        match spawn_player(&audio, secs) {
-            Ok(child) => {
-                self.audio_child = Some(child);
-                self.audio_status = Some(format!("▶ {}", fmt_hms(secs)));
-                self.status = format!("▶ playing from {} — press p to stop", fmt_hms(secs));
+        let stem = self
+            .open_session
+            .and_then(|si| self.sessions.get(si))
+            .map(|s| s.stem.clone())
+            .unwrap_or_default();
+        self.start_player(&audio, &stem, secs);
+    }
+
+    /// `p` in the Audio pane: play the highlighted audio file from the start,
+    /// with scrubbing.
+    pub(super) fn play_selected_audio(&mut self) {
+        let Some(f) = self.audio.get(self.audio_idx) else {
+            self.status = "No audio file selected".into();
+            return;
+        };
+        let path = f.path.clone();
+        let label = f.stem();
+        self.start_player(&path, &label, 0.0);
+    }
+
+    /// Start (or restart) the player on `file` at `offset`.
+    fn start_player(&mut self, file: &std::path::Path, label: &str, offset: f64) {
+        let vol = self.global.ui.player_volume;
+        match super::player::Player::start(file, label, offset, vol) {
+            Ok(p) => {
+                self.status = format!(
+                    "▶ {} from {} — space pause · , . seek · - + vol · S stop",
+                    label,
+                    super::player::fmt_time(offset)
+                );
+                self.player = Some(p);
             }
             Err(e) => self.status = format!("audio player unavailable: {e}"),
         }
     }
 
-    /// Stop any active playback.
+    /// Adjust the player volume by `delta` (percent), persisting the new value.
+    pub(super) fn player_volume_change(&mut self, delta: i32) {
+        let cur = self.global.ui.player_volume as i32;
+        let vol = (cur + delta).clamp(0, 100) as u8;
+        self.global.ui.player_volume = vol;
+        self.global.save().ok();
+        if let Some(p) = &mut self.player {
+            p.set_volume(vol);
+        }
+        self.status = format!("🔊 volume {vol}%");
+    }
+
+    /// Pause/resume the active player.
+    pub(super) fn player_toggle_pause(&mut self) {
+        if let Some(p) = &mut self.player {
+            p.toggle_pause();
+            self.status = if p.paused { "⏸ paused".into() } else { "▶ playing".into() };
+        }
+    }
+
+    /// Seek the active player by `delta` seconds.
+    pub(super) fn player_seek(&mut self, delta: f64) {
+        if let Some(p) = &mut self.player {
+            p.seek(delta);
+            self.status = format!("⏩ {}", super::player::fmt_time(p.position()));
+        }
+    }
+
+    /// Stop and drop the active player.
     pub(super) fn stop_audio(&mut self) {
-        if let Some(mut c) = self.audio_child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
+        if self.player.take().is_some() {
             self.status = "⏹ stopped".into();
         }
-        self.audio_status = None;
+    }
+
+    /// `p` dispatcher: play the selected audio (Audio pane), the quote under the
+    /// cursor (Quotes tab), or toggle pause if a player is already running.
+    pub(super) fn play_context(&mut self) {
+        if matches!(self.pane, Pane::Audio) {
+            self.play_selected_audio();
+        } else if self.viewing_quotes() {
+            self.play_quote_here();
+        } else if self.player.is_some() {
+            self.player_toggle_pause();
+        } else {
+            self.status =
+                "Nothing to play here — select an audio file, or open a session's Quotes tab".into();
+        }
+    }
+
+    /// Drop the player once playback has finished on its own (called each tick).
+    pub(super) fn tick_player(&mut self) {
+        if let Some(p) = &mut self.player {
+            if p.finished() {
+                self.player = None;
+            }
+        }
     }
 
     // ---- candidate (keep-both compare) -----------------------------------
@@ -736,7 +918,7 @@ impl App {
         self.candidate_path().map(|p| p.exists()).unwrap_or(false)
     }
 
-    /// Toggle between the kept artifact and its candidate.
+    /// Toggle between the CURRENT (kept) artifact and the NEW candidate.
     pub(super) fn toggle_candidate_view(&mut self) {
         if !self.has_candidate() {
             return;
@@ -744,46 +926,42 @@ impl App {
         self.viewing_candidate = !self.viewing_candidate;
         self.refresh_viewer();
         self.status = if self.viewing_candidate {
-            "showing NEW candidate — a keep · x discard · c compare".into()
+            "showing the NEW version — press k to keep it, or c to compare".into()
         } else {
-            "showing current version — c compare".into()
+            "showing the CURRENT version — press k to keep it, or c to compare".into()
         };
     }
 
-    /// Accept the candidate: replace the kept artifact with it.
-    pub(super) fn accept_candidate(&mut self) {
-        let (Some(cand), Some(real)) = (self.candidate_path(), self.current_artifact_path()) else {
-            return;
-        };
-        if !cand.exists() {
-            return;
-        }
-        if let Err(e) = std::fs::rename(&cand, &real) {
-            self.status = format!("keep failed: {e}");
-            return;
-        }
-        self.viewing_candidate = false;
-        if let (Some(si), tab) = (self.open_session, self.artifact_tab) {
-            if let Some(sess) = self.sessions.get_mut(si) {
-                if let Some(flag) = sess.artifacts.get_mut(tab) {
-                    *flag = true;
-                }
-            }
-        }
-        self.status = "kept new version (candidate promoted)".into();
-        self.refresh_viewer();
-    }
-
-    /// Discard the candidate, keeping the current artifact.
-    pub(super) fn discard_candidate(&mut self) {
+    /// Keep whichever version is currently on screen and remove the other.
+    /// Viewing the NEW candidate → promote it over the current file; viewing the
+    /// CURRENT version → discard the candidate.
+    pub(super) fn keep_shown_version(&mut self) {
         if !self.has_candidate() {
             return;
         }
-        if let Some(cand) = self.candidate_path() {
+        let (Some(cand), Some(real)) = (self.candidate_path(), self.current_artifact_path()) else {
+            return;
+        };
+        if self.viewing_candidate {
+            // Keep the NEW version: replace the current file with the candidate.
+            if let Err(e) = std::fs::rename(&cand, &real) {
+                self.status = format!("keep failed: {e}");
+                return;
+            }
+            if let (Some(si), tab) = (self.open_session, self.artifact_tab) {
+                if let Some(sess) = self.sessions.get_mut(si) {
+                    if let Some(flag) = sess.artifacts.get_mut(tab) {
+                        *flag = true;
+                    }
+                }
+            }
+            self.status = "kept the NEW version".into();
+        } else {
+            // Keep the CURRENT version: throw away the candidate.
             let _ = std::fs::remove_file(&cand);
+            self.status = "kept the CURRENT version".into();
         }
         self.viewing_candidate = false;
-        self.status = "discarded new version".into();
         self.refresh_viewer();
     }
 
@@ -910,16 +1088,18 @@ impl App {
         jobs::spawn(&self.handle, tx, req);
     }
 
-    /// Re-run the pipeline for one existing session. Transcription is reused
-    /// when the ASR model is unchanged (only re-runs if the model differs or
-    /// no audio metadata exists). Regenerates the selected `artifacts`; in
-    /// `candidate` mode they are written as `.candidate` files for comparison
-    /// and the campaign log is left untouched until kept.
+    /// Re-run the pipeline for one existing session. When `retranscribe` is
+    /// true the source audio (metadata or a stem match in the audio dir) is
+    /// re-transcribed with the current model; otherwise the existing transcript
+    /// is reused and only notes are regenerated. Regenerates the selected
+    /// `artifacts`; in `candidate` mode they are written as `.candidate` files
+    /// for comparison and the campaign log is left untouched until kept.
     pub(super) fn start_rerun(
         &mut self,
         transcript: PathBuf,
         artifacts: Vec<Artifact>,
         candidate: bool,
+        retranscribe: bool,
     ) {
         let Some((cfg, preset)) = self.require_ready() else { return };
         let stem = transcript
@@ -927,18 +1107,24 @@ impl App {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        // Source audio (if recorded and still present) lets us re-transcribe
-        // when the model changed; otherwise we work from the existing transcript.
-        let audio = crate::meta::load(&cfg.transcripts_dir(), &stem)
-            .and_then(|m| m.source_audio)
-            .filter(|p| p.exists());
-        let (kind, sessions, transcripts) = match audio {
+        // When re-transcribing, resolve the source audio (recorded metadata or
+        // a stem match in the audio dir). Otherwise reuse the transcript.
+        let audio = if retranscribe {
+            crate::meta::load(&cfg.transcripts_dir(), &stem)
+                .and_then(|m| m.source_audio)
+                .filter(|p| p.exists())
+                .or_else(|| find_audio_by_stem(&crate::config::audio_dir(), &stem))
+        } else {
+            None
+        };
+        let (kind, sessions, transcripts, force_transcribe) = match audio {
             Some(a) => (
                 JobKind::Run,
                 vec![SessionInput { files: vec![a], name: stem.clone() }],
                 Vec::new(),
+                true,
             ),
-            None => (JobKind::Notes, Vec::new(), vec![transcript]),
+            None => (JobKind::Notes, Vec::new(), vec![transcript], false),
         };
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -969,7 +1155,7 @@ impl App {
             transcripts,
             artifacts,
             force: true,          // regenerate the selected artifacts
-            force_transcribe: false, // reuse transcript when the model matches
+            force_transcribe,     // re-transcribe only when the user chose to
             resume: false,
             update_log: !candidate,
             candidate,
@@ -1056,7 +1242,7 @@ impl App {
         // --- Whisper (flat) ---
         let cache = models::whisper_cache_dir(self.global.asr.model_dir.as_deref()).ok();
         let asr_default = self.global.asr.model.clone().unwrap_or_default();
-        rows.push(header_row("Whisper · speech-to-text"));
+        rows.push(header_row("Whisper (built-in, offline) · speech-to-text"));
         rows.push(col_header_row());
         for m in models::WHISPER_MODELS {
             let inst = cache
@@ -1082,7 +1268,7 @@ impl App {
         }
 
         // --- Advanced ASR engines (via uv bridge; select as default only) ---
-        rows.push(header_row("Transcription (ASR) · advanced engines"));
+        rows.push(header_row("Advanced ASR engines (GPU, auto-installed via uv)"));
         rows.push(col_header_row());
         for m in crate::asr::ASR_CATALOG {
             if !m.engine.is_bridge() {
@@ -1092,7 +1278,7 @@ impl App {
                 kind: ModelKind::Asr,
                 display: m.display.to_string(),
                 id: m.id.to_string(),
-                installed: false,
+                installed: crate::asr::is_prepared(m.id),
                 is_default: m.id == asr_default,
                 size: m.size,
                 released: m.released.to_string(),
@@ -1102,7 +1288,7 @@ impl App {
 
         // --- Ollama (expandable families) ---
         let llm_default = self.global.backend.model.clone().unwrap_or_default();
-        rows.push(header_row("Ollama · language model"));
+        rows.push(header_row("Ollama · language models"));
         rows.push(col_header_row());
         let mut known: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for model in models::OLLAMA_CATALOG {
@@ -1262,6 +1448,25 @@ impl App {
         }
     }
 
+    /// Toggle speaker diarization on/off and persist it. Warns when enabling
+    /// without a Hugging Face token (diarization needs one).
+    pub(super) fn toggle_diarize(&mut self) {
+        let on = !self.global.asr.diarize;
+        self.global.asr.diarize = on;
+        self.global.save().ok();
+        if on {
+            if self.global.resolved_hf_token().is_none() {
+                self.status = "Speaker diarization: ON — but set [asr] hf_token (Hugging Face) \
+                     and accept the pyannote community-1 terms, or it will fail"
+                    .into();
+            } else {
+                self.status = "Speaker diarization: ON (whisperX + pyannote community-1)".into();
+            }
+        } else {
+            self.status = "Speaker diarization: OFF".into();
+        }
+    }
+
     /// Queue the Ollama updater to run with the TUI suspended (so it can prompt
     /// for sudo and show output). No-op with a hint on unsupported platforms.
     pub(super) fn request_ollama_update(&mut self) {
@@ -1296,14 +1501,19 @@ impl App {
             (ModelKind::Whisper, false) => ModelJob::DeleteWhisper(id.clone()),
             (ModelKind::Ollama, true) => ModelJob::PullOllama(id.clone()),
             (ModelKind::Ollama, false) => ModelJob::DeleteOllama(id.clone()),
-            (ModelKind::Asr, _) => {
+            (ModelKind::Asr, true) => ModelJob::PrepareAsr(id.clone()),
+            (ModelKind::Asr, false) => {
                 self.status = format!(
-                    "{id}: prepared automatically on first transcription — press ⏎ to set as default"
+                    "{id}: managed by uv — nothing to delete here. Press ⏎ to set as default."
                 );
                 return;
             }
         };
-        let title = format!("{} {id}", if install { "Install" } else { "Delete" });
+        let title = match (kind, install) {
+            (ModelKind::Asr, _) => format!("Prepare {id}"),
+            (_, true) => format!("Install {id}"),
+            (_, false) => format!("Delete {id}"),
+        };
         self.enqueue_model_job(job, title);
     }
 
@@ -1365,52 +1575,29 @@ fn parse_hms_bracket(line: &str) -> Option<f64> {
     Some(secs)
 }
 
-/// Format seconds as `H:MM:SS` (or `M:SS` under an hour).
-fn fmt_hms(secs: f64) -> String {
-    let s = secs as u64;
-    let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{sec:02}")
-    } else {
-        format!("{m}:{sec:02}")
+/// Find an audio file in `audio_dir` whose file stem matches `stem` (used to
+/// locate the source recording for sessions transcribed before metadata
+/// existed). Searches common audio extensions.
+fn find_audio_by_stem(audio_dir: &std::path::Path, stem: &str) -> Option<PathBuf> {
+    let exts = ["wav", "mp3", "m4a", "flac", "ogg", "opus", "aac", "wma", "mp4"];
+    let entries = std::fs::read_dir(audio_dir).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let matches_stem = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s == stem)
+            .unwrap_or(false);
+        let ok_ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| exts.contains(&e.to_lowercase().as_str()))
+            .unwrap_or(false);
+        if matches_stem && ok_ext {
+            return Some(p);
+        }
     }
-}
-
-/// Spawn a detached, headless audio player seeking to `secs`. Prefers `ffplay`
-/// (ships with ffmpeg); falls back to `mpv`.
-fn spawn_player(audio: &std::path::Path, secs: f64) -> std::io::Result<std::process::Child> {
-    use std::process::{Command, Stdio};
-    let bin_exists = |b: &str| {
-        Command::new("sh")
-            .arg("-c")
-            .arg(format!("command -v {b}"))
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    let seek = format!("{secs:.3}");
-    if bin_exists("ffplay") {
-        return Command::new("ffplay")
-            .args(["-nodisp", "-autoexit", "-loglevel", "quiet", "-ss", &seek])
-            .arg(audio)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    if bin_exists("mpv") {
-        return Command::new("mpv")
-            .args(["--no-video", "--really-quiet", &format!("--start={seek}")])
-            .arg(audio)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "no audio player found (install ffmpeg for ffplay, or mpv)",
-    ))
+    None
 }
 
 /// The platform command that installs/updates Ollama, or `None` if we can't

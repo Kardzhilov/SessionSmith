@@ -1,7 +1,7 @@
-//! Dev-only ASR smoke check: transcribe an audio file with a chosen model and
-//! print the transcript. Bypasses campaign setup.
+//! Dev-only ASR smoke check.
 //!
-//! Usage: cargo run --example asr_check -- <audio> [model-id]
+//! Transcribe:  cargo run --example asr_check -- <audio> [model-id]
+//! Prepare:     cargo run --example asr_check -- prepare:<model-id>
 
 use sessionsmith::config::GlobalConfig;
 use sessionsmith::transcribe::{transcribe, TranscribeOpts};
@@ -10,7 +10,22 @@ use std::path::PathBuf;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let audio = PathBuf::from(args.next().expect("usage: asr_check <audio> [model]"));
+    let first = args.next().expect("usage: asr_check <audio|prepare:model> [model]");
+
+    if let Some(id) = first.strip_prefix("prepare:") {
+        let spec = sessionsmith::asr::find(id).expect("unknown ASR model id");
+        sessionsmith::pybridge::run_asr_prepare(spec.engine, spec.model_ref, "auto")?;
+        sessionsmith::asr::mark_prepared(id);
+        println!(
+            "\nprepared {} ({}) — is_prepared={}\n",
+            spec.display,
+            spec.engine.label(),
+            sessionsmith::asr::is_prepared(id)
+        );
+        return Ok(());
+    }
+
+    let audio = PathBuf::from(first);
     let model = args.next().unwrap_or_else(|| "large-v3-turbo".to_string());
 
     let out = std::env::temp_dir().join("ss_asr_check");

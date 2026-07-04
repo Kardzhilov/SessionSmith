@@ -46,11 +46,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(header_h),
             Constraint::Min(0),
+            Constraint::Length(if app.player.is_some() { 1 } else { 0 }),
+            Constraint::Length(if app.status.trim().is_empty() { 0 } else { 1 }),
             Constraint::Length(footer_h),
         ])
         .split(area);
     draw_header(frame, app, &th, rows[0]);
-    draw_footer(frame, app, &th, rows[2]);
+    if app.player.is_some() {
+        draw_player_bar(frame, app, &th, rows[2]);
+    }
+    if !app.status.trim().is_empty() {
+        let line = Line::from(vec![
+            Span::styled(" › ", th.accent_style()),
+            Span::styled(app.status.clone(), th.muted_style()),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(th.base()), rows[3]);
+    }
+    draw_footer(frame, app, &th, rows[4]);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -64,11 +76,58 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Overlay::None => {}
         Overlay::Help => draw_help(frame, &th, area),
         Overlay::Message { .. } => draw_message(frame, app, &th, area),
+        Overlay::Confirm { .. } => draw_confirm(frame, app, &th, area),
         Overlay::Palette(_) => draw_palette(frame, app, &th, area),
         Overlay::Search(_) => draw_search(frame, app, &th, area),
         Overlay::Picker(_) => draw_picker(frame, app, &th, area),
         Overlay::ThemePicker { .. } => draw_theme_picker(frame, app, area),
     }
+}
+
+/// A one-line transport bar for the active audio player: icon, label, elapsed /
+/// total time, and a progress bar. Shown above the footer while playing.
+fn draw_player_bar(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
+    let Some(p) = &app.player else { return };
+    let pos = p.position();
+    let dur = p.duration();
+    let icon = if p.paused { "⏸" } else { "▶" };
+    let label: String = p.label.chars().take(22).collect();
+    let time = if dur > 0.0 {
+        let pct = ((pos / dur).clamp(0.0, 1.0) * 100.0).round() as u16;
+        format!("{} / {}  {pct}%", super::player::fmt_time(pos), super::player::fmt_time(dur))
+    } else {
+        format!("{} / --:--", super::player::fmt_time(pos))
+    };
+    let prefix = format!(" {icon} {label}  {time}  ");
+    let pw = prefix.chars().count();
+    let hint = format!("  🔊 {}%  space ⏯ · , . seek · - + vol · S stop", p.volume);
+    let hw = hint.chars().count();
+    let total = area.width as usize;
+    let bar_w = total.saturating_sub(pw + hw).max(6);
+    let last = bar_w - 1;
+
+    // Progress track with a distinct ● knob at the current position. When the
+    // duration is unknown the knob sweeps back and forth so there's still motion.
+    let played_style = if p.paused { th.muted_style() } else { th.success_style() };
+    let knob_style = th.accent_style().add_modifier(Modifier::BOLD);
+    let knob = if dur > 0.0 {
+        ((pos / dur).clamp(0.0, 1.0) * last as f64).round() as usize
+    } else {
+        let cycle = last.max(1) * 2;
+        let t = (app.tick as usize / 2) % cycle;
+        if t <= last { t } else { cycle - t }
+    }
+    .min(last);
+    let bar_spans = vec![
+        Span::styled("━".repeat(knob), played_style),
+        Span::styled("●".to_string(), knob_style),
+        Span::styled("─".repeat(last - knob), th.muted_style()),
+    ];
+
+    let mut spans = vec![Span::styled(prefix, th.accent_style())];
+    spans.extend(bar_spans);
+    spans.push(Span::styled(hint, th.muted_style()));
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(th.base()), area);
 }
 
 fn draw_header(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
@@ -90,6 +149,10 @@ fn header_lines(app: &App, th: &Theme, width: u16) -> Vec<Line<'static>> {
         (format!("· {campaign}  "), th.muted_style()),
         (format!("{}  ", app.backend_summary()), th.muted_style()),
         (format!("· asr {} ", app.asr_model_label()), th.muted_style()),
+        (
+            format!("· diarize {} ", if app.global.asr.diarize { "on" } else { "off" }),
+            if app.global.asr.diarize { th.success_style() } else { th.muted_style() },
+        ),
     ];
     if !app.mouse_enabled {
         toks.push((
@@ -149,6 +212,19 @@ fn footer_hints(pane: Pane) -> Vec<FTok> {
             mk("r", "run", Some(F::Run)),
             mk(":", "palette", Some(F::Palette)),
             mk("/", "search", Some(F::Search)),
+            mk("?", "help", Some(F::Help)),
+            mk("q", "quit", Some(F::Quit)),
+        ],
+        Pane::Audio => vec![
+            mk("↹", "pane", None),
+            mk("↑↓", "move", None),
+            mk("p", "play", None),
+            mk("⏎", "open", None),
+            mk("r", "run", Some(F::Run)),
+            mk("t", "transcribe", Some(F::Transcribe)),
+            mk("n", "notes", Some(F::Notes)),
+            mk("/", "search", Some(F::Search)),
+            mk(":", "palette", Some(F::Palette)),
             mk("?", "help", Some(F::Help)),
             mk("q", "quit", Some(F::Quit)),
         ],
@@ -404,28 +480,53 @@ fn draw_viewer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .unwrap_or_default();
     let mut title = format!("{} · {}", stem, ALL_ARTIFACTS[app.artifact_tab].filename());
     if app.viewing_quotes() {
-        match &app.audio_status {
-            Some(st) => title.push_str(&format!("  ·  {st} (p stop)")),
-            None => title.push_str("  ·  p play from timestamp"),
+        let quotes = app.quote_positions();
+        if quotes.is_empty() {
+            title.push_str("  ·  (no timestamps — re-run Quotes)");
+        } else {
+            title.push_str(&format!(
+                "  ·  ↑↓ pick quote ({}/{}) · p ▶ play",
+                (app.quote_idx + 1).min(quotes.len()),
+                quotes.len()
+            ));
         }
     }
     if app.has_candidate() {
         if app.viewing_candidate {
-            title.push_str("  ·  ⬢ NEW candidate — a keep · x discard · c compare");
+            title.push_str("  ·  ▶ viewing NEW version — a: keep this (new) · c: compare");
         } else {
-            title.push_str("  ·  ⬢ new candidate ready — c compare · a keep · x discard");
+            title.push_str("  ·  ◀ viewing CURRENT version (a new one is ready) — c: compare · a: keep this");
         }
     }
-    draw_markdown_pane(frame, app, th, parts[1], &title);
+    let highlight = if app.viewing_quotes() {
+        app.selected_quote_range()
+    } else {
+        None
+    };
+    draw_markdown_pane(frame, app, th, parts[1], &title, highlight);
 }
 
 fn draw_log_viewer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
-    draw_markdown_pane(frame, app, th, area, "Campaign Log · _campaign-log.md");
+    draw_markdown_pane(frame, app, th, area, "Campaign Log · _campaign-log.md", None);
 }
 
 /// Render `app.viewer_lines` as markdown into a bordered, scrollable pane.
-fn draw_markdown_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect, title: &str) {
-    let lines = markdown::render_lines(&app.viewer_lines, th);
+/// `highlight` is an inclusive raw-line range to emphasise (the selected quote).
+fn draw_markdown_pane(
+    frame: &mut Frame,
+    app: &mut App,
+    th: &Theme,
+    area: Rect,
+    title: &str,
+    highlight: Option<(usize, usize)>,
+) {
+    let mut lines = markdown::render_lines(&app.viewer_lines, th);
+    if let Some((lo, hi)) = highlight {
+        let sel = Style::default().bg(th.selection_bg);
+        for line in lines.iter_mut().take(hi + 1).skip(lo) {
+            line.style = sel;
+        }
+    }
     let para = Paragraph::new(Text::from(lines))
         .block(section_block(title, th, app.pane == Pane::Content))
         .style(th.base())
@@ -907,6 +1008,30 @@ fn draw_message(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
     frame.render_widget(para, rect);
 }
 
+fn draw_confirm(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
+    let Overlay::Confirm { title, body } = &app.overlay else { return };
+    let rect = centered(area, 54, 34);
+    frame.render_widget(Clear, rect);
+    let mut lines: Vec<Line> = body
+        .split('\n')
+        .map(|l| Line::from(Span::styled(l.to_string(), th.base())))
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Y", th.accent_style().add_modifier(Modifier::BOLD)),
+        Span::styled(" re-transcribe   ", th.muted_style()),
+        Span::styled("N", th.accent_style().add_modifier(Modifier::BOLD)),
+        Span::styled(" keep transcript   ", th.muted_style()),
+        Span::styled("Esc", th.accent_style().add_modifier(Modifier::BOLD)),
+        Span::styled(" cancel", th.muted_style()),
+    ]));
+    let para = Paragraph::new(Text::from(lines))
+        .block(popup_block(title, th))
+        .style(th.base())
+        .wrap(Wrap { trim: true });
+    frame.render_widget(para, rect);
+}
+
 fn draw_theme_picker(frame: &mut Frame, app: &mut App, area: Rect) {
     let cursor = if let Overlay::ThemePicker { cursor, .. } = &app.overlay {
         *cursor
@@ -1148,13 +1273,22 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             spans.push(Span::styled(size_field, th.muted_style()));
             x += sw;
 
-            // ASR bridge engines are prepared lazily by uv — no install/delete
-            // buttons; show the engine tag and allow ⏎ to set as default.
+            // ASR bridge engines are downloaded via uv. Offer an in-app
+            // [ prepare ] action (download env + weights) plus the engine tag;
+            // ⏎ still sets the model as the default.
             if r.kind == ModelKind::Asr {
+                let label = if r.installed { "[ update ]" } else { "[ prepare ]" };
+                let lw = label.chars().count() as u16;
+                let mut st = th.success_style();
+                if hr == y && hc >= x && hc < x + lw {
+                    st = st.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+                }
+                spans.push(Span::styled(label.to_string(), st));
+                buttons.push((x, x + lw, y, ri, true));
                 let tag = crate::asr::find(&r.id)
-                    .map(|m| format!("via {}", m.engine.label()))
-                    .unwrap_or_else(|| "via uv".to_string());
-                spans.push(Span::styled(tag, th.accent_style()));
+                    .map(|m| format!("  via {}", m.engine.label()))
+                    .unwrap_or_else(|| "  via uv".to_string());
+                spans.push(Span::styled(tag, th.muted_style()));
                 lines.push(Line::from(spans));
                 continue;
             }
@@ -1203,7 +1337,7 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
     frame.render_widget(Clear, rect);
     let rows = [
         ("Tab / Shift-Tab", "cycle panes"),
-        ("↑ ↓  /  j k", "move selection · scroll viewer"),
+        ("↑ ↓  /  j k", "move selection · scroll viewer · pick quote (Quotes)"),
         ("← →  /  h l  /  1-6", "switch artifact tab"),
         ("Enter", "open session · switch campaign"),
         ("Shift+↑↓  /  K J", "reorder campaigns (saved)"),
@@ -1214,8 +1348,9 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
         ("s", "select mode (mouse off, drag to select)"),
         ("m", "manage models (install / delete / default)"),
         ("u", "update Ollama (in model manager)"),
-        ("p", "play source audio at a quote's timestamp (Quotes tab)"),
-        ("c / a / x", "compare / keep / discard a re-run candidate"),
+        ("p", "play audio — selected file (Audio) or selected quote (Quotes)"),
+        ("space · , . · - +", "player: pause · seek ∓10s · volume · (S stop)"),
+        ("c / a", "compare re-run versions · keep the one shown"),
         ("/", "search notes"),
         (": or Ctrl-P", "command palette"),
         ("T", "cycle theme"),

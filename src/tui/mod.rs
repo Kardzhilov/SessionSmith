@@ -8,6 +8,7 @@ mod fuzzy;
 mod input;
 mod jobs;
 mod markdown;
+mod player;
 mod screenshots;
 mod theme;
 
@@ -61,6 +62,7 @@ pub async fn run() -> Result<()> {
 fn run_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
     loop {
         app.drain_job_events();
+        app.tick_player();
         terminal.draw(|f| draw::draw(f, app))?;
 
         if event::poll(Duration::from_millis(120))? {

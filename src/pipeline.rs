@@ -267,19 +267,27 @@ async fn update_campaign_log(
     summary: &str,
     chat_opts: &ChatOptions,
 ) -> Result<()> {
-    let log_path = campaign.notes_dir().join("_campaign-log.md");
-    let existing = if log_path.exists() {
-        std::fs::read_to_string(&log_path)?
-    } else {
-        String::new()
-    };
+    let notes_dir = campaign.notes_dir();
+    let md_path = crate::campaign_log::md_path(&notes_dir);
 
-    // Migrate a legacy (pre-marker) log by rebuilding deterministically from all
-    // session summaries — this also collapses any historical duplicates.
-    if !existing.trim().is_empty() && !crate::campaign_log::is_v2(&existing) {
-        crate::ui::info("campaign log: migrating to deduplicated format (rebuild)");
-        return rebuild_campaign_log(g, campaign, preset, chat_opts).await;
-    }
+    // Load the structured state: prefer the JSON sidecar, else migrate a legacy
+    // marker-based markdown, else (unknown/clean legacy md) rebuild from scratch.
+    let mut log = if let Some(state) = crate::campaign_log::load_json(&notes_dir) {
+        state
+    } else if md_path.exists() {
+        let text = std::fs::read_to_string(&md_path).unwrap_or_default();
+        if text.trim().is_empty() {
+            crate::campaign_log::CampaignLog::default()
+        } else if crate::campaign_log::is_v2(&text) {
+            crate::ui::info("campaign log: migrating markers into clean format");
+            crate::campaign_log::parse(&text)
+        } else {
+            crate::ui::info("campaign log: rebuilding to deduplicated format");
+            return rebuild_campaign_log(g, campaign, preset, chat_opts).await;
+        }
+    } else {
+        crate::campaign_log::CampaignLog::default()
+    };
 
     let date = time::OffsetDateTime::now_local()
         .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
@@ -287,8 +295,6 @@ async fn update_campaign_log(
         .to_string();
 
     let backend = llm::build(g)?;
-    let mut log = crate::campaign_log::parse(&existing);
-
     let pb = crate::ui::spinner("campaign log: writing session entry");
     let (title, body) =
         generate_session_entry(backend.as_ref(), chat_opts, campaign, preset, summary, &date)
@@ -301,10 +307,8 @@ async fn update_campaign_log(
     log.threads = threads;
     pb.finish_and_clear();
 
-    let tmp = log_path.with_extension("md.tmp");
-    std::fs::write(&tmp, log.render())?;
-    std::fs::rename(&tmp, &log_path)?;
-    crate::ui::ok(&format!("updated {}", log_path.display()));
+    crate::campaign_log::persist(&notes_dir, &log)?;
+    crate::ui::ok(&format!("updated {}", md_path.display()));
     Ok(())
 }
 
@@ -317,7 +321,6 @@ pub async fn rebuild_campaign_log(
     chat_opts: &ChatOptions,
 ) -> Result<()> {
     let notes_dir = campaign.notes_dir();
-    let log_path = notes_dir.join("_campaign-log.md");
 
     // Collect summaries oldest-first so numbering/threads accumulate correctly.
     let mut sessions: Vec<(String, String, String)> = Vec::new(); // (stem, date, summary)
@@ -364,11 +367,8 @@ pub async fn rebuild_campaign_log(
         crate::ui::ok(&format!("logged {stem}"));
     }
 
-    std::fs::create_dir_all(&notes_dir)?;
-    let tmp = log_path.with_extension("md.tmp");
-    std::fs::write(&tmp, log.render())?;
-    std::fs::rename(&tmp, &log_path)?;
-    crate::ui::ok(&format!("rebuilt {}", log_path.display()));
+    crate::campaign_log::persist(&notes_dir, &log)?;
+    crate::ui::ok(&format!("rebuilt {}", crate::campaign_log::md_path(&notes_dir).display()));
     Ok(())
 }
 

@@ -93,39 +93,124 @@ pub fn run_asr(
     device: &str,
     language: &str,
 ) -> Result<()> {
-    let uv = uv_path().ok_or_else(|| {
+    let (name, contents) = script_for(engine)?;
+    let script = write_script(name, &contents)?;
+    let uv = require_uv(engine)?;
+
+    // NeMo (lhotse) and Voxtral are fragile about input formats — they expect a
+    // decodable 16 kHz mono WAV. Normalise via ffmpeg first; faster-whisper
+    // decodes internally so it keeps the original file.
+    let temp_wav = match engine {
+        AsrEngine::Parakeet | AsrEngine::CanaryQwen | AsrEngine::Voxtral => normalize_audio(audio),
+        AsrEngine::FasterWhisper | AsrEngine::WhisperCpp => None,
+    };
+    let effective_audio = temp_wav.as_deref().unwrap_or(audio);
+
+    let mut cmd = Command::new(&uv);
+    cmd.arg("run").arg("--quiet").arg(&script);
+    cmd.arg("--audio").arg(effective_audio);
+    cmd.arg("--out").arg(out_prefix);
+    cmd.args(["--model", model_ref]);
+    cmd.args(["--device", device]);
+    cmd.args(["--language", language]);
+    if let Some(arch) = arch_of(engine) {
+        cmd.args(["--arch", arch]);
+    }
+    crate::ui::info(&format!(
+        "{} · preparing environment with uv (first run downloads dependencies)…",
+        engine.label()
+    ));
+    let res = stream_uv(engine, &mut cmd);
+    if let Some(tmp) = temp_wav {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res?;
+
+    // The bridge writes `<out_prefix>.txt` by *string* concatenation, so build
+    // the same path here — `Path::with_extension` would mangle stems that
+    // contain a dot (e.g. `session.part1`).
+    let txt = PathBuf::from(format!("{}.txt", out_prefix.display()));
+    if !txt.exists() {
+        bail!(
+            "{} produced no transcript at {}",
+            engine.label(),
+            txt.display()
+        );
+    }
+    Ok(())
+}
+
+/// Convert `audio` to a temporary 16 kHz mono WAV via ffmpeg, returning the temp
+/// path (or `None` if ffmpeg is unavailable/fails, so the caller falls back to
+/// the original file).
+fn normalize_audio(audio: &Path) -> Option<PathBuf> {
+    let stem = audio
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("audio");
+    let mut out = std::env::temp_dir();
+    out.push(format!("ss_bridge_{}_{}.wav", stem, std::process::id()));
+    let status = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-i")
+        .arg(audio)
+        .args(["-ar", "16000", "-ac", "1"])
+        .arg(&out)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    if status.success() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Download the environment + model weights for a bridge engine without
+/// transcribing (the in-app "prepare/install" action).
+pub fn run_asr_prepare(engine: AsrEngine, model_ref: &str, device: &str) -> Result<()> {
+    let (name, contents) = script_for(engine)?;
+    let script = write_script(name, &contents)?;
+    let uv = require_uv(engine)?;
+
+    let mut cmd = Command::new(&uv);
+    cmd.arg("run").arg("--quiet").arg(&script);
+    cmd.args(["--model", model_ref]);
+    cmd.args(["--device", device]);
+    cmd.arg("--prepare");
+    if let Some(arch) = arch_of(engine) {
+        cmd.args(["--arch", arch]);
+    }
+    crate::ui::info(&format!(
+        "{} · downloading environment + weights with uv (this can take a while)…",
+        engine.label()
+    ));
+    stream_uv(engine, &mut cmd)
+}
+
+fn require_uv(engine: AsrEngine) -> Result<PathBuf> {
+    uv_path().ok_or_else(|| {
         anyhow!(
             "`uv` is required to run {} models but was not found.\n  \
              Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh",
             engine.label()
         )
-    })?;
+    })
+}
 
-    let (name, contents) = script_for(engine)?;
-    let script = write_script(name, &contents)?;
-
-    let arch = match engine {
-        AsrEngine::CanaryQwen => "canary",
-        AsrEngine::Parakeet => "parakeet",
-        _ => "",
-    };
-
-    crate::ui::info(&format!(
-        "{} · preparing environment with uv (first run downloads dependencies)…",
-        engine.label()
-    ));
-
-    let mut cmd = Command::new(&uv);
-    cmd.arg("run").arg("--quiet").arg(&script);
-    cmd.arg("--audio").arg(audio);
-    cmd.arg("--out").arg(out_prefix);
-    cmd.args(["--model", model_ref]);
-    cmd.args(["--device", device]);
-    cmd.args(["--language", language]);
-    if !arch.is_empty() {
-        cmd.args(["--arch", arch]);
+fn arch_of(engine: AsrEngine) -> Option<&'static str> {
+    match engine {
+        AsrEngine::CanaryQwen => Some("canary"),
+        AsrEngine::Parakeet => Some("parakeet"),
+        _ => None,
     }
-    // Keep HF caches out of the way of ephemeral uv envs so weights persist.
+}
+
+/// Spawn `cmd` (a `uv run …` bridge invocation), stream its `@@P` progress lines
+/// to the UI, and surface stderr on failure.
+fn stream_uv(engine: AsrEngine, cmd: &mut Command) -> Result<()> {
     cmd.env("PYTHONUNBUFFERED", "1");
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -136,8 +221,7 @@ pub fn run_asr(
     // Track the PID so the Ctrl-C handler can free the GPU immediately.
     crate::transcribe::WHISPERX_PID.store(child.id(), Ordering::Relaxed);
 
-    // Drain stderr on a thread (prevents pipe-buffer deadlock) so we can also
-    // surface it if the run fails.
+    // Drain stderr on a thread (prevents pipe-buffer deadlock).
     let stderr = child.stderr.take();
     let stderr_handle = std::thread::spawn(move || {
         let mut buf = String::new();
@@ -147,7 +231,6 @@ pub fn run_asr(
         buf
     });
 
-    // Parse progress lines from stdout as they arrive.
     if let Some(out) = child.stdout.take() {
         let reader = BufReader::new(out);
         for line in reader.lines().map_while(std::result::Result::ok) {
@@ -155,7 +238,7 @@ pub fn run_asr(
                 let mut it = rest.splitn(3, ' ');
                 let pos = it.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let total = it.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let label = it.next().unwrap_or("transcribing").to_string();
+                let label = it.next().unwrap_or("working").to_string();
                 crate::ui::progress(&label, pos as u64, total as u64);
             }
         }
@@ -176,19 +259,7 @@ pub fn run_asr(
             .rev()
             .collect::<Vec<_>>()
             .join("\n");
-        bail!("{} transcription failed:\n{tail}", engine.label());
-    }
-
-    // The bridge writes `<out_prefix>.txt` by *string* concatenation, so build
-    // the same path here — `Path::with_extension` would mangle stems that
-    // contain a dot (e.g. `session.part1`).
-    let txt = PathBuf::from(format!("{}.txt", out_prefix.display()));
-    if !txt.exists() {
-        bail!(
-            "{} produced no transcript at {}",
-            engine.label(),
-            txt.display()
-        );
+        bail!("{} failed:\n{tail}", engine.label());
     }
     Ok(())
 }
@@ -206,12 +277,15 @@ def emit(pos, total, label):
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--audio", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--audio", default="")
+    ap.add_argument("--out", default="")
     ap.add_argument("--model", required=True)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--language", default="auto")
     ap.add_argument("--arch", default="")
+    # Prepare mode: create the environment and download the model weights, then
+    # exit without transcribing (used by the in-app "prepare" action).
+    ap.add_argument("--prepare", action="store_true")
     return ap.parse_args()
 
 def fmt_ts(seconds):
@@ -292,6 +366,12 @@ def main():
         device = "cuda" if cuda_available() else "cpu"
     elif device == "cuda":
         preload_cuda_libs()
+    if args.prepare:
+        from faster_whisper import WhisperModel
+        emit(0, 0, f"downloading {args.model}")
+        WhisperModel(args.model, device="cpu", compute_type="int8")
+        emit(1, 1, "ready")
+        return
     try:
         out, total = transcribe_with(args.model, device, args.audio, args.language)
     except Exception as e:
@@ -343,21 +423,48 @@ def chunk_indices(total_samples, sr, window_s, overlap_s):
         start += step
 
 def run_parakeet(args):
-    import nemo.collections.asr as nemo_asr
+    import nemo.collections.asr as nemo_asr, soundfile as sf, tempfile, os
     emit(0, 0, f"loading {args.model}")
     m = nemo_asr.models.ASRModel.from_pretrained(model_name=args.model)
-    emit(0, 0, "transcribing (parakeet)")
-    res = m.transcribe([args.audio], timestamps=True)
-    r = res[0]
+    # Reduce encoder peak memory on long inputs (the subsampling conv is the
+    # usual culprit for CUDA OOM on multi-minute audio).
+    try:
+        m.change_subsampling_conv_chunking_factor(1)
+    except Exception:
+        pass
+    try:
+        import torch
+    except Exception:
+        torch = None
+    data, sr = load_audio_16k_mono(args.audio)
+    # Transcribe in bounded windows so VRAM use stays flat regardless of the
+    # total length (a full 3-hour file would otherwise OOM the GPU).
+    windows = list(chunk_indices(len(data), sr, 300.0, 2.0))
+    n = len(windows)
+    tmp = tempfile.mkdtemp(prefix="ss_parakeet_")
     segs = []
-    ts = getattr(r, "timestamp", None)
-    if ts and ts.get("segment"):
-        for s in ts["segment"]:
-            segs.append((s["start"], s["end"], s["segment"]))
-    else:
-        segs.append((0.0, 0.0, getattr(r, "text", str(r))))
+    for i, (a, b) in enumerate(windows):
+        emit(i, n, "transcribing (parakeet)")
+        off = a / sr
+        clip = os.path.join(tmp, f"p{i}.wav")
+        sf.write(clip, data[a:b], sr)
+        res = m.transcribe([clip], timestamps=True)
+        r = res[0]
+        ts = getattr(r, "timestamp", None)
+        if ts and ts.get("segment"):
+            for s in ts["segment"]:
+                segs.append((off + s["start"], off + s["end"], s["segment"]))
+        else:
+            text = getattr(r, "text", str(r))
+            if text:
+                segs.append((off, off, text))
+        if torch is not None:
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
     write_outputs(args.out, segs)
-    emit(1, 1, "done")
+    emit(n, n, "done")
 
 def run_canary(args):
     import numpy as np, soundfile as sf, tempfile, os
@@ -386,6 +493,16 @@ def run_canary(args):
 
 def main():
     args = parse_args()
+    if args.prepare:
+        emit(0, 0, f"downloading {args.model}")
+        if args.arch == "canary":
+            from nemo.collections.speechlm2.models import SALM
+            SALM.from_pretrained(args.model)
+        else:
+            import nemo.collections.asr as nemo_asr
+            nemo_asr.models.ASRModel.from_pretrained(model_name=args.model)
+        emit(1, 1, "ready")
+        return
     if args.arch == "canary":
         run_canary(args)
     else:
@@ -415,6 +532,9 @@ def main():
     model = VoxtralForConditionalGeneration.from_pretrained(
         args.model, torch_dtype=dtype, device_map=device
     )
+    if args.prepare:
+        emit(1, 1, "ready")
+        return
     data, sr = sf.read(args.audio, dtype="float32", always_2d=False)
     if getattr(data, "ndim", 1) > 1:
         data = data.mean(axis=1)

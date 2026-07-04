@@ -72,6 +72,8 @@ pub enum ModelJob {
     DeleteWhisper(String),
     PullOllama(String),
     DeleteOllama(String),
+    /// Download the uv environment + weights for a bridge ASR model (id).
+    PrepareAsr(String),
 }
 
 /// Spawn a model-management job.
@@ -117,6 +119,21 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
         ModelJob::DeleteOllama(name) => {
             models::ollama_delete(&name, &base).await?;
             Ok(format!("deleted '{name}'"))
+        }
+        ModelJob::PrepareAsr(id) => {
+            let spec = crate::asr::find(&id)
+                .ok_or_else(|| anyhow::anyhow!("unknown ASR model '{id}'"))?;
+            crate::ui::header(&format!("Preparing {} · {}", spec.engine.label(), spec.display));
+            let device = g.asr.device.clone().unwrap_or_else(|| "auto".to_string());
+            // Run the blocking uv download off the async runtime.
+            let engine = spec.engine;
+            let model_ref = spec.model_ref.to_string();
+            tokio::task::spawn_blocking(move || {
+                crate::pybridge::run_asr_prepare(engine, &model_ref, &device)
+            })
+            .await??;
+            crate::asr::mark_prepared(&id);
+            Ok(format!("{} ready", spec.display))
         }
     }
 }

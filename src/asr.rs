@@ -213,6 +213,37 @@ pub fn engine_of(id: &str) -> AsrEngine {
 }
 
 // ---------------------------------------------------------------------------
+// "Prepared" markers — record which bridge engines have had their uv env +
+// weights downloaded, so the model manager can show a ready/update state
+// instead of re-preparing blindly every time.
+// ---------------------------------------------------------------------------
+
+fn prepared_dir() -> Option<std::path::PathBuf> {
+    Some(dirs::cache_dir()?.join("sessionsmith").join("asr_prepared"))
+}
+
+fn marker_name(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .collect()
+}
+
+/// Whether model `id` has been prepared (env + weights downloaded) in-app.
+pub fn is_prepared(id: &str) -> bool {
+    prepared_dir()
+        .map(|d| d.join(marker_name(id)).exists())
+        .unwrap_or(false)
+}
+
+/// Record that model `id` has been prepared.
+pub fn mark_prepared(id: &str) {
+    if let Some(d) = prepared_dir() {
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(d.join(marker_name(id)), b"ok\n");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Diarization catalog
 // ---------------------------------------------------------------------------
 
