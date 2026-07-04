@@ -189,6 +189,20 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         }) as i32;
         let use_gpu = !matches!(g.asr.device.as_deref(), Some(d) if d.eq_ignore_ascii_case("cpu"));
 
+        // This build's whisper.cpp may be CPU-only (no `cuda`/`vulkan`/`metal`
+        // feature). On a long recording that means hours of CPU work while the
+        // GPU sits idle — warn and point at the GPU-accelerated alternative.
+        if use_gpu
+            && crate::whisper_local::gpu_label().starts_with("cpu")
+            && crate::hardware::detect().gpu.is_some()
+        {
+            crate::ui::warn(
+                "in-process whisper is running on CPU (this build has no GPU backend) — \
+                 long recordings can take hours. For GPU speed with the same model, pick \
+                 the 'faster-whisper large-v3-turbo' engine, or rebuild with `--features cuda`.",
+            );
+        }
+
         let pb = crate::ui::spinner(&format!("transcribing {stem} with whisper-{} (in-process)", opts.model));
         let result = crate::whisper_local::transcribe_file(model_path, &asr_input, &opts.language, threads, use_gpu);
         pb.finish_and_clear();

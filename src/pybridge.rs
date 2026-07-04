@@ -331,25 +331,34 @@ const FASTER_WHISPER_PY: &str = r#"# /// script
 # ///
 import sys, os, glob
 COMMON
-def preload_cuda_libs():
-    # CTranslate2 dlopen()s libcublas/libcudnn lazily; make the pip-installed
-    # NVIDIA libs discoverable and preload them globally so the GPU path works.
+def ensure_cuda_ld_path():
+    # CTranslate2 dlopen()s libcublas.so.12 / libcudnn*.so by soname, which the
+    # dynamic loader resolves via LD_LIBRARY_PATH — but that env var is only read
+    # at process start, so setting it at runtime is too late. Compute the
+    # pip-installed NVIDIA lib dirs, prepend them, and re-exec ourselves once so
+    # the loader can actually find the CUDA libraries.
+    if os.environ.get("SS_CUDA_REEXEC"):
+        return
     try:
-        import nvidia, ctypes
-        base = os.path.dirname(nvidia.__file__)
-        libdirs = [os.path.join(base, s) for s in ("cublas/lib", "cudnn/lib")]
-        libdirs = [d for d in libdirs if os.path.isdir(d)]
-        if libdirs:
-            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
-                libdirs + [os.environ.get("LD_LIBRARY_PATH", "")])
-        for d in libdirs:
-            for so in sorted(glob.glob(os.path.join(d, "*.so*"))):
-                try:
-                    ctypes.CDLL(so, mode=ctypes.RTLD_GLOBAL)
-                except OSError:
-                    pass
+        import nvidia
+        # `nvidia` is a namespace package (no __init__), so __file__ is None —
+        # use __path__ to find the per-library `lib` dirs (cublas, cudnn, ...).
+        libdirs = []
+        for base in list(getattr(nvidia, "__path__", [])):
+            for d in os.listdir(base):
+                p = os.path.join(base, d, "lib")
+                if os.path.isdir(p):
+                    libdirs.append(p)
     except Exception:
-        pass
+        libdirs = []
+    if not libdirs:
+        return
+    cur = os.environ.get("LD_LIBRARY_PATH", "")
+    new = os.pathsep.join(libdirs + ([cur] if cur else []))
+    if new != cur:
+        os.environ["LD_LIBRARY_PATH"] = new
+        os.environ["SS_CUDA_REEXEC"] = "1"
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 def cuda_available():
     try:
@@ -375,11 +384,11 @@ def transcribe_with(model_name, device, audio, language):
 def main():
     args = parse_args()
     device = args.device
+    # Make CUDA libs discoverable (re-execs once) before probing / loading.
+    if device in ("auto", "cuda", ""):
+        ensure_cuda_ld_path()
     if device in ("auto", ""):
-        preload_cuda_libs()
         device = "cuda" if cuda_available() else "cpu"
-    elif device == "cuda":
-        preload_cuda_libs()
     if args.prepare:
         from faster_whisper import WhisperModel
         emit(0, 0, f"downloading {args.model}")
