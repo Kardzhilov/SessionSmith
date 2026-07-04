@@ -250,7 +250,19 @@ impl App {
                 true
             }
             KeyCode::Enter => {
-                self.set_model_default();
+                if self.selected_is_family() {
+                    self.toggle_models_expand();
+                } else {
+                    self.set_model_default();
+                }
+                true
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.selected_is_family() => {
+                self.toggle_models_expand();
+                true
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.selected_is_family() => {
+                self.toggle_models_expand();
                 true
             }
             KeyCode::Char('i') => {
@@ -259,6 +271,10 @@ impl App {
             }
             KeyCode::Char('d') => {
                 self.model_action(false);
+                true
+            }
+            KeyCode::Char('u') => {
+                self.request_ollama_update();
                 true
             }
             _ => false,
@@ -691,6 +707,7 @@ impl App {
             }
             Action::CycleTheme => self.open_theme_picker(),
             Action::ManageModels => self.open_models(),
+            Action::UpdateOllama => self.request_ollama_update(),
             Action::RebuildLog => self.start_job(JobRequestBuilder {
                 title: "Rebuild campaign log".into(),
                 kind: JobKind::RebuildLog,
@@ -943,14 +960,23 @@ impl App {
                 .find(|(a, b, by, _, _)| row == *by && col >= *a && col < *b)
             {
                 self.model_action_at(*ri, *install);
-            } else if let Some(s) = &mut self.models {
-                // Otherwise select the clicked row.
+            } else {
+                // Otherwise select the clicked row; toggle it if it's a family.
                 let inner_top = r.models_pane.y;
-                if row >= inner_top {
-                    let ri = s.scroll + (row - inner_top) as usize;
-                    if s.rows.get(ri).map(|x| !x.header).unwrap_or(false) {
-                        s.cursor = ri;
+                let mut toggle = false;
+                if let Some(s) = &mut self.models {
+                    if row >= inner_top {
+                        let ri = s.scroll + (row - inner_top) as usize;
+                        if let Some(rw) = s.rows.get(ri) {
+                            if rw.selectable() {
+                                s.cursor = ri;
+                                toggle = rw.family;
+                            }
+                        }
                     }
+                }
+                if toggle {
+                    self.toggle_models_expand();
                 }
             }
         } else if rect_contains(r.viewer, col, row) {

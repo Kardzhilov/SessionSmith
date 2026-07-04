@@ -11,17 +11,19 @@ pub struct WhisperModel {
     pub filename: &'static str,
     /// SHA-256 of the ggml file (lowercase hex). Empty string disables verification.
     pub sha256: &'static str,
+    /// Approximate public release date (`YYYY-MM`) for the "age at a glance" column.
+    pub released: &'static str,
 }
 
 // Hashes intentionally left empty by default; verification runs only when set.
 // Users can pin hashes in their own forks if they want strict supply-chain checks.
 pub const WHISPER_MODELS: &[WhisperModel] = &[
-    WhisperModel { id: "tiny",            filename: "ggml-tiny.bin",            sha256: "" },
-    WhisperModel { id: "base",            filename: "ggml-base.bin",            sha256: "" },
-    WhisperModel { id: "small",           filename: "ggml-small.bin",           sha256: "" },
-    WhisperModel { id: "medium",          filename: "ggml-medium.bin",          sha256: "" },
-    WhisperModel { id: "large-v3",        filename: "ggml-large-v3.bin",        sha256: "" },
-    WhisperModel { id: "large-v3-turbo",  filename: "ggml-large-v3-turbo.bin",  sha256: "" },
+    WhisperModel { id: "tiny",            filename: "ggml-tiny.bin",            sha256: "", released: "2022-09" },
+    WhisperModel { id: "base",            filename: "ggml-base.bin",            sha256: "", released: "2022-09" },
+    WhisperModel { id: "small",           filename: "ggml-small.bin",           sha256: "", released: "2022-09" },
+    WhisperModel { id: "medium",          filename: "ggml-medium.bin",          sha256: "", released: "2022-09" },
+    WhisperModel { id: "large-v3",        filename: "ggml-large-v3.bin",        sha256: "", released: "2023-11" },
+    WhisperModel { id: "large-v3-turbo",  filename: "ggml-large-v3-turbo.bin",  sha256: "", released: "2024-10" },
 ];
 
 const HF_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
@@ -116,6 +118,98 @@ pub fn ollama_pull(name: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Curated Ollama LLM catalog for the model manager. Each model may offer
+// several installable options (parameter-size variants). Cloud-only tags are
+// deliberately excluded. Pull ids are used verbatim with `ollama pull`.
+// ---------------------------------------------------------------------------
+
+pub struct OllamaOption {
+    /// Short label shown when the model is expanded (e.g. `"9b"`).
+    pub label: &'static str,
+    /// The exact id passed to `ollama pull`.
+    pub pull: &'static str,
+    /// Approximate download size in bytes (refined from Ollama after a pull).
+    pub size: u64,
+}
+
+pub struct OllamaModel {
+    pub display: &'static str,
+    pub released: &'static str,
+    pub options: &'static [OllamaOption],
+}
+
+pub const OLLAMA_CATALOG: &[OllamaModel] = &[
+    OllamaModel {
+        display: "qwen3.5",
+        released: "2026-03",
+        options: &[
+            OllamaOption { label: "0.8b", pull: "qwen3.5:0.8b", size: 1_000_000_000 },
+            OllamaOption { label: "2b", pull: "qwen3.5:2b", size: 2_700_000_000 },
+            OllamaOption { label: "4b", pull: "qwen3.5:4b", size: 3_400_000_000 },
+            OllamaOption { label: "9b", pull: "qwen3.5:9b", size: 6_600_000_000 },
+            OllamaOption { label: "27b", pull: "qwen3.5:27b", size: 17_000_000_000 },
+            OllamaOption { label: "35b", pull: "qwen3.5:35b", size: 24_000_000_000 },
+            OllamaOption { label: "122b", pull: "qwen3.5:122b", size: 81_000_000_000 },
+        ],
+    },
+    OllamaModel {
+        display: "ornith",
+        released: "2026-06",
+        options: &[
+            OllamaOption { label: "9b", pull: "ornith:9b", size: 5_600_000_000 },
+            OllamaOption { label: "35b", pull: "ornith:35b", size: 21_000_000_000 },
+        ],
+    },
+    OllamaModel {
+        display: "Agents-A1",
+        released: "2026-06",
+        options: &[OllamaOption {
+            label: "35b Q4_K_M",
+            pull: "hf.co/InternScience/Agents-A1-Q4_K_M-GGUF",
+            size: 22_800_000_000,
+        }],
+    },
+    OllamaModel {
+        display: "llama3.3",
+        released: "2024-12",
+        options: &[OllamaOption { label: "70b", pull: "llama3.3:70b", size: 43_000_000_000 }],
+    },
+    OllamaModel {
+        display: "llama3.2",
+        released: "2024-09",
+        options: &[
+            OllamaOption { label: "1b", pull: "llama3.2:1b", size: 1_300_000_000 },
+            OllamaOption { label: "3b", pull: "llama3.2:3b", size: 2_000_000_000 },
+        ],
+    },
+    OllamaModel {
+        display: "gemma3",
+        released: "2025-03",
+        options: &[
+            OllamaOption { label: "4b", pull: "gemma3:4b", size: 3_300_000_000 },
+            OllamaOption { label: "12b", pull: "gemma3:12b", size: 8_100_000_000 },
+            OllamaOption { label: "27b", pull: "gemma3:27b", size: 17_000_000_000 },
+        ],
+    },
+    OllamaModel {
+        display: "mistral",
+        released: "2023-09",
+        options: &[OllamaOption { label: "7b", pull: "mistral:7b", size: 4_100_000_000 }],
+    },
+    OllamaModel {
+        display: "phi4",
+        released: "2024-12",
+        options: &[OllamaOption { label: "14b", pull: "phi4:14b", size: 9_100_000_000 }],
+    },
+    OllamaModel {
+        display: "phi4-mini",
+        released: "2025-02",
+        options: &[OllamaOption { label: "3.8b", pull: "phi4-mini:3.8b", size: 2_500_000_000 }],
+    },
+];
+
+
 /// Delete a downloaded whisper ggml model. No error if it isn't present.
 pub fn delete_whisper(id: &str, cache_dir: &Path) -> Result<()> {
     let path = whisper_path(id, cache_dir)?;
@@ -167,6 +261,13 @@ pub async fn ollama_pull_stream(name: &str, base_url: &str) -> Result<()> {
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
                 if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                    if err.contains("requires a newer version") || err.contains("412") {
+                        bail!(
+                            "Ollama is out of date for this model — press 'u' in the \
+                             model manager (or the command palette → Update Ollama) to \
+                             update it, then try again. ({err})"
+                        );
+                    }
                     bail!("ollama: {err}");
                 }
                 let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("pulling");
@@ -198,6 +299,15 @@ pub async fn ollama_delete(name: &str, base_url: &str) -> Result<()> {
 
 /// Names of Ollama models currently installed locally (via `/api/tags`).
 pub async fn ollama_local_names(base_url: &str) -> Vec<String> {
+    ollama_local_models(base_url)
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// Locally-installed Ollama models with their on-disk size (via `/api/tags`).
+pub async fn ollama_local_models(base_url: &str) -> Vec<(String, u64)> {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
@@ -212,7 +322,8 @@ pub async fn ollama_local_names(base_url: &str) -> Vec<String> {
             if let Some(arr) = v.get("models").and_then(|m| m.as_array()) {
                 for m in arr {
                     if let Some(n) = m.get("name").and_then(|n| n.as_str()) {
-                        out.push(n.to_string());
+                        let size = m.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+                        out.push((n.to_string(), size));
                     }
                 }
             }
@@ -242,7 +353,52 @@ pub const OLLAMA_KNOWN_SIZES: &[(&str, u64)] = &[
     ("mistral:7b",   4_100_000_000),
     ("phi4:14b",     9_100_000_000),
     ("phi4-mini:3.8b", 2_500_000_000),
+    // HuggingFace GGUF models, pulled via Ollama's `hf.co/` prefix. Sizes are the
+    // Q4_K_M build; they refine from Ollama after a pull.
+    ("hf.co/InternScience/Agents-A1-Q4_K_M-GGUF", 22_800_000_000),
+    ("hf.co/deepreinforce-ai/Ornith-1.0-35B-GGUF", 22_760_000_000),
 ];
+
+/// Approximate public release date (`YYYY-MM`) per known model, for the model
+/// manager's age column. `"—"` when unknown.
+pub const OLLAMA_RELEASED: &[(&str, &str)] = &[
+    ("qwen2.5:0.5b", "2024-09"),
+    ("qwen2.5:1.5b", "2024-09"),
+    ("qwen2.5:3b", "2024-09"),
+    ("qwen2.5:7b", "2024-09"),
+    ("qwen2.5:14b", "2024-09"),
+    ("qwen2.5:32b", "2024-09"),
+    ("qwen2.5:72b", "2024-09"),
+    ("llama3.3:70b", "2024-12"),
+    ("llama3.2:3b", "2024-09"),
+    ("llama3.2:1b", "2024-09"),
+    ("gemma3:4b", "2025-03"),
+    ("gemma3:12b", "2025-03"),
+    ("gemma3:27b", "2025-03"),
+    ("mistral:7b", "2023-09"),
+    ("phi4:14b", "2024-12"),
+    ("phi4-mini:3.8b", "2025-02"),
+    ("hf.co/InternScience/Agents-A1-Q4_K_M-GGUF", "2026-06"),
+    ("hf.co/deepreinforce-ai/Ornith-1.0-35B-GGUF", "2026-06"),
+];
+
+/// Release date (`YYYY-MM`) of an Ollama model, or `"—"` if unknown.
+pub fn ollama_released(name: &str) -> &'static str {
+    OLLAMA_RELEASED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, d)| *d)
+        .unwrap_or("—")
+}
+
+/// Release date (`YYYY-MM`) of a whisper model, or `"—"` if unknown.
+pub fn whisper_released(id: &str) -> &'static str {
+    WHISPER_MODELS
+        .iter()
+        .find(|m| m.id == id)
+        .map(|m| m.released)
+        .unwrap_or("—")
+}
 
 /// Fetch the actual file size of a whisper ggml model via HTTP HEAD on HuggingFace.
 /// Returns `None` on network error or if Content-Length is absent.

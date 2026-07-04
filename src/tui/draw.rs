@@ -822,17 +822,47 @@ fn draw_theme_picker(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let queued = app.job_queue.len();
     let title = if queued > 0 {
-        format!("Models — {queued} queued · ⏎ default · i install · d delete · Esc")
+        format!("Models — {queued} queued · ⏎ expand/default · i install · d delete · u update ollama · Esc")
     } else {
-        "Models — ⏎ default · i install · d delete · Esc".to_string()
+        "Models — ⏎ expand/default · i install · d delete · u update ollama · Esc".to_string()
     };
     let focused = matches!(app.pane, Pane::Content);
     let block = section_block(&title, th, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    app.rects.models_pane = inner;
 
-    let visible = inner.height as usize;
+    // Reserve the top line for a fixed legend/keychart; the list scrolls below.
+    let (legend_area, list_area) = if inner.height > 2 {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        (Some(parts[0]), parts[1])
+    } else {
+        (None, inner)
+    };
+    if let Some(la) = legend_area {
+        let legend = Line::from(vec![
+            Span::styled("▸ ", th.accent_style()),
+            Span::styled("selected  ", th.muted_style()),
+            Span::styled("● ", th.accent_style()),
+            Span::styled("default  ", th.muted_style()),
+            Span::styled("✓ ", th.success_style()),
+            Span::styled("installed  ", th.muted_style()),
+            Span::styled("· ", th.muted_style()),
+            Span::styled("available    date age: ", th.muted_style()),
+            Span::styled("2y+", th.warn_style()),
+            Span::styled(" · ", th.muted_style()),
+            Span::styled("1–2y", th.muted_style()),
+            Span::styled(" · ", th.muted_style()),
+            Span::styled("<1y", th.success_style()),
+            Span::styled(" · — unknown", th.muted_style()),
+        ]);
+        frame.render_widget(Paragraph::new(legend).style(th.base()), la);
+    }
+    app.rects.models_pane = list_area;
+
+    let visible = list_area.height as usize;
     let (rows_len, _) = {
         let s = app.models.as_ref().unwrap();
         (s.rows.len(), s.cursor)
@@ -857,15 +887,34 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     {
         let s = app.models.as_ref().unwrap();
+        // Size the id column to the longest model name so every column lines up,
+        // even for long org/model ids. Capped so it never crowds out the buttons.
+        let id_w = s
+            .rows
+            .iter()
+            .filter(|r| !r.header)
+            .map(|r| r.display.chars().count())
+            .max()
+            .unwrap_or(18)
+            .clamp(12, 30);
         for vi in 0..visible {
             let ri = scroll + vi;
             if ri >= s.rows.len() {
                 break;
             }
             let r = &s.rows[ri];
-            let y = inner.y + vi as u16;
+            let y = list_area.y + vi as u16;
             if r.header {
-                lines.push(Line::from(Span::styled(r.id.clone(), th.title_style(true))));
+                if r.col_header {
+                    // Column labels aligned to the data columns below.
+                    let head = format!(
+                        "    {:<id_w$} {:>8} {:>9}  actions",
+                        "model", "released", "size"
+                    );
+                    lines.push(Line::from(Span::styled(head, th.muted_style())));
+                } else {
+                    lines.push(Line::from(Span::styled(r.id.clone(), th.title_style(true))));
+                }
                 continue;
             }
             let selected = ri == s.cursor;
@@ -873,6 +922,8 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                 "● "
             } else if r.installed {
                 "✓ "
+            } else if r.family {
+                "  "
             } else {
                 "· "
             };
@@ -883,25 +934,66 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             } else {
                 th.muted_style()
             };
+
+            // Expandable family row: caret + name + variant count (no buttons).
+            if r.family {
+                let caret = if r.expanded { "▾ " } else { "▸ " };
+                let name = format!("{:<id_w$} ", r.display);
+                let mut spans: Vec<Span> = vec![
+                    Span::styled(caret.to_string(), th.accent_style()),
+                    Span::styled(mark.to_string(), mark_style),
+                    Span::styled(
+                        name,
+                        if selected { th.selection() } else { th.title_style(false) },
+                    ),
+                    released_span(th, &r.released),
+                    Span::styled(format!("  {} variants ▸", r.variant_count), th.muted_style()),
+                ];
+                if r.expanded {
+                    if let Some(last) = spans.last_mut() {
+                        *last = Span::styled(format!("  {} variants ▾", r.variant_count), th.muted_style());
+                    }
+                }
+                lines.push(Line::from(spans));
+                continue;
+            }
+
             let size = if r.size > 0 {
                 crate::models::human_bytes(r.size)
             } else {
-                String::new()
+                "—".to_string()
             };
+            // Children are indented; the id column shrinks so later columns align.
+            let indent = if r.indent > 0 { 2u16 } else { 0 };
+            let eff_w = (id_w as u16).saturating_sub(indent) as usize;
 
             let mut spans: Vec<Span> = Vec::new();
-            let mut x = inner.x;
+            let mut x = list_area.x;
+            if indent > 0 {
+                spans.push(Span::styled("  ", th.muted_style()));
+                x += indent;
+            }
             spans.push(Span::styled(if selected { "▸ " } else { "  " }, th.accent_style()));
             x += 2;
             spans.push(Span::styled(mark.to_string(), mark_style));
             x += 2;
-            let id_field = format!("{:<18}", r.id);
+            let id_disp: String = if r.display.chars().count() > eff_w {
+                r.display.chars().take(eff_w).collect()
+            } else {
+                r.display.clone()
+            };
+            let id_field = format!("{id_disp:<eff_w$} ");
             let idw = id_field.chars().count() as u16;
             spans.push(Span::styled(
                 id_field,
                 if selected { th.selection() } else { th.base() },
             ));
             x += idw;
+            // Release date column (colour-coded by age).
+            let rel = released_span(th, &r.released);
+            let relw = rel.content.chars().count() as u16;
+            spans.push(rel);
+            x += relw;
             let size_field = format!("{size:>9}  ");
             let sw = size_field.chars().count() as u16;
             spans.push(Span::styled(size_field, th.muted_style()));
@@ -934,7 +1026,7 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         }
     }
     app.rects.model_buttons = buttons;
-    frame.render_widget(Paragraph::new(lines).style(th.base()), inner);
+    frame.render_widget(Paragraph::new(lines).style(th.base()), list_area);
 
     if rows_len > visible {
         let mut sb = ScrollbarState::new(rows_len).position(scroll);
@@ -960,6 +1052,7 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
         ("y", "copy current view to clipboard"),
         ("s", "select mode (mouse off, drag to select)"),
         ("m", "manage models (install / delete / default)"),
+        ("u", "update Ollama (in model manager)"),
         ("/", "search notes"),
         (": or Ctrl-P", "command palette"),
         ("T", "cycle theme"),
@@ -991,6 +1084,28 @@ fn hover_style(_th: &Theme, hovered: bool) -> Style {
     } else {
         Style::default()
     }
+}
+
+/// Render a model's release date, colour-coded by age so stale models stand out.
+fn released_span(th: &Theme, released: &str) -> Span<'static> {
+    let style = match released_age_months(released) {
+        None => th.muted_style(),                 // unknown release date
+        Some(m) if m >= 24 => th.warn_style(),    // 2+ years — clearly old
+        Some(m) if m >= 12 => th.muted_style(),   // 1–2 years
+        Some(_) => th.success_style(),            // < 1 year — fresh
+    };
+    Span::styled(format!("{released:>8} "), style)
+}
+
+/// Months between a `YYYY-MM` string and now; `None` if unparseable.
+fn released_age_months(s: &str) -> Option<i64> {
+    let (y, m) = s.split_once('-')?;
+    let y: i64 = y.trim().parse().ok()?;
+    let m: i64 = m.trim().parse().ok()?;
+    let now = time::OffsetDateTime::now_utc();
+    let ny = now.year() as i64;
+    let nm = u8::from(now.month()) as i64;
+    Some((ny - y) * 12 + (nm - m))
 }
 
 /// Map a hover position inside a bordered list `Rect` to an item index.

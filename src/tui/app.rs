@@ -65,6 +65,7 @@ pub enum Action {
     NextCampaign,
     CycleTheme,
     ManageModels,
+    UpdateOllama,
     RebuildLog,
     SystemCheck,
     Quit,
@@ -82,6 +83,7 @@ impl Action {
             Action::NextCampaign => "Switch campaign",
             Action::CycleTheme => "Change theme",
             Action::ManageModels => "Manage models — install / update / delete",
+            Action::UpdateOllama => "Update Ollama — run the official installer",
             Action::RebuildLog => "Rebuild campaign log",
             Action::SystemCheck => "System check (doctor)",
             Action::Quit => "Quit",
@@ -98,6 +100,7 @@ impl Action {
             Action::NextCampaign,
             Action::CycleTheme,
             Action::ManageModels,
+            Action::UpdateOllama,
             Action::RebuildLog,
             Action::SystemCheck,
             Action::Quit,
@@ -148,26 +151,56 @@ pub enum Overlay {
 }
 
 /// Which family a model row belongs to.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum ModelKind {
+    #[default]
     Whisper,
     Ollama,
 }
 
+#[derive(Default)]
 pub struct ModelRow {
     /// A non-selectable section header when true.
     pub header: bool,
+    /// A non-selectable column-labels row (a kind of header) when true.
+    pub col_header: bool,
+    /// An expandable model family (has multiple variants) when true.
+    pub family: bool,
+    /// Whether this family is currently expanded (for the caret).
+    pub expanded: bool,
+    /// Indentation level (0 = family/leaf, 1 = variant under a family).
+    pub indent: u8,
     pub kind: ModelKind,
+    /// The pull id (may include an `org/` prefix / `hf.co/` for community models).
     pub id: String,
+    /// Name shown in the list.
+    pub display: String,
+    /// Number of variants (for family rows).
+    pub variant_count: usize,
+    /// Key used to toggle a family's expansion.
+    pub expand_key: String,
     pub installed: bool,
     pub is_default: bool,
     pub size: u64,
+    /// Approximate release date (`YYYY-MM`) or `"—"`.
+    pub released: String,
 }
 
 pub struct ModelsState {
     pub rows: Vec<ModelRow>,
     pub cursor: usize,
     pub scroll: usize,
+    /// Display names of expanded families.
+    pub expanded: std::collections::HashSet<String>,
+    /// Locally-installed Ollama models `pull_id -> size` (from `/api/tags`).
+    pub installed: std::collections::HashMap<String, u64>,
+}
+
+impl ModelRow {
+    /// Whether the cursor can land on this row (not a section/column header).
+    pub fn selectable(&self) -> bool {
+        !self.header && !self.col_header
+    }
 }
 
 #[derive(Default, Clone)]
@@ -215,6 +248,9 @@ pub struct App {
 
     pub should_quit: bool,
     pub pending_editor: Option<PathBuf>,
+    /// A shell command to run with the TUI suspended (e.g. the Ollama updater):
+    /// `(title, command)`.
+    pub pending_shell: Option<(String, String)>,
 
     pub campaigns: Vec<CampaignEntry>,
     pub campaign_idx: usize,
@@ -259,6 +295,8 @@ pub struct App {
     pub job_queue: VecDeque<(ModelJob, String)>,
     /// When set, the content area shows the interactive model manager.
     pub models: Option<ModelsState>,
+    /// Receives locally-installed Ollama models `(name, size)` to enrich the list.
+    pub model_refresh_rx: Option<UnboundedReceiver<Vec<(String, u64)>>>,
 
     /// Last known mouse position, for hover highlighting.
     pub hover_col: u16,
@@ -293,6 +331,7 @@ impl App {
             theme_idx,
             should_quit: false,
             pending_editor: None,
+            pending_shell: None,
             campaigns: Vec::new(),
             campaign_idx: 0,
             campaign: None,
@@ -321,6 +360,7 @@ impl App {
             tick: 0,
             job_queue: VecDeque::new(),
             models: None,
+            model_refresh_rx: None,
             hover_col: 0,
             hover_row: 0,
             mouse_enabled: true,
@@ -569,6 +609,17 @@ impl App {
     // ---- job events ------------------------------------------------------
 
     pub fn drain_job_events(&mut self) {
+        // Absorb the background Ollama-installed query, if it has arrived.
+        if let Some(mut rx) = self.model_refresh_rx.take() {
+            match rx.try_recv() {
+                Ok(list) => self.apply_ollama_installed(list),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    self.model_refresh_rx = Some(rx);
+                }
+                Err(_) => {}
+            }
+        }
+
         let mut done: Option<Result<String, String>> = None;
         if let Some(rx) = self.job_rx.as_mut() {
             while let Ok(ev) = rx.try_recv() {
@@ -594,11 +645,11 @@ impl App {
             self.job_progress = None;
             match &res {
                 Ok(summary) => {
-                    self.job_log.push((LogLevel::Ok, format!("✓ {summary}")));
+                    self.job_log.push((LogLevel::Ok, summary.clone()));
                     self.status = format!("Done: {summary}");
                 }
                 Err(e) => {
-                    self.job_log.push((LogLevel::Error, format!("✗ {e}")));
+                    self.job_log.push((LogLevel::Error, e.clone()));
                     self.status = format!("Failed: {e}");
                 }
             }
@@ -608,6 +659,7 @@ impl App {
             self.campaign_idx = camp_idx;
             if self.models.is_some() {
                 self.refresh_model_rows();
+                self.spawn_model_refresh();
             }
             if let Some(si) = self.open_session {
                 if si < self.sessions.len() {
@@ -696,74 +748,159 @@ impl App {
     pub(super) fn open_models(&mut self) {
         self.viewing_log = false;
         self.open_session = None;
-        let cursor = self
-            .build_model_rows()
-            .iter()
-            .position(|r| !r.header)
-            .unwrap_or(0);
-        self.models = Some(ModelsState {
-            rows: self.build_model_rows(),
-            cursor,
-            scroll: 0,
-        });
+        let expanded = std::collections::HashSet::new();
+        let installed = std::collections::HashMap::new();
+        let rows = self.build_model_rows(&expanded, &installed);
+        let cursor = rows.iter().position(|r| r.selectable()).unwrap_or(0);
+        self.models = Some(ModelsState { rows, cursor, scroll: 0, expanded, installed });
         self.pane = Pane::Content;
+        self.spawn_model_refresh();
     }
 
-    fn build_model_rows(&self) -> Vec<ModelRow> {
-        let mut rows: Vec<ModelRow> = Vec::new();
-        let cache = crate::models::whisper_cache_dir(self.global.asr.model_dir.as_deref()).ok();
-        let asr_default = self.global.asr.model.clone().unwrap_or_default();
+    /// Query Ollama for locally-installed models (name + size) in the background
+    /// so the manager can mark them installed and show real sizes.
+    fn spawn_model_refresh(&mut self) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.model_refresh_rx = Some(rx);
+        let base = self
+            .global
+            .backend
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:11434".into());
+        self.handle.spawn(async move {
+            let list = crate::models::ollama_local_models(&base).await;
+            let _ = tx.send(list);
+        });
+    }
 
+    /// Store the locally-installed Ollama models and rebuild rows so installed
+    /// markers and real sizes appear (even for collapsed variants → family ✓).
+    fn apply_ollama_installed(&mut self, list: Vec<(String, u64)>) {
+        if let Some(s) = &mut self.models {
+            s.installed = list.into_iter().collect();
+        }
+        self.refresh_model_rows();
+    }
+
+    fn build_model_rows(
+        &self,
+        expanded: &std::collections::HashSet<String>,
+        installed: &std::collections::HashMap<String, u64>,
+    ) -> Vec<ModelRow> {
+        use crate::models;
+        let mut rows: Vec<ModelRow> = Vec::new();
+
+        // --- Whisper (flat) ---
+        let cache = models::whisper_cache_dir(self.global.asr.model_dir.as_deref()).ok();
+        let asr_default = self.global.asr.model.clone().unwrap_or_default();
         rows.push(header_row("Whisper · speech-to-text"));
-        for m in crate::models::WHISPER_MODELS {
-            let installed = cache
+        rows.push(col_header_row());
+        for m in models::WHISPER_MODELS {
+            let inst = cache
                 .as_ref()
-                .and_then(|c| crate::models::whisper_path(m.id, c).ok())
+                .and_then(|c| models::whisper_path(m.id, c).ok())
                 .map(|p| p.exists())
                 .unwrap_or(false);
             let size = cache
                 .as_ref()
                 .and_then(|c| std::fs::metadata(c.join(m.filename)).ok())
                 .map(|md| md.len())
-                .unwrap_or_else(|| crate::models::whisper_approx_size(m.id));
+                .unwrap_or_else(|| models::whisper_approx_size(m.id));
             rows.push(ModelRow {
-                header: false,
                 kind: ModelKind::Whisper,
+                display: m.id.to_string(),
                 id: m.id.to_string(),
-                installed,
+                installed: inst,
                 is_default: m.id == asr_default,
                 size,
+                released: models::whisper_released(m.id).to_string(),
+                ..Default::default()
             });
         }
 
+        // --- Ollama (expandable families) ---
         let llm_default = self.global.backend.model.clone().unwrap_or_default();
         rows.push(header_row("Ollama · language model"));
-        let mut seen = std::collections::HashSet::new();
-        for (name, size) in crate::models::OLLAMA_KNOWN_SIZES {
-            seen.insert(*name);
+        rows.push(col_header_row());
+        let mut known: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for model in models::OLLAMA_CATALOG {
+            for o in model.options {
+                known.insert(o.pull);
+            }
+            if model.options.len() == 1 {
+                // Single option → flat leaf row.
+                let o = &model.options[0];
+                let real = installed.get(o.pull).copied();
+                rows.push(ModelRow {
+                    kind: ModelKind::Ollama,
+                    display: model.display.to_string(),
+                    id: o.pull.to_string(),
+                    installed: real.is_some(),
+                    is_default: o.pull == llm_default,
+                    size: real.filter(|s| *s > 0).unwrap_or(o.size),
+                    released: model.released.to_string(),
+                    ..Default::default()
+                });
+            } else {
+                // Multi-variant → expandable family, with children when expanded.
+                let key = model.display.to_string();
+                let is_exp = expanded.contains(&key);
+                let any_inst = model.options.iter().any(|o| installed.contains_key(o.pull));
+                let any_def = model.options.iter().any(|o| o.pull == llm_default);
+                rows.push(ModelRow {
+                    family: true,
+                    expanded: is_exp,
+                    kind: ModelKind::Ollama,
+                    display: model.display.to_string(),
+                    variant_count: model.options.len(),
+                    expand_key: key,
+                    installed: any_inst,
+                    is_default: any_def,
+                    released: model.released.to_string(),
+                    ..Default::default()
+                });
+                if is_exp {
+                    for o in model.options {
+                        let real = installed.get(o.pull).copied();
+                        rows.push(ModelRow {
+                            indent: 1,
+                            kind: ModelKind::Ollama,
+                            display: o.label.to_string(),
+                            id: o.pull.to_string(),
+                            installed: real.is_some(),
+                            is_default: o.pull == llm_default,
+                            size: real.filter(|s| *s > 0).unwrap_or(o.size),
+                            released: model.released.to_string(),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+
+        // Installed models that aren't in the catalog (e.g. pulled elsewhere).
+        let mut extras: Vec<(&String, &u64)> = installed
+            .iter()
+            .filter(|(n, _)| !known.contains(n.as_str()))
+            .collect();
+        extras.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, size) in extras {
             rows.push(ModelRow {
-                header: false,
                 kind: ModelKind::Ollama,
-                id: (*name).to_string(),
-                installed: false,
+                display: strip_org(name),
+                id: name.clone(),
+                installed: true,
                 is_default: *name == llm_default,
                 size: *size,
-            });
-        }
-        if !llm_default.is_empty() && !seen.contains(llm_default.as_str()) {
-            rows.push(ModelRow {
-                header: false,
-                kind: ModelKind::Ollama,
-                id: llm_default,
-                installed: true,
-                is_default: true,
-                size: 0,
+                released: models::ollama_released(name).to_string(),
+                ..Default::default()
             });
         }
         rows
     }
 
-    /// Move the model-manager cursor by `delta`, skipping section headers.
+    /// Move the model-manager cursor by `delta`, skipping non-selectable rows.
     pub(super) fn models_move(&mut self, delta: i32) {
         let Some(s) = &mut self.models else { return };
         let n = s.rows.len() as i32;
@@ -773,17 +910,20 @@ impl App {
             if i < 0 || i >= n {
                 return;
             }
-            if !s.rows[i as usize].header {
+            if s.rows[i as usize].selectable() {
                 s.cursor = i as usize;
                 return;
             }
         }
     }
 
-    /// The (kind, id) of the highlighted model row, if any.
+    /// The (kind, id) of the highlighted installable model row, if any.
     fn selected_model(&self) -> Option<(ModelKind, String)> {
         let s = self.models.as_ref()?;
-        s.rows.get(s.cursor).filter(|r| !r.header).map(|r| (r.kind, r.id.clone()))
+        s.rows
+            .get(s.cursor)
+            .filter(|r| r.selectable() && !r.family)
+            .map(|r| (r.kind, r.id.clone()))
     }
 
     /// Set the highlighted model as the default (ASR or LLM) and persist it.
@@ -798,19 +938,67 @@ impl App {
         self.refresh_model_rows();
     }
 
+    /// Expand/collapse the highlighted family row.
+    pub(super) fn toggle_models_expand(&mut self) {
+        let key = match &self.models {
+            Some(s) => s.rows.get(s.cursor).filter(|r| r.family).map(|r| r.expand_key.clone()),
+            None => None,
+        };
+        let Some(key) = key else { return };
+        if let Some(s) = &mut self.models {
+            if !s.expanded.remove(&key) {
+                s.expanded.insert(key.clone());
+            }
+        }
+        self.refresh_model_rows();
+        if let Some(s) = &mut self.models {
+            if let Some(i) = s.rows.iter().position(|r| r.family && r.expand_key == key) {
+                s.cursor = i;
+            }
+        }
+    }
+
+    /// True if the highlighted row is a family (needs expand, not install).
+    pub(super) fn selected_is_family(&self) -> bool {
+        self.models
+            .as_ref()
+            .and_then(|s| s.rows.get(s.cursor))
+            .map(|r| r.family)
+            .unwrap_or(false)
+    }
+
     /// Rebuild rows in place (preserving cursor/scroll) after a change.
     pub(super) fn refresh_model_rows(&mut self) {
-        let rows = self.build_model_rows();
+        let (exp, inst) = match &self.models {
+            Some(s) => (s.expanded.clone(), s.installed.clone()),
+            None => return,
+        };
+        let rows = self.build_model_rows(&exp, &inst);
         if let Some(s) = &mut self.models {
             s.cursor = s.cursor.min(rows.len().saturating_sub(1));
             s.rows = rows;
         }
     }
 
+    /// Queue the Ollama updater to run with the TUI suspended (so it can prompt
+    /// for sudo and show output). No-op with a hint on unsupported platforms.
+    pub(super) fn request_ollama_update(&mut self) {
+        match ollama_update_command() {
+            Some(cmd) => {
+                self.pending_shell = Some(("Update Ollama".to_string(), cmd));
+            }
+            None => self.message(
+                "Not supported here",
+                "Automatic update isn't available on this OS.\nDownload Ollama from https://ollama.com/download",
+                true,
+            ),
+        }
+    }
+
     /// Queue an install/update (`install = true`) or delete of a specific row.
     pub(super) fn model_action_at(&mut self, row_idx: usize, install: bool) {
         if let Some(s) = &mut self.models {
-            if row_idx < s.rows.len() && !s.rows[row_idx].header {
+            if row_idx < s.rows.len() && s.rows[row_idx].selectable() && !s.rows[row_idx].family {
                 s.cursor = row_idx;
             }
         }
@@ -864,6 +1052,23 @@ pub(super) struct JobRequestBuilder {
     pub(super) artifacts: Vec<Artifact>,
 }
 
+/// The platform command that installs/updates Ollama, or `None` if we can't
+/// script it (e.g. Windows). Runs the official installer.
+fn ollama_update_command() -> Option<String> {
+    if cfg!(target_os = "linux") {
+        Some("curl -fsSL https://ollama.com/install.sh | sh".to_string())
+    } else if cfg!(target_os = "macos") {
+        // Prefer Homebrew when present; otherwise fall back to the install script.
+        Some(
+            "if command -v brew >/dev/null 2>&1; then brew upgrade ollama; \
+             else curl -fsSL https://ollama.com/install.sh | sh; fi"
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 /// The campaign's config file stem, used as its stable id for ordering.
 fn campaign_stem(path: &std::path::Path) -> String {
     path.file_stem()
@@ -874,10 +1079,36 @@ fn campaign_stem(path: &std::path::Path) -> String {
 fn header_row(title: &str) -> ModelRow {
     ModelRow {
         header: true,
-        kind: ModelKind::Whisper,
         id: title.to_string(),
-        installed: false,
-        is_default: false,
-        size: 0,
+        ..Default::default()
     }
+}
+
+fn col_header_row() -> ModelRow {
+    ModelRow {
+        header: true,
+        col_header: true,
+        ..Default::default()
+    }
+}
+
+/// Strip an `org/` prefix (and any GGUF/quant suffix) from a model id for
+/// display, while the full id is still used for pulling.
+fn strip_org(name: &str) -> String {
+    let mut s = name.rsplit('/').next().unwrap_or(name).to_string();
+    if let Some(p) = s.strip_suffix("-GGUF").or_else(|| s.strip_suffix("-gguf")) {
+        s = p.to_string();
+    }
+    // Drop a trailing quant tag like `-Q4_K_M`.
+    if let Some(idx) = s.rfind("-Q") {
+        if s[idx + 2..]
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
+            s.truncate(idx);
+        }
+    }
+    s
 }

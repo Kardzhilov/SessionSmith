@@ -74,6 +74,9 @@ fn run_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
         if let Some(path) = app.pending_editor.take() {
             open_in_editor(terminal, &path);
         }
+        if let Some((title, command)) = app.pending_shell.take() {
+            run_shell_suspended(terminal, &title, &command);
+        }
         if app.mouse_toggle_pending {
             app.mouse_toggle_pending = false;
             if app.mouse_enabled {
@@ -123,6 +126,43 @@ fn open_in_editor(terminal: &mut Term, path: &Path) {
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
 
     let _ = std::process::Command::new(&editor).arg(path).status();
+
+    enable_raw_mode().ok();
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture).ok();
+    terminal.clear().ok();
+}
+
+/// Suspend the TUI and run a shell `command` in the real terminal (so it can
+/// print output and prompt for `sudo`), after an explicit confirmation. Used
+/// for the "Update Ollama" action.
+fn run_shell_suspended(terminal: &mut Term, title: &str, command: &str) {
+    use std::io::Write;
+
+    disable_raw_mode().ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+
+    println!("\n=== {title} ===");
+    println!("SessionSmith will run this command in your terminal:\n");
+    println!("    {command}\n");
+    print!("Proceed? [y/N] ");
+    let _ = io::stdout().flush();
+
+    let mut answer = String::new();
+    let _ = io::stdin().read_line(&mut answer);
+    if answer.trim().eq_ignore_ascii_case("y") {
+        let status = std::process::Command::new("sh").arg("-c").arg(command).status();
+        match status {
+            Ok(s) if s.success() => println!("\n✓ Done."),
+            Ok(s) => println!("\n✗ Command exited with status {s}."),
+            Err(e) => println!("\n✗ Could not run command: {e}"),
+        }
+    } else {
+        println!("\nCancelled.");
+    }
+    print!("\nPress Enter to return to SessionSmith… ");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    let _ = io::stdin().read_line(&mut line);
 
     enable_raw_mode().ok();
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture).ok();
