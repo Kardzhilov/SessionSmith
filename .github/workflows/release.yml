@@ -1,0 +1,82 @@
+name: CI & Release
+
+# Runs on every push to main: tests first, then (only if tests pass) builds the
+# release binary and publishes a GitHub Release versioned by UTC date/time.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Allow the built-in GITHUB_TOKEN to create tags/releases.
+permissions:
+  contents: write
+
+# Don't cancel an in-progress release if another push lands; let each finish.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Test & Release
+    runs-on: ubuntu-latest
+    # Skip on forks so their pushes don't fail trying to publish releases.
+    if: github.repository == 'Kardzhilov/SessionSmith'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The default build compiles the bundled whisper.cpp (via whisper-rs),
+      # which needs cmake + clang/libclang for bindgen. (Runtime binary is
+      # self-contained; these are build-time only.)
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Gate: the release steps below only run if this succeeds.
+      - name: Run tests
+        run: cargo test --release --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin sessionsmith
+
+      - name: Compute version (UTC date/time)
+        id: ver
+        run: echo "version=$(date -u +'%Y.%m.%d.%H%M%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/sessionsmith dist/sessionsmith-linux-x86_64
+          cd dist
+          sha256sum sessionsmith-linux-x86_64 > sessionsmith-linux-x86_64.sha256
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          short="${GITHUB_SHA:0:7}"
+          {
+            echo "Automated release built from \`${short}\` on $(date -u +'%Y-%m-%d %H:%M UTC')."
+            echo ""
+            echo "**Asset:** \`sessionsmith-linux-x86_64\` — Linux x86_64, CPU whisper build."
+            echo "For GPU builds, build from source with \`--features cuda|vulkan|metal\` (see \`docs/setup.md\`)."
+            echo ""
+            echo "Commit: ${GITHUB_SHA}"
+          } > release-notes.md
+          gh release create "v${version}" \
+            dist/sessionsmith-linux-x86_64 \
+            dist/sessionsmith-linux-x86_64.sha256 \
+            --title "v${version}" \
+            --notes-file release-notes.md
