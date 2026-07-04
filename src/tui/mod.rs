@@ -223,6 +223,15 @@ mod tests {
         terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
     }
 
+    #[test]
+    fn narrow_terminals_wrap_bars() {
+        let (_rt, mut app) = new_app();
+        for (w, h) in [(56u16, 20u16), (46, 16), (72, 24), (120, 30)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+        }
+    }
+
     fn click(app: &mut App, col: u16, row: u16) {
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -241,7 +250,7 @@ mod tests {
 
         // Click a footer shortcut.
         let footer_y = app.rects.footer.y;
-        if let Some((x, _, _)) = app.rects.footer_hits.first().copied() {
+        if let Some((x, _, _, _)) = app.rects.footer_hits.first().copied() {
             click(&mut app, x, footer_y);
             terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
         }

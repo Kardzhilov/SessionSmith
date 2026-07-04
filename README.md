@@ -96,6 +96,7 @@ drop in `~/.config/sessionsmith/themes/*.toml`.
 |---|---|---|
 | Move / switch pane | `↑↓` `j`/`k`, `Tab` | click a row |
 | Open session / campaign log | `⏎` | click a row |
+| Reorder campaigns (saved) | `Shift`+`↑↓` / `K`/`J` | — |
 | Switch artifact tab | `←→` `h`/`l`, `1`–`6` | click a tab |
 | Command palette | `:` / `Ctrl‑P` | click footer |
 | Search notes | `/` | click footer |

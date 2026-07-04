@@ -21,9 +21,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let th = app.theme().clone();
 
     // Minimum-size guard.
-    if area.width < 70 || area.height < 18 {
+    if area.width < 44 || area.height < 12 {
         let msg = Paragraph::new(format!(
-            "Terminal too small\n\n{}×{} — please resize to at least 70×18.",
+            "Terminal too small\n\n{}×{} — please resize to at least 44×12.",
             area.width, area.height
         ))
         .style(th.base())
@@ -33,9 +33,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    // Header and footer wrap onto multiple rows when the terminal is narrow, so
+    // no content is ever clipped. Their heights are computed from the width.
+    let header_h = header_lines(app, &th, area.width).len().max(1) as u16;
+    let footer_hints = footer_hints(app.pane);
+    let fwidths: Vec<u16> = footer_hints.iter().map(tok_width).collect();
+    let footer_h = assign_rows(&fwidths, area.width).len().max(1) as u16;
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(header_h),
+            Constraint::Min(0),
+            Constraint::Length(footer_h),
+        ])
         .split(area);
     draw_header(frame, app, &th, rows[0]);
     draw_footer(frame, app, &th, rows[2]);
@@ -60,96 +71,158 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
+    let lines = header_lines(app, th, area.width);
+    frame.render_widget(Paragraph::new(lines).style(th.base()), area);
+}
+
+/// Build the header as atomic tokens wrapped to `width` rows.
+fn header_lines(app: &App, th: &Theme, width: u16) -> Vec<Line<'static>> {
     let campaign = app
         .campaign
         .as_ref()
         .map(|c| c.campaign.name.clone())
         .unwrap_or_else(|| "no campaign".into());
-    let left = Line::from(vec![
-        Span::styled(" SessionSmith ", th.accent_style()),
-        Span::styled(format!("· {campaign}"), th.muted_style()),
-    ]);
-    let mut rspans: Vec<Span> = Vec::new();
+
+    // Each token stays intact; whole tokens wrap onto new rows when narrow.
+    let mut toks: Vec<(String, Style)> = vec![
+        (" SessionSmith ".to_string(), th.accent_style()),
+        (format!("· {campaign}  "), th.muted_style()),
+        (format!("{}  ", app.backend_summary()), th.muted_style()),
+        (format!("· asr {} ", app.asr_model_label()), th.muted_style()),
+    ];
     if !app.mouse_enabled {
-        rspans.push(Span::styled(
-            " SELECT MODE — press s to resume ",
+        toks.push((
+            " SELECT MODE — press s to resume ".to_string(),
             Style::default()
                 .fg(th.selection_fg)
                 .bg(th.warn)
                 .add_modifier(Modifier::BOLD),
         ));
-        rspans.push(Span::raw(" "));
     }
-    rspans.push(Span::styled(
-        format!("{} · asr {} ", app.backend_summary(), app.asr_model_label()),
-        th.muted_style(),
-    ));
-    let right = Line::from(rspans);
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    frame.render_widget(Paragraph::new(left).style(th.base()), cols[0]);
-    frame.render_widget(
-        Paragraph::new(right).style(th.base()).alignment(Alignment::Right),
-        cols[1],
-    );
+
+    let widths: Vec<u16> = toks.iter().map(|(t, _)| t.chars().count() as u16).collect();
+    assign_rows(&widths, width)
+        .into_iter()
+        .map(|row| {
+            Line::from(
+                row.into_iter()
+                    .map(|i| Span::styled(toks[i].0.clone(), toks[i].1))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+/// A clickable footer token: `key` + `label`, optionally bound to a command.
+struct FTok {
+    key: &'static str,
+    label: &'static str,
+    cmd: Option<super::app::FooterCmd>,
+}
+
+fn tok_width(t: &FTok) -> u16 {
+    // " {key} " + "{label}  "
+    (3 + t.key.chars().count() + t.label.chars().count() + 2) as u16
+}
+
+fn footer_hints(pane: Pane) -> Vec<FTok> {
+    use super::app::FooterCmd as F;
+    let mk = |key, label, cmd| FTok { key, label, cmd };
+    match pane {
+        Pane::Content => vec![
+            mk("↑↓", "scroll", None),
+            mk("←→", "artifact", None),
+            mk("e", "editor", Some(F::Editor)),
+            mk("y", "copy", Some(F::Copy)),
+            mk("s", "select", Some(F::Select)),
+            mk(":", "palette", Some(F::Palette)),
+            mk("/", "search", Some(F::Search)),
+            mk("?", "help", Some(F::Help)),
+            mk("q", "quit", Some(F::Quit)),
+        ],
+        Pane::Campaigns => vec![
+            mk("↹", "pane", None),
+            mk("↑↓", "move", None),
+            mk("⇧↑↓", "reorder", None),
+            mk("⏎", "switch", None),
+            mk("r", "run", Some(F::Run)),
+            mk(":", "palette", Some(F::Palette)),
+            mk("/", "search", Some(F::Search)),
+            mk("?", "help", Some(F::Help)),
+            mk("q", "quit", Some(F::Quit)),
+        ],
+        _ => vec![
+            mk("↹", "pane", None),
+            mk("↑↓", "move", None),
+            mk("⏎", "open", None),
+            mk("r", "run", Some(F::Run)),
+            mk("t", "transcribe", Some(F::Transcribe)),
+            mk("n", "notes", Some(F::Notes)),
+            mk("y", "copy", Some(F::Copy)),
+            mk("s", "select", Some(F::Select)),
+            mk("/", "search", Some(F::Search)),
+            mk(":", "palette", Some(F::Palette)),
+            mk("?", "help", Some(F::Help)),
+            mk("q", "quit", Some(F::Quit)),
+        ],
+    }
+}
+
+/// Greedily assign item indices to rows so each row's total width fits `width`.
+fn assign_rows(widths: &[u16], width: u16) -> Vec<Vec<usize>> {
+    let width = width.max(1);
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut col = 0u16;
+    for (i, &w) in widths.iter().enumerate() {
+        if col + w > width && col > 0 {
+            rows.push(Vec::new());
+            col = 0;
+        }
+        rows.last_mut().unwrap().push(i);
+        col += w;
+    }
+    rows
 }
 
 fn draw_footer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
-    use super::app::FooterCmd;
-    // (key, label, optional clickable command)
-    let hints: &[(&str, &str, Option<FooterCmd>)] = match app.pane {
-        Pane::Content => &[
-            ("↑↓", "scroll", None),
-            ("←→", "artifact", None),
-            ("e", "editor", Some(FooterCmd::Editor)),
-            (":", "palette", Some(FooterCmd::Palette)),
-            ("/", "search", Some(FooterCmd::Search)),
-            ("?", "help", Some(FooterCmd::Help)),
-            ("q", "quit", Some(FooterCmd::Quit)),
-        ],
-        _ => &[
-            ("↹", "pane", None),
-            ("↑↓", "move", None),
-            ("⏎", "open", None),
-            ("r", "run", Some(FooterCmd::Run)),
-            ("t", "transcribe", Some(FooterCmd::Transcribe)),
-            ("n", "notes", Some(FooterCmd::Notes)),
-            ("y", "copy", Some(FooterCmd::Copy)),
-            ("s", "select", Some(FooterCmd::Select)),
-            ("/", "search", Some(FooterCmd::Search)),
-            (":", "palette", Some(FooterCmd::Palette)),
-            ("?", "help", Some(FooterCmd::Help)),
-        ],
-    };
-    let mut spans: Vec<Span> = Vec::new();
-    let mut hits: Vec<(u16, u16, FooterCmd)> = Vec::new();
-    let mut x = area.x;
-    let hover_here = app.hover_row == area.y;
-    for (k, label, cmd) in hints {
-        let key = format!(" {k} ");
-        let lbl = format!("{label}  ");
-        let start = x;
-        let w = (key.chars().count() + lbl.chars().count()) as u16;
-        let clickable = cmd.is_some();
-        let hovered = clickable && hover_here && app.hover_col >= start && app.hover_col < x + w;
-        let mut key_style = if clickable { th.accent_style() } else { th.muted_style() };
-        let mut lbl_style = th.muted_style();
-        if hovered {
-            key_style = key_style.add_modifier(Modifier::UNDERLINED | Modifier::REVERSED);
-            lbl_style = lbl_style.add_modifier(Modifier::UNDERLINED);
+    let hints = footer_hints(app.pane);
+    let widths: Vec<u16> = hints.iter().map(tok_width).collect();
+    let rows = assign_rows(&widths, area.width);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut hits: Vec<(u16, u16, u16, super::app::FooterCmd)> = Vec::new();
+
+    for (ri, row) in rows.iter().enumerate() {
+        let row_y = area.y + ri as u16;
+        let mut spans: Vec<Span> = Vec::new();
+        let mut x = area.x;
+        for &i in row {
+            let t = &hints[i];
+            let w = widths[i];
+            let clickable = t.cmd.is_some();
+            let hovered = clickable
+                && app.hover_row == row_y
+                && app.hover_col >= x
+                && app.hover_col < x + w;
+            let mut key_style = if clickable { th.accent_style() } else { th.muted_style() };
+            let mut lbl_style = th.muted_style();
+            if hovered {
+                key_style = key_style.add_modifier(Modifier::UNDERLINED | Modifier::REVERSED);
+                lbl_style = lbl_style.add_modifier(Modifier::UNDERLINED);
+            }
+            spans.push(Span::styled(format!(" {} ", t.key), key_style));
+            spans.push(Span::styled(format!("{}  ", t.label), lbl_style));
+            if let Some(cmd) = t.cmd {
+                hits.push((x, x + w, row_y, cmd));
+            }
+            x += w;
         }
-        spans.push(Span::styled(key, key_style));
-        spans.push(Span::styled(lbl, lbl_style));
-        if let Some(c) = cmd {
-            hits.push((start, x + w, *c));
-        }
-        x += w;
+        lines.push(Line::from(spans));
     }
+
     app.rects.footer = area;
     app.rects.footer_hits = hits;
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(th.base()), area);
+    frame.render_widget(Paragraph::new(lines).style(th.base()), area);
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
@@ -707,6 +780,7 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
         ("↑ ↓  /  j k", "move selection · scroll viewer"),
         ("← →  /  h l  /  1-6", "switch artifact tab"),
         ("Enter", "open session · switch campaign"),
+        ("Shift+↑↓  /  K J", "reorder campaigns (saved)"),
         ("r / t / n", "run pipeline · transcribe · notes"),
         ("e", "open current artifact in $EDITOR"),
         ("y", "copy current view to clipboard"),

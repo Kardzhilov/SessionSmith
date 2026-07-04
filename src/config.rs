@@ -38,6 +38,11 @@ pub struct UiConfig {
     /// launched with no subcommand.
     #[serde(default)]
     pub legacy_menu: bool,
+    /// Persisted campaign ordering for the TUI sidebar, by campaign file stem
+    /// (e.g. `["Emberfall", "DnDThursday"]`). Campaigns not listed here are
+    /// appended in alphabetical order.
+    #[serde(default)]
+    pub campaign_order: Vec<String>,
 }
 
 fn default_theme() -> String {
@@ -46,7 +51,11 @@ fn default_theme() -> String {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { theme: default_theme(), legacy_menu: false }
+        Self {
+            theme: default_theme(),
+            legacy_menu: false,
+            campaign_order: Vec::new(),
+        }
     }
 }
 

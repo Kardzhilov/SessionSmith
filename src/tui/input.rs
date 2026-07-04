@@ -64,6 +64,29 @@ impl App {
             self.open_palette();
             return;
         }
+        // Reorder campaigns (Campaigns pane): Shift+↑/↓ or K/J.
+        if matches!(self.pane, Pane::Campaigns) {
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            match key.code {
+                KeyCode::Char('K') => {
+                    self.move_campaign(-1);
+                    return;
+                }
+                KeyCode::Char('J') => {
+                    self.move_campaign(1);
+                    return;
+                }
+                KeyCode::Up if shift => {
+                    self.move_campaign(-1);
+                    return;
+                }
+                KeyCode::Down if shift => {
+                    self.move_campaign(1);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char(':') => self.open_palette(),
@@ -765,7 +788,11 @@ impl App {
         let r = self.rects.clone();
         // Footer keybar is clickable.
         if rect_contains(r.footer, col, row) {
-            if let Some((_, _, cmd)) = r.footer_hits.iter().find(|(a, b, _)| col >= *a && col < *b) {
+            if let Some((_, _, _, cmd)) = r
+                .footer_hits
+                .iter()
+                .find(|(a, b, ry, _)| row == *ry && col >= *a && col < *b)
+            {
                 self.run_footer_cmd(*cmd);
             }
             return;

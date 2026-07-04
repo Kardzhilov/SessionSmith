@@ -153,8 +153,8 @@ pub struct Rects {
     pub tab_ranges: Vec<(u16, u16)>,
     /// The footer keybar row.
     pub footer: Rect,
-    /// Clickable footer entries: `(start_x, end_x, command)`.
-    pub footer_hits: Vec<(u16, u16, FooterCmd)>,
+    /// Clickable footer entries: `(start_x, end_x, row_y, command)`.
+    pub footer_hits: Vec<(u16, u16, u16, FooterCmd)>,
     /// The live-job log pane.
     pub job: Rect,
 }
@@ -332,11 +332,46 @@ impl App {
                 entries.push(CampaignEntry { name: c.campaign.name, path: root });
             }
         }
+        // Apply the user's saved ordering (by file stem); unlisted campaigns
+        // keep their alphabetical position after the ordered ones.
+        let order = &self.global.ui.campaign_order;
+        if !order.is_empty() {
+            entries.sort_by_key(|e| {
+                let stem = campaign_stem(&e.path);
+                order.iter().position(|o| *o == stem).unwrap_or(usize::MAX)
+            });
+        }
         self.campaigns = entries;
         if self.campaign_idx >= self.campaigns.len() {
             self.campaign_idx = 0;
         }
         self.camp_state.select(if self.campaigns.is_empty() { None } else { Some(self.campaign_idx) });
+    }
+
+    /// Move the selected campaign up (`-1`) or down (`+1`) in the sidebar and
+    /// persist the new order to the global config.
+    pub(super) fn move_campaign(&mut self, delta: i32) {
+        let len = self.campaigns.len();
+        if len < 2 {
+            return;
+        }
+        let from = self.campaign_idx;
+        let to = from as i32 + delta;
+        if to < 0 || to >= len as i32 {
+            return;
+        }
+        let to = to as usize;
+        self.campaigns.swap(from, to);
+        self.campaign_idx = to;
+        self.camp_state.select(Some(to));
+        // Persist the full order by file stem.
+        self.global.ui.campaign_order =
+            self.campaigns.iter().map(|c| campaign_stem(&c.path)).collect();
+        self.global.save().ok();
+        self.status = format!(
+            "Moved '{}' — order saved",
+            self.campaigns.get(to).map(|c| c.name.as_str()).unwrap_or("")
+        );
     }
 
     /// Load the selected campaign's config, preset, audio and sessions, and pin
@@ -601,4 +636,11 @@ pub(super) struct JobRequestBuilder {
     pub(super) sessions: Vec<SessionInput>,
     pub(super) transcripts: Vec<PathBuf>,
     pub(super) artifacts: Vec<Artifact>,
+}
+
+/// The campaign's config file stem, used as its stable id for ordering.
+fn campaign_stem(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
