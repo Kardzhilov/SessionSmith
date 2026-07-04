@@ -250,16 +250,30 @@ fn stream_uv(engine: AsrEngine, cmd: &mut Command) -> Result<()> {
     let status = status.with_context(|| "waiting on uv bridge process")?;
 
     if !status.success() {
-        let tail: String = stderr_text
+        // Surface the most informative lines: a Python traceback's final
+        // message and/or a C++ abort message (`what(): ...`, `RuntimeError`,
+        // CUDA errors) rather than the low-level stack frames, which are noise.
+        let keywords = [
+            "error", "exception", "traceback", "runtimeerror", "valueerror",
+            "what():", "terminate called", "cuda", "assert", "oom", "out of memory",
+        ];
+        let mut highlights: Vec<&str> = stderr_text
             .lines()
-            .rev()
-            .take(20)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
-        bail!("{} failed:\n{tail}", engine.label());
+            .filter(|l| {
+                let low = l.to_ascii_lowercase();
+                keywords.iter().any(|k| low.contains(k)) && !l.trim_start().starts_with("frame #")
+            })
+            .collect();
+        // De-dupe consecutive repeats and cap length.
+        highlights.dedup();
+        let summary = if highlights.is_empty() {
+            // Fall back to the tail if nothing matched.
+            stderr_text.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()
+        } else {
+            highlights.into_iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()
+        }
+        .join("\n");
+        bail!("{} failed:\n{summary}", engine.label());
     }
     Ok(())
 }
@@ -432,6 +446,19 @@ def run_parakeet(args):
         m.change_subsampling_conv_chunking_factor(1)
     except Exception:
         pass
+    # The TDT greedy decoder defaults to a CUDA-graph implementation that throws
+    # "CUDA error: an illegal memory access" on many driver/toolkit combos.
+    # Disable it — decoding stays on-GPU and fast, just without graph capture.
+    try:
+        from omegaconf import open_dict
+        dcfg = m.cfg.decoding
+        with open_dict(dcfg):
+            if "greedy" not in dcfg or dcfg.greedy is None:
+                dcfg.greedy = {}
+            dcfg.greedy.use_cuda_graph_decoder = False
+        m.change_decoding_strategy(dcfg)
+    except Exception as e:
+        emit(0, 0, f"note: could not disable cuda-graph decoder ({e})")
     try:
         import torch
     except Exception:
@@ -446,6 +473,9 @@ def run_parakeet(args):
     for i, (a, b) in enumerate(windows):
         emit(i, n, "transcribing (parakeet)")
         off = a / sr
+        # Skip degenerate tail windows that are too short to subsample.
+        if (b - a) < int(0.5 * sr):
+            continue
         clip = os.path.join(tmp, f"p{i}.wav")
         sf.write(clip, data[a:b], sr)
         res = m.transcribe([clip], timestamps=True)

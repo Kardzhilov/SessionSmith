@@ -245,6 +245,10 @@ pub async fn run_notes(
         }
     }
 
+    // Notes generation is done — release the LLM model's VRAM so it doesn't sit
+    // idle blocking the next transcription (or another GPU workload).
+    crate::llm::free_vram(g).await;
+
     Ok(())
 }
 

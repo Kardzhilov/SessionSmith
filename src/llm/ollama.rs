@@ -31,6 +31,72 @@ impl OllamaBackend {
     }
 }
 
+#[derive(Deserialize)]
+struct PsResp {
+    #[serde(default)]
+    models: Vec<PsModel>,
+}
+
+#[derive(Deserialize)]
+struct PsModel {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    model: String,
+}
+
+#[derive(Serialize)]
+struct UnloadReq<'a> {
+    model: &'a str,
+    /// `0` tells Ollama to evict the model from (V)RAM immediately.
+    keep_alive: u32,
+}
+
+/// Unload every model Ollama currently holds resident, freeing its VRAM.
+/// Best-effort and quick: if Ollama isn't running or is unresponsive the calls
+/// simply time out and we return the names we managed to evict. Returns the
+/// list of model names that were asked to unload.
+pub async fn unload_all(base_url: &str) -> Vec<String> {
+    let base = base_url.trim_end_matches('/');
+    // Short timeouts — this runs on the hot path before/after heavy work and
+    // must never block the pipeline if Ollama is down.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let loaded: Vec<String> = match client.get(format!("{base}/api/ps")).send().await {
+        Ok(resp) => match resp.json::<PsResp>().await {
+            Ok(ps) => ps
+                .models
+                .into_iter()
+                .map(|m| if m.name.is_empty() { m.model } else { m.name })
+                .filter(|n| !n.is_empty())
+                .collect(),
+            Err(_) => return Vec::new(),
+        },
+        Err(_) => return Vec::new(),
+    };
+
+    let mut unloaded = Vec::new();
+    for name in loaded {
+        let ok = client
+            .post(format!("{base}/api/generate"))
+            .json(&UnloadReq { model: &name, keep_alive: 0 })
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if ok {
+            unloaded.push(name);
+        }
+    }
+    unloaded
+}
+
 #[derive(Serialize)]
 struct ChatReq<'a> {
     model: &'a str,

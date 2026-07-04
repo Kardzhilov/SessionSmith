@@ -99,6 +99,10 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
     }
 
+    // Transcription is usually GPU-bound; make sure the LLM backend isn't
+    // holding VRAM (e.g. an Ollama model left resident) before we start.
+    crate::llm::free_vram(g).await;
+
     let backend = resolve_asr_backend(g, opts)?;
 
     // Records model + source audio after a successful transcription, so a

@@ -221,6 +221,12 @@ pub struct RuntimeConfig {
     /// cross-session search (`sessionsmith search`). On by default.
     #[serde(default = "default_true")]
     pub index: bool,
+    /// Automatically free GPU VRAM held by the LLM backend (unload Ollama
+    /// models) before transcription and after notes generation, so the ASR and
+    /// LLM stages don't fight over VRAM. On by default; harmless no-op for
+    /// remote API backends.
+    #[serde(default = "default_true")]
+    pub auto_free_vram: bool,
 }
 
 fn default_timeout() -> u64 { 1800 }
@@ -238,6 +244,7 @@ impl Default for RuntimeConfig {
             chunk_overlap_chars: default_chunk_overlap(),
             structured: false,
             index: true,
+            auto_free_vram: true,
         }
     }
 }

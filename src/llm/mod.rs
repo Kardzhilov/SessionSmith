@@ -73,6 +73,29 @@ pub fn build(g: &GlobalConfig) -> Result<Box<dyn LlmBackend>> {
     }
 }
 
+/// Release any GPU memory the configured LLM backend is holding so the ASR
+/// stage (or the next session) has VRAM to work with. For Ollama this unloads
+/// all resident models; remote API backends hold no local VRAM, so it's a
+/// no-op. Controlled by `runtime.auto_free_vram` (on by default) and always
+/// best-effort — failures never interrupt the pipeline.
+pub async fn free_vram(g: &GlobalConfig) {
+    if !g.runtime.auto_free_vram {
+        return;
+    }
+    if !g.backend.kind.eq_ignore_ascii_case("ollama") {
+        return;
+    }
+    let base = g
+        .backend
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:11434".into());
+    let freed = ollama::unload_all(&base).await;
+    if !freed.is_empty() {
+        crate::ui::info(&format!("freed GPU memory: unloaded {}", freed.join(", ")));
+    }
+}
+
 /// Collect a streamed chat into a String while updating an optional spinner with
 /// a running token count.
 pub async fn collect(
