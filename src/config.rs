@@ -22,7 +22,32 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub paths: PathsConfig,
     #[serde(default)]
+    pub ui: UiConfig,
+    #[serde(default)]
     pub hardware: Option<HardwareProfile>,
+}
+
+/// Full-screen TUI preferences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// Name of the active theme (built-in or a user theme in
+    /// `~/.config/sessionsmith/themes/*.toml`).
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Use the legacy line-based menu instead of the full-screen TUI when
+    /// launched with no subcommand.
+    #[serde(default)]
+    pub legacy_menu: bool,
+}
+
+fn default_theme() -> String {
+    "midnight".into()
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { theme: default_theme(), legacy_menu: false }
+    }
 }
 
 /// Base input/output directories. Relative paths are resolved against the

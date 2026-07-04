@@ -44,7 +44,19 @@ async fn main() -> Result<()> {
         Some(Command::Log(args)) => commands::log_cmd::run(args).await,
         Some(Command::Search(args)) => commands::search::run(args).await,
         Some(Command::Record(args)) => commands::record::run(args).await,
-        None => commands::home::run().await,
+        None => {
+            // Full-screen TUI by default; `--no-tui` (or `[ui] legacy_menu`)
+            // falls back to the line-based menu.
+            let legacy = cli.no_tui
+                || sessionsmith::config::GlobalConfig::load_or_default()
+                    .map(|g| g.ui.legacy_menu)
+                    .unwrap_or(false);
+            if legacy {
+                commands::home::run().await
+            } else {
+                sessionsmith::tui::run().await
+            }
+        }
     };
 
     if let Err(err) = exit {

@@ -1,0 +1,289 @@
+//! Full-screen terminal UI (ratatui + crossterm). This is the default
+//! experience when SessionSmith is launched with no subcommand; the plain
+//! subcommands remain available for scripting.
+
+mod app;
+mod draw;
+mod fuzzy;
+mod input;
+mod jobs;
+mod markdown;
+mod theme;
+
+pub use app::App;
+
+use std::io::{self, Stdout};
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::Result;
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+    },
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::Terminal;
+
+type Term = Terminal<CrosstermBackend<Stdout>>;
+
+/// Launch the full-screen TUI. Restores the terminal on every exit path,
+/// including panics.
+pub async fn run() -> Result<()> {
+    crate::deps::ensure_dirs()?;
+    install_panic_hook();
+    let mut terminal = setup()?;
+    let handle = tokio::runtime::Handle::current();
+    let mut app = App::new(handle);
+    let res = run_loop(&mut terminal, &mut app);
+    restore();
+    res
+}
+
+fn run_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
+    loop {
+        app.drain_job_events();
+        terminal.draw(|f| draw::draw(f, app))?;
+
+        if event::poll(Duration::from_millis(120))? {
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
+                Event::Mouse(m) => app.on_mouse(m),
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
+        }
+
+        if let Some(path) = app.pending_editor.take() {
+            open_in_editor(terminal, &path);
+        }
+        if app.mouse_toggle_pending {
+            app.mouse_toggle_pending = false;
+            if app.mouse_enabled {
+                execute!(terminal.backend_mut(), EnableMouseCapture).ok();
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture).ok();
+            }
+        }
+        if let Some(text) = app.copy_pending.take() {
+            copy_to_clipboard(terminal, &text);
+        }
+        if app.should_quit {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn setup() -> Result<Term> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    Ok(Terminal::new(backend)?)
+}
+
+fn restore() {
+    disable_raw_mode().ok();
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture).ok();
+}
+
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore();
+        original(info);
+    }));
+}
+
+/// Temporarily leave the TUI, open `path` in `$EDITOR`, then re-enter.
+fn open_in_editor(terminal: &mut Term, path: &Path) {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "vi".into());
+
+    disable_raw_mode().ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+
+    let _ = std::process::Command::new(&editor).arg(path).status();
+
+    enable_raw_mode().ok();
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture).ok();
+    terminal.clear().ok();
+}
+
+/// Copy `text` to the system clipboard via the OSC 52 terminal escape, which
+/// works locally and over SSH (when the terminal supports it).
+fn copy_to_clipboard(terminal: &mut Term, text: &str) {
+    use std::io::Write;
+    let seq = format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
+    let out = terminal.backend_mut();
+    let _ = out.write_all(seq.as_bytes());
+    let _ = out.flush();
+}
+
+/// Minimal standard base64 encoder (no external dependency).
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::app::Action;
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    fn new_app() -> (tokio::runtime::Runtime, App) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let handle = rt.handle().clone();
+        let app = App::new(handle);
+        (rt, app)
+    }
+
+    #[test]
+    fn renders_all_states_without_panic() {
+        let (_rt, mut app) = new_app();
+        let backend = TestBackend::new(110, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Base dashboard.
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+
+        // Cycle theme + open each overlay via keys, drawing each time.
+        app.dispatch(Action::CycleTheme);
+        for key in [
+            KeyCode::Esc,
+            KeyCode::Char(':'),
+            KeyCode::Esc,
+            KeyCode::Char('/'),
+            KeyCode::Esc,
+            KeyCode::Char('?'),
+            KeyCode::Esc,
+            KeyCode::Char('r'),
+            KeyCode::Esc,
+            KeyCode::Char('T'),
+            KeyCode::Down,
+            KeyCode::Esc,
+            KeyCode::Tab,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Up,
+            KeyCode::Up,
+            KeyCode::Enter,
+        ] {
+            app.on_key(KeyEvent::from(key));
+            terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn renders_small_terminal_guard() {
+        let (_rt, mut app) = new_app();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+    }
+
+    fn click(app: &mut App, col: u16, row: u16) {
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn mouse_clicks_dont_panic() {
+        let (_rt, mut app) = new_app();
+        let backend = TestBackend::new(110, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+
+        // Click a footer shortcut.
+        let footer_y = app.rects.footer.y;
+        if let Some((x, _, _)) = app.rects.footer_hits.first().copied() {
+            click(&mut app, x, footer_y);
+            terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+        }
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+
+        // Open the palette and click its first row.
+        app.on_key(KeyEvent::from(KeyCode::Char(':')));
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+        let list = app.rects.overlay_list;
+        click(&mut app, list.x + 2, list.y + 1);
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+
+        // Open the theme picker and click a row.
+        app.on_key(KeyEvent::from(KeyCode::Char('T')));
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+        let list = app.rects.overlay_list;
+        click(&mut app, list.x + 1, list.y + 1);
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn job_pane_hover_copy_select() {
+        use super::app::LogLevel;
+        let (_rt, mut app) = new_app();
+        let backend = TestBackend::new(90, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // A job log with a very long line to exercise wrapping.
+        app.job_title = "System check".into();
+        app.job_log.push((LogLevel::Info, "x ".repeat(200)));
+        app.job_log.push((LogLevel::Ok, "done".into()));
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+
+        // Scroll the job pane.
+        let (jx, jy) = (app.rects.job.x + 1, app.rects.job.y + 1);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: jx,
+            row: jy,
+            modifiers: KeyModifiers::NONE,
+        });
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+
+        // Hover over the footer, then copy + toggle select mode.
+        let fy = app.rects.footer.y;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 3,
+            row: fy,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.on_key(KeyEvent::from(KeyCode::Char('y')));
+        app.on_key(KeyEvent::from(KeyCode::Char('s')));
+        terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+        assert!(app.copy_pending.is_some() || !app.job_log.is_empty());
+    }
+}
+

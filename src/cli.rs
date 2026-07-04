@@ -23,6 +23,11 @@ pub struct Cli {
     /// Disable ANSI colours.
     #[arg(long, global = true)]
     pub no_color: bool,
+
+    /// Use the legacy line-based interactive menu instead of the full-screen
+    /// TUI when launched with no subcommand.
+    #[arg(long = "no-tui", global = true)]
+    pub no_tui: bool,
 }
 
 #[derive(Debug, Subcommand)]

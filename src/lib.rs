@@ -16,6 +16,7 @@ pub mod presets;
 pub mod prompts;
 pub mod session;
 pub mod transcribe;
+pub mod tui;
 pub mod ui;
 #[cfg(feature = "local-whisper")]
 pub mod whisper_local;
