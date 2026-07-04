@@ -8,9 +8,12 @@ mod fuzzy;
 mod input;
 mod jobs;
 mod markdown;
+mod screenshots;
 mod theme;
 
 pub use app::App;
+#[doc(hidden)]
+pub use screenshots::generate_screenshots;
 
 use std::io::{self, Stdout};
 use std::path::Path;
@@ -28,6 +31,18 @@ use ratatui::crossterm::{
 use ratatui::Terminal;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
+
+/// Render the given app state into an off-screen buffer of `width`×`height`.
+///
+/// Exposed for screenshot/example generation and tests; not part of the stable
+/// API surface.
+#[doc(hidden)]
+pub fn render_to_buffer(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    terminal.draw(|f| draw::draw(f, app)).expect("draw");
+    terminal.backend().buffer().clone()
+}
 
 /// Launch the full-screen TUI. Restores the terminal on every exit path,
 /// including panics.

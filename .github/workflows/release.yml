@@ -20,11 +20,67 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Test & Release
+  changes:
+    name: Detect relevant changes
     runs-on: ubuntu-latest
     # Skip on forks so their pushes don't fail trying to publish releases.
     if: github.repository == 'Kardzhilov/SessionSmith'
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Decide whether this push contains anything other than docs/README.
+      # We diff the ENTIRE push range (github.event.before -> github.sha), not
+      # just the tip commit, so a batch whose last commit is docs-only still
+      # releases when an earlier commit touched real code.
+      - name: Determine whether non-doc files changed
+        id: filter
+        run: |
+          set -uo pipefail
+
+          # Manual runs (workflow_dispatch) and non-push events always release.
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "Non-push event — running."
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          before="${{ github.event.before }}"
+          after="${{ github.sha }}"
+          zero="0000000000000000000000000000000000000000"
+
+          # First push to the branch, or the base commit isn't available:
+          # be safe and run.
+          if [ -z "$before" ] || [ "$before" = "$zero" ] \
+             || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            echo "First push or unknown base commit — running."
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          changed="$(git diff --name-only "$before" "$after")"
+          echo "Files changed across this push:"
+          echo "$changed"
+
+          # A file is a "doc" if it is a Markdown file (anywhere) or lives under
+          # docs/. If ANY changed file is NOT a doc, we release.
+          if printf '%s\n' "$changed" | grep -qvE '(\.md$|^docs/)'; then
+            echo "Non-doc changes detected — running release."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Only docs/README changed — skipping release."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    name: Test & Release
+    runs-on: ubuntu-latest
+    needs: changes
+    # Only release when the change filter says so (also skips on forks, since
+    # the `changes` job doesn't run there and this output is then empty).
+    if: needs.changes.outputs.run == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
