@@ -1,6 +1,6 @@
 //! Dependency checks: ffmpeg, whisper-cli, whisper model file, LLM backend reachability.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,14 +36,24 @@ pub fn check_ffprobe() -> DepStatus {
 }
 
 pub fn check_whisper_cli(custom: Option<&Path>) -> DepStatus {
-    // Explicit binary from config
+    // Explicit binary from config always takes precedence.
     if let Some(p) = custom {
         if p.exists() {
             let label = asr_label(p);
             return DepStatus { name: label, ok: true, detail: p.display().to_string() };
         }
     }
+    // The in-process whisper-rs engine is available whenever compiled in.
+    #[cfg(feature = "local-whisper")]
+    {
+        return DepStatus {
+            name: "asr (whisper-rs, in-process)".into(),
+            ok: true,
+            detail: crate::whisper_local::gpu_label().into(),
+        };
+    }
     // whisper.cpp variants on PATH
+    #[allow(unreachable_code)]
     for candidate in ["whisper-cli", "whisper.cpp", "main"] {
         if let Some(p) = which(candidate) {
             return DepStatus { name: "asr (whisper-cli)".into(), ok: true, detail: p.display().to_string() };
@@ -162,8 +172,12 @@ fn which(cmd: &str) -> Option<PathBuf> {
 }
 
 pub fn ensure_dirs() -> Result<()> {
-    for d in ["audio", "output"] {
-        std::fs::create_dir_all(d)?;
+    // Load the global config first so any user-configured input/output paths
+    // are published and created (not just the defaults).
+    let _ = crate::config::GlobalConfig::load_or_default();
+    for d in [crate::config::audio_dir(), crate::config::output_dir()] {
+        std::fs::create_dir_all(&d)
+            .with_context(|| format!("creating {}", d.display()))?;
     }
     Ok(())
 }

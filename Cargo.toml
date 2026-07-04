@@ -35,6 +35,8 @@ time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 regex = "1"
 sha2 = "0.10"
 hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+whisper-rs = { version = "0.14", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = "3"
@@ -43,6 +45,17 @@ once_cell = "1"
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
+
+[features]
+default = ["local-whisper"]
+# In-process transcription via whisper-rs (bundles & builds whisper.cpp).
+# Build requirements: a C/C++ toolchain, cmake, and clang/libclang.
+local-whisper = ["dep:whisper-rs", "whisper-rs/tracing_backend"]
+# GPU backends for local-whisper, selected at build time. Each needs the
+# matching SDK/driver installed (CUDA toolkit, Vulkan SDK, or Apple Metal).
+cuda = ["whisper-rs?/cuda"]
+vulkan = ["whisper-rs?/vulkan"]
+metal = ["whisper-rs?/metal"]
 
 [profile.release]
 lto = "thin"

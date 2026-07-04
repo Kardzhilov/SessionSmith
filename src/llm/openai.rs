@@ -45,6 +45,8 @@ struct ChatReq<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -72,6 +74,13 @@ impl LlmBackend for OpenAIBackend {
     {
         let model = if !opts.model.is_empty() { opts.model.clone() }
                     else { self.default_model.clone().ok_or_else(|| anyhow!("no model configured"))? };
+        // Map a JSON schema request onto OpenAI's `response_format`.
+        let response_format = opts.format.as_ref().map(|schema| {
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": { "name": "artifact", "schema": schema, "strict": false }
+            })
+        });
         let body = ChatReq {
             model: &model,
             messages: messages.iter()
@@ -80,6 +89,7 @@ impl LlmBackend for OpenAIBackend {
             stream: true,
             temperature: opts.temperature,
             max_tokens: opts.max_tokens,
+            response_format,
         };
         let resp = self.client.post(format!("{}/v1/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)

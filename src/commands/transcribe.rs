@@ -20,7 +20,13 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
     let model = args.asr_model
         .or_else(|| g.asr.model.clone())
         .unwrap_or_else(|| hardware::recommend(&hardware::detect()).whisper_model.to_string());
-    let tx_opts = TranscribeOpts { model, language: args.language, force: args.force };
+    let tx_opts = TranscribeOpts {
+        model,
+        language: args.language,
+        force: args.force,
+        diarize: args.diarize || g.asr.diarize,
+        vad: args.vad || g.asr.vad,
+    };
 
     let sessions: Vec<SessionInput> = if args.files.is_empty() {
         pick_and_build_sessions(&g, &tx_dir).await?
@@ -46,7 +52,7 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
 
 /// Show the audio picker and session builder interactively.
 pub async fn pick_and_build_sessions(g: &GlobalConfig, transcripts_dir: &Path) -> Result<Vec<SessionInput>> {
-    let mut files = audio::scan(Path::new("audio"), transcripts_dir)?;
+    let mut files = audio::scan(&crate::config::audio_dir(), transcripts_dir)?;
     if files.is_empty() {
         anyhow::bail!(
             "no audio files found in `audio/` — drop .wav/.mp3/.m4a/.flac/.ogg/.opus files there."

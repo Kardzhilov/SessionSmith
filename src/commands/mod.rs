@@ -6,7 +6,9 @@ pub mod init;
 pub mod log_cmd;
 pub mod models;
 pub mod notes;
+pub mod record;
 pub mod run;
+pub mod search;
 pub mod systems;
 pub mod transcribe;
 

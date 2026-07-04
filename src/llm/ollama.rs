@@ -40,6 +40,9 @@ struct ChatReq<'a> {
     /// When false, disables chain-of-thought reasoning in thinking models
     /// (Qwen3, etc). Dramatically reduces latency for extraction tasks.
     think: bool,
+    /// Structured-output schema (Ollama `format`). Omitted when free-form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -54,6 +57,10 @@ struct OllamaOptions {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     num_predict: Option<u32>,
+    /// Context window. Without this Ollama falls back to a small default
+    /// (often 4096) and silently truncates long transcripts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<u32>,
     /// Force all model layers onto the GPU.  Without this Ollama may keep the
     /// model in VRAM but run matrix multiplications on CPU (worst of both worlds).
     /// -1 tells llama.cpp to offload as many layers as VRAM allows.
@@ -93,8 +100,9 @@ impl LlmBackend for OllamaBackend {
                 .map(|m| MsgOut { role: m.role.as_str(), content: &m.content })
                 .collect(),
             stream: true,
-            options: OllamaOptions { temperature: opts.temperature, num_predict: opts.max_tokens, num_gpu: -1 },
+            options: OllamaOptions { temperature: opts.temperature, num_predict: opts.max_tokens, num_ctx: opts.num_ctx, num_gpu: -1 },
             think: opts.think,
+            format: opts.format.clone(),
         };
         let resp = self.client.post(format!("{}/api/chat", self.base_url))
             .json(&body).send().await?;

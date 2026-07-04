@@ -54,6 +54,8 @@ pub async fn run_notes(
         max_tokens: None,
         timeout: Duration::from_secs(g.runtime.timeout_secs),
         think: g.runtime.think,
+        num_ctx: g.effective_num_ctx(),
+        format: None,
     };
 
     let transcript = std::fs::read_to_string(&session.transcript_path)
@@ -70,8 +72,7 @@ pub async fn run_notes(
             std::fs::read_to_string(&bullets_path)?
         } else {
             let sys = prompts::system_for(Artifact::Bullets, campaign, preset);
-            let user = prompts::user_bullets_from_transcript(&transcript);
-            let text = call_one(backend.as_ref(), &chat_opts, Artifact::Bullets, sys, user).await?;
+            let text = generate_bullets(backend.as_ref(), &chat_opts, sys, &transcript, g).await?;
             std::fs::write(&bullets_path, &text)?;
             crate::ui::ok(&format!("wrote {}", bullets_path.display()));
             text
@@ -134,6 +135,31 @@ pub async fn run_notes(
         }
     }
 
+    // --- Structured JSON companion (opt-in) ---
+    if g.runtime.structured && opts.artifacts.contains(&Artifact::DmNotes) {
+        let out = session.notes_dir.join("dm-notes.json");
+        if opts.resume && out.exists() && !opts.force {
+            crate::ui::ok(&format!("dm-notes.json: reuse {}", out.display()));
+        } else {
+            let mut sopts = chat_opts.clone();
+            sopts.format = Some(prompts::dm_notes_schema());
+            let sys = prompts::dm_notes_structured_system(campaign, preset);
+            let user = prompts::user_from_bullets(&bullets);
+            match call_one(backend.as_ref(), &sopts, Artifact::DmNotes, sys, user).await {
+                Ok(text) => {
+                    // Best-effort pretty-print; write raw if not valid JSON.
+                    let pretty = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                        .unwrap_or(text);
+                    std::fs::write(&out, &pretty)?;
+                    crate::ui::ok(&format!("wrote {}", out.display()));
+                }
+                Err(e) => crate::ui::warn(&format!("dm-notes.json: failed — {e:#}")),
+            }
+        }
+    }
+
     // --- Campaign log merge ---
     if opts.update_log {
         let summary_path = session.notes_dir.join(Artifact::Summary.filename());
@@ -145,6 +171,13 @@ pub async fn run_notes(
             }
         } else {
             crate::ui::warn("no summary.md present; skipping campaign log merge");
+        }
+    }
+
+    // --- Local search index (opt-in, on by default) ---
+    if g.runtime.index {
+        if let Err(e) = crate::index::record_session(campaign, &session.stem, &session.notes_dir) {
+            crate::ui::warn(&format!("index: {e:#}"));
         }
     }
 
@@ -210,4 +243,142 @@ pub fn parse_artifacts(spec: &str) -> Result<Vec<Artifact>> {
         }
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Bullets generation with transcript chunking (map-reduce)
+// ---------------------------------------------------------------------------
+
+/// Generate the bullet outline from a transcript, chunking it into overlapping
+/// windows when it would exceed the model's context budget. Each chunk is
+/// summarised independently (map), then the partial outlines are merged into a
+/// single chronological outline (reduce).
+async fn generate_bullets(
+    backend: &dyn LlmBackend,
+    chat_opts: &ChatOptions,
+    sys: String,
+    transcript: &str,
+    g: &GlobalConfig,
+) -> Result<String> {
+    let budget = char_budget(chat_opts.num_ctx);
+
+    if !g.runtime.chunk || transcript.chars().count() <= budget {
+        let user = prompts::user_bullets_from_transcript(transcript);
+        return call_one(backend, chat_opts, Artifact::Bullets, sys, user).await;
+    }
+
+    let chunks = chunk_text(transcript, budget, g.runtime.chunk_overlap_chars);
+    crate::ui::info(&format!(
+        "transcript is long ({} chars) — chunking into {} windows (budget ~{} chars)",
+        transcript.chars().count(),
+        chunks.len(),
+        budget,
+    ));
+
+    let mut partials: Vec<String> = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.iter().enumerate() {
+        let user = prompts::user_bullets_chunk(chunk, i + 1, chunks.len());
+        match call_one(backend, chat_opts, Artifact::Bullets, sys.clone(), user).await {
+            Ok(text) => partials.push(text),
+            Err(e) => crate::ui::warn(&format!("bullets chunk {}/{} failed — {e:#}", i + 1, chunks.len())),
+        }
+    }
+
+    if partials.is_empty() {
+        return Err(anyhow!("all transcript chunks failed"));
+    }
+    if partials.len() == 1 {
+        return Ok(partials.remove(0));
+    }
+
+    // Reduce: merge the per-chunk outlines into one chronological outline.
+    let combined = partials.join("\n");
+    let merge_sys = prompts::bullets_merge_system();
+    let merge_user = prompts::user_bullets_merge(&combined);
+    call_one(backend, chat_opts, Artifact::Bullets, merge_sys, merge_user).await
+}
+
+/// Approximate character budget for one transcript chunk given a context
+/// window. Reserves headroom for the system prompt and the generated output,
+/// then converts the remaining tokens to characters (~3 chars/token).
+fn char_budget(num_ctx: Option<u32>) -> usize {
+    let ctx = num_ctx.unwrap_or(8192) as usize;
+    // Reserve ~half the window for the prompt scaffold + generated bullets.
+    let reserve = (ctx / 2).max(2048);
+    let usable_tokens = ctx.saturating_sub(reserve).max(1024);
+    usable_tokens * 3
+}
+
+/// Split text into overlapping windows of at most `max_chars`, preferring line
+/// boundaries so chunks don't cut mid-sentence. `overlap` characters of the
+/// previous window are prepended to the next for cross-boundary context.
+fn chunk_text(text: &str, max_chars: usize, overlap: usize) -> Vec<String> {
+    let max_chars = max_chars.max(1000);
+    let overlap = overlap.min(max_chars / 2);
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for line in text.split_inclusive('\n') {
+        // A single oversized line is hard-split on character boundaries.
+        if line.len() > max_chars {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            let mut rest = line;
+            while rest.len() > max_chars {
+                let mut split = max_chars;
+                while !rest.is_char_boundary(split) && split > 0 { split -= 1; }
+                chunks.push(rest[..split].to_string());
+                rest = &rest[split..];
+            }
+            current.push_str(rest);
+            continue;
+        }
+        if current.len() + line.len() > max_chars && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            // Seed the next chunk with the tail of the previous one for context.
+            if overlap > 0 {
+                if let Some(prev) = chunks.last() {
+                    let start = prev.len().saturating_sub(overlap);
+                    let mut s = start;
+                    while !prev.is_char_boundary(s) && s < prev.len() { s += 1; }
+                    current.push_str(&prev[s..]);
+                }
+            }
+        }
+        current.push_str(line);
+    }
+    if !current.trim().is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn char_budget_scales_with_ctx() {
+        assert!(char_budget(Some(32_768)) > char_budget(Some(8_192)));
+        assert!(char_budget(None) > 0);
+    }
+
+    #[test]
+    fn chunk_text_splits_long_input() {
+        let line = "This is a line of the session transcript.\n";
+        let text = line.repeat(200);
+        let chunks = chunk_text(&text, 1000, 100);
+        assert!(chunks.len() > 1, "expected multiple chunks");
+        for c in &chunks {
+            assert!(c.chars().count() <= 1000 + 100, "chunk within budget+overlap");
+        }
+    }
+
+    #[test]
+    fn chunk_text_single_when_small() {
+        let chunks = chunk_text("short transcript", 1000, 100);
+        assert_eq!(chunks.len(), 1);
+    }
 }

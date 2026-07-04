@@ -51,6 +51,8 @@ pub async fn run(args: LogArgs) -> Result<()> {
                 max_tokens: None,
                 timeout: std::time::Duration::from_secs(g.runtime.timeout_secs),
                 think: g.runtime.think,
+                num_ctx: g.effective_num_ctx(),
+                format: None,
             };
 
             for (summary_path, mtime, stem) in sessions {

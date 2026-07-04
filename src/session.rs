@@ -177,6 +177,8 @@ async fn ai_sort_by_content(
         model: fast_model.to_string(),
         language: "auto".to_string(),
         force: true,
+        diarize: false,
+        vad: false,
     };
 
     ui::header(&format!("Transcribing first 90 s of {} files for ordering…", files.len()));
@@ -278,6 +280,8 @@ async fn ai_sort_by_content(
             max_tokens: Some(64),
             timeout: std::time::Duration::from_secs(30),
             think: false,
+            num_ctx: g.effective_num_ctx(),
+            format: None,
         },
         Some(&pb),
     )

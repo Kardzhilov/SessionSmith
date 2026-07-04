@@ -42,6 +42,8 @@ async fn main() -> Result<()> {
         Some(Command::Systems(args)) => commands::systems::run(args).await,
         Some(Command::Models(args)) => commands::models::run(args).await,
         Some(Command::Log(args)) => commands::log_cmd::run(args).await,
+        Some(Command::Search(args)) => commands::search::run(args).await,
+        Some(Command::Record(args)) => commands::record::run(args).await,
         None => commands::home::run().await,
     };
 

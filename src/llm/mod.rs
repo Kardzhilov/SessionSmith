@@ -35,6 +35,20 @@ pub struct ChatOptions {
     pub timeout: Duration,
     /// Allow thinking/reasoning models to use chain-of-thought.
     pub think: bool,
+    /// Context window size (Ollama `num_ctx`). `None` uses the backend default.
+    pub num_ctx: Option<u32>,
+    /// When set, request structured output constrained to this JSON schema
+    /// (Ollama `format`, OpenAI `response_format`). Ignored by backends that
+    /// don't support it.
+    pub format: Option<serde_json::Value>,
+}
+
+impl ChatOptions {
+    /// Construct options with the extended fields defaulted (no context
+    /// override, free-form output).
+    pub fn new(model: String, temperature: Option<f32>, max_tokens: Option<u32>, timeout: Duration, think: bool) -> Self {
+        Self { model, temperature, max_tokens, timeout, think, num_ctx: None, format: None }
+    }
 }
 
 #[async_trait]

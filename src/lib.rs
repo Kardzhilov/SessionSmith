@@ -8,6 +8,7 @@ pub mod commands;
 pub mod config;
 pub mod deps;
 pub mod hardware;
+pub mod index;
 pub mod llm;
 pub mod models;
 pub mod pipeline;
@@ -16,6 +17,8 @@ pub mod prompts;
 pub mod session;
 pub mod transcribe;
 pub mod ui;
+#[cfg(feature = "local-whisper")]
+pub mod whisper_local;
 
 /// Convenience result alias used across the crate.
 pub type Result<T> = anyhow::Result<T>;

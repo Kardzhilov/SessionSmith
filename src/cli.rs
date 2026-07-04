@@ -44,6 +44,10 @@ pub enum Command {
     /// Show or rebuild the rolling campaign log.
     #[command(name = "log")]
     Log(LogArgs),
+    /// Search indexed session notes for a phrase.
+    Search(SearchArgs),
+    /// Record live audio from a capture device into `audio/`.
+    Record(RecordArgs),
 }
 
 #[derive(Debug, Default, Args)]
@@ -77,6 +81,12 @@ pub struct TranscribeArgs {
     /// Language hint (e.g. `en`, `auto`).
     #[arg(long, default_value = "auto")]
     pub language: String,
+    /// Enable speaker diarization for this run (whisperX). Off by default.
+    #[arg(long)]
+    pub diarize: bool,
+    /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
+    #[arg(long)]
+    pub vad: bool,
 }
 
 #[derive(Debug, Args)]
@@ -132,6 +142,12 @@ pub struct RunArgs {
     /// Non-interactive: process every audio file newest-first without prompting.
     #[arg(long)]
     pub all: bool,
+    /// Enable speaker diarization for this run (whisperX). Off by default.
+    #[arg(long)]
+    pub diarize: bool,
+    /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
+    #[arg(long)]
+    pub vad: bool,
 }
 
 #[derive(Debug, Args)]
@@ -183,4 +199,24 @@ pub enum LogAction {
     Show,
     /// Re-merge all session summaries from scratch.
     Rebuild,
+}
+
+#[derive(Debug, Default, Args)]
+pub struct SearchArgs {
+    /// Text to search for across all indexed session notes.
+    #[arg(required = true, num_args = 1..)]
+    pub query: Vec<String>,
+}
+
+#[derive(Debug, Default, Args)]
+pub struct RecordArgs {
+    /// Output name (without extension). Prompted if omitted.
+    pub name: Option<String>,
+    /// ffmpeg input device (e.g. `default`, a PulseAudio source, `hw:0`).
+    #[arg(long)]
+    pub device: Option<String>,
+    /// Input format for ffmpeg (`alsa`, `pulse`, `avfoundation`, `dshow`).
+    /// Auto-detected from the OS when omitted.
+    #[arg(long)]
+    pub format: Option<String>,
 }

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::path::Path;
 
 use crate::audio;
 use crate::cli::RunArgs;
@@ -43,7 +42,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 .unwrap_or_else(|| "session".to_string()),
         }).collect()
     } else if args.all {
-        let mut scanned = audio::scan(Path::new("audio"), &campaign.transcripts_dir())?;
+        let mut scanned = audio::scan(&crate::config::audio_dir(), &campaign.transcripts_dir())?;
         audio::enrich_durations(&mut scanned);
         if scanned.is_empty() {
             anyhow::bail!("no audio files in `audio/`");
@@ -60,6 +59,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
         model: asr_model,
         language: "auto".into(),
         force: args.force,
+        diarize: args.diarize || g.asr.diarize,
+        vad: args.vad || g.asr.vad,
     };
 
     let artifacts = commands::notes::resolve_artifacts(&args.artifacts, &campaign.outputs.default)?;

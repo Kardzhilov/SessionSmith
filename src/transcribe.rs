@@ -31,6 +31,21 @@ enum AsrBackend {
     WhisperCli(PathBuf),
     /// Python `whisperx`: takes a model *name* via `--model`, uses the HF cache.
     WhisperX(PathBuf),
+    /// In-process whisper.cpp via `whisper-rs` (no external process).
+    #[cfg(feature = "local-whisper")]
+    Local,
+}
+
+impl AsrBackend {
+    /// Whether this engine needs a downloaded ggml model file.
+    fn needs_ggml_model(&self) -> bool {
+        match self {
+            AsrBackend::WhisperCli(_) => true,
+            #[cfg(feature = "local-whisper")]
+            AsrBackend::Local => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +53,17 @@ pub struct TranscribeOpts {
     pub model: String,
     pub language: String,
     pub force: bool,
+    /// Enable speaker diarization (whisperX only). Off by default.
+    pub diarize: bool,
+    /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
+    pub vad: bool,
+}
+
+impl TranscribeOpts {
+    /// Options for a plain transcription, diarization/VAD taken from config.
+    pub fn from_config(model: String, language: String, force: bool, g: &GlobalConfig) -> Self {
+        Self { model, language, force, diarize: g.asr.diarize, vad: g.asr.vad }
+    }
 }
 
 #[derive(Debug)]
@@ -60,16 +86,59 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
     }
 
-    let backend = resolve_asr_backend(g)?;
+    let backend = resolve_asr_backend(g, opts)?;
 
-    // Only the whisper.cpp path needs the ggml model file; whisperx manages its
-    // own model cache via Hugging Face.
-    let model_path_opt = if matches!(backend, AsrBackend::WhisperCli(_)) {
+    // whisper.cpp (external or in-process) needs a ggml model file; whisperx
+    // manages its own model cache via Hugging Face.
+    let model_path_opt = if backend.needs_ggml_model() {
         let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
         Some(models::ensure_whisper(&opts.model, &cache).await?)
     } else {
         None
     };
+
+    // Optional VAD (silence-removal) pre-pass. Produces a temp file with the
+    // same stem (so whisperx names its outputs correctly) that is fed to ASR.
+    let hf_token = g.resolved_hf_token();
+    let asr_input: PathBuf = if opts.vad {
+        match apply_vad(audio, &stem) {
+            Ok(p) => p,
+            Err(e) => {
+                crate::ui::warn(&format!("VAD pre-pass failed ({e}); using original audio"));
+                audio.to_path_buf()
+            }
+        }
+    } else {
+        audio.to_path_buf()
+    };
+    let vad_temp = if asr_input != *audio { Some(asr_input.clone()) } else { None };
+
+    // In-process transcription via whisper-rs — handled entirely here.
+    #[cfg(feature = "local-whisper")]
+    if matches!(backend, AsrBackend::Local) {
+        let model_path = model_path_opt
+            .as_ref()
+            .ok_or_else(|| anyhow!("local engine requires a ggml model"))?;
+        let threads = g.asr.threads.unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4).min(8)
+        }) as i32;
+        let use_gpu = !matches!(g.asr.device.as_deref(), Some(d) if d.eq_ignore_ascii_case("cpu"));
+
+        let pb = crate::ui::spinner(&format!("transcribing {stem} with whisper-{} (in-process)", opts.model));
+        let result = crate::whisper_local::transcribe_file(model_path, &asr_input, &opts.language, threads, use_gpu);
+        pb.finish_and_clear();
+
+        if let Some(tmp) = &vad_temp {
+            std::fs::remove_file(tmp).ok();
+        }
+        let segments = result?;
+        std::fs::write(&out_txt, crate::whisper_local::segments_to_text(&segments))?;
+        std::fs::write(&out_srt, crate::whisper_local::segments_to_srt(&segments))?;
+        crate::ui::info(&format!("ASR device: {}", crate::whisper_local::gpu_label()));
+        crate::ui::ok(&format!("wrote {}", out_txt.display()));
+        crate::ui::ok(&format!("wrote {}", out_srt.display()));
+        return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
+    }
 
     let spinner = crate::ui::spinner(&format!("transcribing {stem} with whisper-{}", opts.model));
 
@@ -83,7 +152,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             let prefix = out_dir.join(&stem);
             let mut cmd = Command::new(binary);
             cmd.args(["-m", model_path.to_str().unwrap()])
-                .arg("-f").arg(audio)
+                .arg("-f").arg(&asr_input)
                 .args(["-otxt", "-osrt"])
                 .arg("-of").arg(&prefix)
                 .args(["-t", &threads.to_string()])
@@ -110,8 +179,12 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             let use_module = python != *binary; // true when we found a sibling python3
 
             let free_mb = free_vram_mb();
-            let device = if free_mb >= 4096 { "cuda" } else { "cpu" };
-            let compute = if device == "cuda" { "float16" } else { "int8" };
+            let (device, compute): (&str, &str) = match g.asr.device.as_deref() {
+                Some(d) if d.eq_ignore_ascii_case("cuda") => ("cuda", "float16"),
+                Some(d) if d.eq_ignore_ascii_case("cpu") => ("cpu", "int8"),
+                _ if free_mb >= 4096 => ("cuda", "float16"),
+                _ => ("cpu", "int8"),
+            };
 
             let run_whisperx = |device: &str, compute: &str| -> std::io::Result<std::process::Output> {
                 let mut cmd = if use_module {
@@ -121,13 +194,23 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
                 } else {
                     Command::new(binary)
                 };
-                cmd.arg(audio)
+                cmd.arg(&asr_input)
                     .args(["--model", &opts.model])
                     .args(["--output_dir", out_dir.to_str().unwrap()])
                     .args(["--output_format", "all"])
-                    .arg("--no_align")
                     .args(["--device", device, "--compute_type", compute])
                     .env_remove("PYTHONPATH"); // prevent stale PYTHONPATH from leaking in
+                if opts.diarize {
+                    // Diarization needs word alignment, so we must NOT pass
+                    // --no_align here. A HF token is required for the pyannote
+                    // models; pass it when configured.
+                    cmd.arg("--diarize");
+                    if let Some(tok) = &hf_token {
+                        cmd.args(["--hf_token", tok]);
+                    }
+                } else {
+                    cmd.arg("--no_align");
+                }
                 if opts.language != "auto" {
                     cmd.args(["--language", &opts.language]);
                 }
@@ -163,6 +246,8 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             };
             (binary.clone(), o, Some(device_label))
         }
+        #[cfg(feature = "local-whisper")]
+        AsrBackend::Local => unreachable!("local engine handled before this match"),
     };
 
     spinner.finish_and_clear();
@@ -177,12 +262,47 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     if !out_txt.exists() {
         bail!("ASR did not produce {} — check stderr above", out_txt.display());
     }
+    if opts.diarize {
+        crate::ui::info("diarization enabled (whisperX) — transcript includes speaker labels");
+    }
+    // Remove the temporary VAD-processed file if one was created.
+    if let Some(tmp) = &vad_temp {
+        std::fs::remove_file(tmp).ok();
+    }
     crate::ui::ok(&format!("wrote {}", out_txt.display()));
     if out_srt.exists() {
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
     }
     let _ = binary_path; // used only for error context above
     Ok(TranscribeOutput { txt: out_txt, srt: out_srt })
+}
+
+/// Apply a Voice-Activity-Detection style silence-removal pass with ffmpeg,
+/// writing a 16 kHz mono file with the same stem into a temp directory. This
+/// trims long gaps so ASR spends time only on speech.
+fn apply_vad(audio: &Path, stem: &str) -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join("sessionsmith_vad");
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join(format!("{stem}.wav"));
+    let pb = crate::ui::spinner("VAD: removing silence with ffmpeg");
+    // Trim leading/trailing and internal silences longer than ~1s below -35dB.
+    let filter = "silenceremove=start_periods=1:start_silence=0.3:start_threshold=-35dB:\
+                  stop_periods=-1:stop_silence=1:stop_threshold=-35dB";
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-i"])
+        .arg(audio)
+        .args(["-af", filter, "-ar", "16000", "-ac", "1"])
+        .arg(&out)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| "ffmpeg not found — install ffmpeg")?;
+    pb.finish_and_clear();
+    if !status.success() || !out.exists() {
+        bail!("ffmpeg silence-removal failed");
+    }
+    crate::ui::ok(&format!("VAD → {}", out.display()));
+    Ok(out)
 }
 
 /// Concatenate multiple audio files into one using ffmpeg's concat demuxer.
@@ -243,69 +363,109 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
     Ok(out)
 }
 
-/// Locate the best available ASR engine, preferring whisper.cpp then whisperx.
+/// Locate the ASR engine to use, honouring the `[asr] engine` preference and
+/// the diarization requirement.
 ///
-/// Resolution order:
-///   1. `[asr].binary` from global config (explicit override)
-///   2. `whisper-cli` / `whisper.cpp` / `main` on PATH  (whisper.cpp)
-///   3. `./whisper.cpp/build/bin/whisper-cli` or `./build/bin/whisper-cli`  (local build)
-///   4. `.venv/bin/whisperx`  (project-local Python venv — works out of the box)
-///   5. `whisperx` on PATH
-fn resolve_asr_backend(g: &GlobalConfig) -> Result<AsrBackend> {
-    // 1. Explicit binary from config
+/// - Diarization is only available via whisperX, so it forces that engine.
+/// - `engine = "local"` uses the in-process whisper-rs engine (requires the
+///   `local-whisper` build feature).
+/// - `engine = "whisper-cli"` / `"whisperx"` force an external engine.
+/// - Unset / `"auto"` prefers the in-process engine when compiled in, then
+///   falls back to an external binary.
+fn resolve_asr_backend(g: &GlobalConfig, opts: &TranscribeOpts) -> Result<AsrBackend> {
+    // Diarization is a whisperX-only capability.
+    if opts.diarize {
+        return resolve_whisperx(g).ok_or_else(|| anyhow!(
+            "diarization requires whisperX, but it was not found.\n  \
+             Install it (e.g. `python -m venv .venv && .venv/bin/pip install whisperx`) \
+             or disable diarization."
+        ));
+    }
+
+    match g.asr.engine.as_deref().map(|s| s.to_lowercase()) {
+        Some(ref e) if e == "local" => {
+            #[cfg(feature = "local-whisper")]
+            { Ok(AsrBackend::Local) }
+            #[cfg(not(feature = "local-whisper"))]
+            { bail!("engine = \"local\" but this binary was built without the `local-whisper` feature") }
+        }
+        Some(ref e) if e == "whisper-cli" => {
+            resolve_whisper_cli(g).ok_or_else(|| anyhow!("whisper-cli not found (engine = \"whisper-cli\")"))
+        }
+        Some(ref e) if e == "whisperx" => {
+            resolve_whisperx(g).ok_or_else(|| anyhow!("whisperx not found (engine = \"whisperx\")"))
+        }
+        _ => {
+            // auto: prefer the in-process engine when available.
+            #[cfg(feature = "local-whisper")]
+            { Ok(AsrBackend::Local) }
+            #[cfg(not(feature = "local-whisper"))]
+            {
+                if let Some(b) = resolve_whisper_cli(g) {
+                    return Ok(b);
+                }
+                if let Some(b) = resolve_whisperx(g) {
+                    return Ok(b);
+                }
+                bail!(
+                    "No ASR engine found.\n\n\
+                     Option A — build with the in-process engine (default):\n  \
+                       cargo build --release   # needs clang/libclang + cmake\n\n\
+                     Option B — whisper.cpp binary:\n  \
+                       git clone https://github.com/ggerganov/whisper.cpp\n  \
+                       cd whisper.cpp && make -j && sudo cp main /usr/local/bin/whisper-cli\n\n\
+                     Option C — whisperx (needed for diarization):\n  \
+                       python -m venv .venv && .venv/bin/pip install whisperx\n\n\
+                     Or set an explicit path in ~/.config/sessionsmith/config.toml:\n  \
+                       [asr]\n  \
+                       binary = \"/path/to/whisper-cli\"  # or whisperx\n"
+                )
+            }
+        }
+    }
+}
+
+/// Resolve a whisper.cpp `whisper-cli` engine, if present.
+fn resolve_whisper_cli(g: &GlobalConfig) -> Option<AsrBackend> {
+    // Explicit non-whisperx binary from config.
     if let Some(b) = &g.asr.binary {
         if b.exists() {
             let name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            return if name.contains("whisperx") {
-                Ok(AsrBackend::WhisperX(b.clone()))
-            } else {
-                Ok(AsrBackend::WhisperCli(b.clone()))
-            };
+            if !name.contains("whisperx") {
+                return Some(AsrBackend::WhisperCli(b.clone()));
+            }
         }
     }
-
-    // 2. whisper.cpp variants on PATH
     for candidate in ["whisper-cli", "whisper.cpp", "main"] {
         if let Some(p) = path_of(candidate) {
-            return Ok(AsrBackend::WhisperCli(p));
+            return Some(AsrBackend::WhisperCli(p));
         }
     }
-
-    // 3. Common local whisper.cpp build locations
     for extra in ["./whisper.cpp/build/bin/whisper-cli", "./build/bin/whisper-cli"] {
         let p = Path::new(extra);
         if p.exists() {
-            return Ok(AsrBackend::WhisperCli(p.to_path_buf()));
+            return Some(AsrBackend::WhisperCli(p.to_path_buf()));
         }
     }
+    None
+}
 
-    // 4. whisperx in the project's .venv (no external install required)
+/// Resolve a whisperX engine, if present.
+fn resolve_whisperx(g: &GlobalConfig) -> Option<AsrBackend> {
+    if let Some(b) = &g.asr.binary {
+        if b.exists() {
+            let name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.contains("whisperx") {
+                return Some(AsrBackend::WhisperX(b.clone()));
+            }
+        }
+    }
     let venv_wx = Path::new(".venv/bin/whisperx");
     if venv_wx.exists() {
-        // Canonicalize to an absolute path so that the sibling `python3` lookup
-        // succeeds regardless of the working directory, and so Python can locate
-        // `pyvenv.cfg` unambiguously when invoked via an absolute symlink path.
         let abs = std::fs::canonicalize(venv_wx).unwrap_or_else(|_| venv_wx.to_path_buf());
-        return Ok(AsrBackend::WhisperX(abs));
+        return Some(AsrBackend::WhisperX(abs));
     }
-
-    // 5. whisperx anywhere on PATH
-    if let Some(p) = path_of("whisperx") {
-        return Ok(AsrBackend::WhisperX(p));
-    }
-
-    bail!(
-        "No ASR engine found.\n\n\
-         Option A — whisper.cpp (faster, no Python needed):\n  \
-           git clone https://github.com/ggerganov/whisper.cpp\n  \
-           cd whisper.cpp && make -j\n  \
-           sudo cp main /usr/local/bin/whisper-cli\n\n\
-         Option B — whisperx (already in .venv if present):\n  \
-           python -m venv .venv && .venv/bin/pip install whisperx\n\n\
-         Or set an explicit path in ~/.config/sessionsmith/config.toml:\n  \
-           [asr]\n  \
-           binary = \"/path/to/whisper-cli\"  # or whisperx\n"
-    )
+    path_of("whisperx").map(AsrBackend::WhisperX)
 }
 
 /// Returns free VRAM in MiB on the first GPU, or 0 if no GPU / nvidia-smi unavailable.

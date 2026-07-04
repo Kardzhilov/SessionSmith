@@ -195,11 +195,21 @@ pub fn system_for(artifact: Artifact, campaign: &CampaignConfig, preset: &Preset
           Do NOT substitute names with character names or player names. \
           If the outline contains no TTRPG gameplay (test recording, setup chatter, etc.), \
           respond with exactly one sentence saying so and stop."
+    } else if artifact == Artifact::Bullets {
+        ASR_CORRECTION_NOTE
     } else {
         ""
     };
     compose_system(&base, campaign, preset, extra, true)
 }
+
+/// Guidance appended to transcript-reading prompts: whisper output contains
+/// homophone/spelling errors, especially for invented fantasy proper nouns.
+const ASR_CORRECTION_NOTE: &str = "\
+The transcript is machine-generated speech-to-text and may contain spelling, \
+homophone, or word-boundary errors — especially for invented names of people, \
+places, spells, and items. Infer the intended word from context and use a \
+consistent spelling for each proper noun throughout.";
 
 pub fn campaign_log_system(campaign: &CampaignConfig, preset: &Preset) -> String {
     let base = campaign.prompts.campaign_log.clone()
@@ -231,6 +241,77 @@ fn artifact_override(a: Artifact, o: &PromptOverrides) -> Option<String> {
 
 pub fn user_bullets_from_transcript(transcript: &str) -> String {
     format!("Transcript:\n\n{transcript}")
+}
+
+/// User prompt for one chunk of a long transcript (map step).
+pub fn user_bullets_chunk(chunk: &str, index: usize, total: usize) -> String {
+    format!(
+        "This is part {index} of {total} of a single session transcript, split \
+         for length. Extract the bullet outline for THIS part only, staying \
+         chronological. Do not summarise or add a preamble.\n\nTranscript part \
+         {index}/{total}:\n\n{chunk}"
+    )
+}
+
+/// System prompt for merging per-chunk bullet outlines into one (reduce step).
+pub fn bullets_merge_system() -> String {
+    "\
+You are merging several partial bullet-point outlines taken from consecutive \
+parts of ONE session transcript. Produce a single, clean, chronological outline.
+
+Rules:
+- Preserve chronological order across all parts.
+- Remove duplicate bullets caused by the overlap between parts.
+- Keep one bullet per discrete event, a single sentence each.
+- Do not invent events; only merge what is present.
+- No preamble. Begin with the first bullet."
+        .to_string()
+}
+
+/// User prompt for the merge step.
+pub fn user_bullets_merge(combined: &str) -> String {
+    format!("Partial outlines to merge (in order):\n\n{combined}")
+}
+
+/// JSON schema constraining the structured `dm-notes.json` companion artifact.
+pub fn dm_notes_schema() -> serde_json::Value {
+    let str_list = serde_json::json!({ "type": "array", "items": { "type": "string" } });
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "where_we_left_off": { "type": "string" },
+            "npcs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "role": { "type": "string" },
+                        "relationship_to_party": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            },
+            "locations": str_list,
+            "loot": str_list,
+            "active_quests": str_list,
+            "open_hooks": str_list,
+            "pc_consequences": str_list,
+            "cliffhanger": { "type": "string" }
+        },
+        "required": ["where_we_left_off", "npcs", "open_hooks"]
+    })
+}
+
+/// System prompt for the structured `dm-notes.json` companion.
+pub fn dm_notes_structured_system(campaign: &CampaignConfig, preset: &Preset) -> String {
+    let base = "\
+You are an expert TTRPG game master assistant. Given a bullet-point session \
+outline, extract structured DM-prep data as a single JSON object matching the \
+provided schema. Use only information present in the outline. Leave a field \
+empty ([] or \"\") when the outline has nothing for it. Output ONLY the JSON \
+object, no markdown, no preamble.";
+    compose_system(base, campaign, preset, "", true)
 }
 
 pub fn user_from_bullets(bullets: &str) -> String {

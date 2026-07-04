@@ -1,9 +1,9 @@
 //! Interactive start screen shown when SessionSmith is invoked with no subcommand.
 
 use anyhow::Result;
-use inquire::Select;
+use inquire::{Select, Text};
 
-use crate::cli::{DoctorArgs, LogAction, LogArgs, ModelsArgs, NotesArgs, RunArgs, TranscribeArgs};
+use crate::cli::{DoctorArgs, LogAction, LogArgs, ModelsArgs, NotesArgs, RunArgs, SearchArgs, TranscribeArgs};
 use crate::config::GlobalConfig;
 use crate::hardware;
 use crate::presets;
@@ -17,6 +17,7 @@ enum MenuChoice {
     CampaignLog,
     Models,
     SystemCheck,
+    SearchNotes,
     Quit,
 }
 
@@ -93,6 +94,10 @@ pub async fn run() -> Result<()> {
             "System check         — verify dependencies and hardware",
             MenuChoice::SystemCheck,
         ),
+        (
+            "Search notes         — find a phrase across all sessions",
+            MenuChoice::SearchNotes,
+        ),
         ("Quit", MenuChoice::Quit),
     ];
 
@@ -119,6 +124,8 @@ pub async fn run() -> Result<()> {
                 asr_model: None,
                 force: false,
                 language: "auto".into(),
+                diarize: false,
+                vad: false,
             })
             .await
         }
@@ -146,6 +153,16 @@ pub async fn run() -> Result<()> {
         MenuChoice::Models => commands::models::run(ModelsArgs { action: None }).await,
 
         MenuChoice::SystemCheck => commands::doctor::run(DoctorArgs { json: false }).await,
+
+        MenuChoice::SearchNotes => {
+            let query = Text::new("Search notes for:").prompt();
+            match query {
+                Ok(q) if !q.trim().is_empty() => {
+                    commands::search::run(SearchArgs { query: vec![q] }).await
+                }
+                _ => Ok(()),
+            }
+        }
 
         MenuChoice::Quit => Ok(()),
     }

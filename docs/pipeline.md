@@ -49,6 +49,22 @@ SessionSmith checks for ASR engines in this order:
 - Uses CUDA when ≥4096 MB free VRAM
 - Falls back to CPU automatically (with a warning)
 - On CUDA OOM during transcription, retries on CPU
+- `[asr] device = "cuda" | "cpu"` overrides the auto-detection (useful on
+  non-NVIDIA hardware)
+
+### Speaker diarization (optional, off by default)
+
+With `[asr] diarize = true` (or `--diarize`), whisperX aligns words and runs
+pyannote diarization so the transcript carries speaker labels. It is **off by
+default**: current local models frequently confuse the GM with players, which
+tends to cause more harm than help. It is kept as an opt-in for future, better
+models. A Hugging Face token (`[asr] hf_token`) is required for the pyannote
+models.
+
+### VAD pre-pass (optional)
+
+With `[asr] vad = true` (or `--vad`), an ffmpeg silence-removal pass trims long
+gaps before ASR, so transcription spends time only on speech.
 
 ### Output
 
@@ -75,6 +91,13 @@ The pipeline uses a **bullets-first** design:
 1. **Bullets** (Pass A) — the full transcript is sent to the LLM with a
    system-aware prompt. Output: a dense chronological outline of everything
    that happened.
+
+   For transcripts that exceed the model's context budget (see `[runtime]
+   num_ctx`), the bullets pass switches to **map-reduce**: the transcript is
+   split into overlapping windows (`[runtime] chunk`, `chunk_overlap_chars`),
+   each window is summarised independently, and the partial outlines are merged
+   into one chronological outline. This prevents silent truncation of long
+   sessions.
 
 2. **Derived artifacts** (Passes B–F) — each artifact receives the bullet
    outline (not the raw transcript) as input. This is intentional:
@@ -144,6 +167,17 @@ When thinking is enabled, the spinner shows progress:
   with instructions to run `sessionsmith log rebuild` later.
 - **Resume support:** `--resume` skips any artifact whose output file
   already exists. Safe to re-run after a partial failure.
+
+### Structured output & search index
+
+- **Structured companion (`[runtime] structured = true`):** in addition to the
+  prose `dm-notes.md`, a schema-constrained `dm-notes.json` is emitted (typed
+  `npcs`, `loot`, `quests`, `locations`, `cliffhanger`) using the backend's
+  structured-output mode (Ollama `format`, OpenAI `response_format`).
+- **Search index (`[runtime] index = true`, on by default):** each generated
+  artifact is recorded in a per-campaign SQLite database at
+  `output/<slug>/index.sqlite`. `sessionsmith search <query>` looks across every
+  session's notes.
 
 ---
 

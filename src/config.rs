@@ -20,7 +20,69 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
+    pub paths: PathsConfig,
+    #[serde(default)]
     pub hardware: Option<HardwareProfile>,
+}
+
+/// Base input/output directories. Relative paths are resolved against the
+/// current working directory; `~` is expanded to the user's home.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathsConfig {
+    /// Directory scanned for input recordings.
+    #[serde(default = "default_audio_dir")]
+    pub audio_dir: PathBuf,
+    /// Root directory for all generated output (per-campaign subdirs live here).
+    #[serde(default = "default_output_dir")]
+    pub output_dir: PathBuf,
+}
+
+fn default_audio_dir() -> PathBuf { PathBuf::from("audio") }
+fn default_output_dir() -> PathBuf { PathBuf::from("output") }
+
+impl Default for PathsConfig {
+    fn default() -> Self {
+        Self { audio_dir: default_audio_dir(), output_dir: default_output_dir() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process-global resolved paths. Set whenever the global config is loaded, so
+// `CampaignConfig` path helpers and the audio scanner honour user overrides
+// without threading the config through every call site.
+// ---------------------------------------------------------------------------
+
+static PATHS: once_cell::sync::Lazy<std::sync::RwLock<PathsConfig>> =
+    once_cell::sync::Lazy::new(|| std::sync::RwLock::new(PathsConfig::default()));
+
+fn set_global_paths(paths: &PathsConfig) {
+    let resolved = PathsConfig {
+        audio_dir: expand_tilde(&paths.audio_dir),
+        output_dir: expand_tilde(&paths.output_dir),
+    };
+    if let Ok(mut guard) = PATHS.write() {
+        *guard = resolved;
+    }
+}
+
+/// The configured audio input directory (default `audio/`).
+pub fn audio_dir() -> PathBuf {
+    PATHS.read().map(|p| p.audio_dir.clone()).unwrap_or_else(|_| default_audio_dir())
+}
+
+/// The configured output root directory (default `output/`).
+pub fn output_dir() -> PathBuf {
+    PATHS.read().map(|p| p.output_dir.clone()).unwrap_or_else(|_| default_output_dir())
+}
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_tilde(p: &Path) -> PathBuf {
+    if let Ok(stripped) = p.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    p.to_path_buf()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,11 +118,45 @@ pub struct AsrConfig {
     pub model_dir: Option<PathBuf>,
     /// Threads passed to whisper-cli.
     pub threads: Option<u32>,
+    /// Enable speaker diarization (whisperX only). Off by default: current local
+    /// models frequently mis-attribute the GM and players to one another, which
+    /// causes more harm than help. Kept as an opt-in for future, better models.
+    #[serde(default)]
+    pub diarize: bool,
+    /// Hugging Face token for the pyannote diarization models (required by
+    /// whisperX diarization). Supports `${ENV_VAR}` interpolation.
+    #[serde(default)]
+    pub hf_token: Option<String>,
+    /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR to skip long
+    /// gaps. Off by default. Speeds up long, gap-heavy recordings.
+    #[serde(default)]
+    pub vad: bool,
+    /// Force the whisperX compute device: `"cuda"`, `"cpu"`, or unset for
+    /// auto-detect (CUDA when ≥4 GB VRAM is free, else CPU). Lets non-NVIDIA
+    /// users override the `nvidia-smi`-based default.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// ASR engine preference: `"local"` (in-process whisper-rs), `"whisper-cli"`
+    /// (whisper.cpp binary), `"whisperx"`, or unset/`"auto"`. Auto prefers the
+    /// built-in local engine when compiled with the `local-whisper` feature,
+    /// then falls back to whichever external binary is found.
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 impl Default for AsrConfig {
     fn default() -> Self {
-        Self { binary: None, model: None, model_dir: None, threads: None }
+        Self {
+            binary: None,
+            model: None,
+            model_dir: None,
+            threads: None,
+            diarize: false,
+            hf_token: None,
+            vad: false,
+            device: None,
+            engine: None,
+        }
     }
 }
 
@@ -78,13 +174,45 @@ pub struct RuntimeConfig {
     /// 10-50× slower for minimal quality gain on extraction tasks.
     #[serde(default)]
     pub think: bool,
+    /// Override the LLM context window (Ollama `num_ctx`). When `None`, it is
+    /// derived from the detected hardware tier's recommended context hint.
+    /// Without this, Ollama silently falls back to a small default context and
+    /// truncates long transcripts.
+    #[serde(default)]
+    pub num_ctx: Option<u32>,
+    /// Split long transcripts into overlapping windows for the bullets pass so
+    /// they never exceed the model context. On by default.
+    #[serde(default = "default_true")]
+    pub chunk: bool,
+    /// Character overlap between consecutive transcript chunks.
+    #[serde(default = "default_chunk_overlap")]
+    pub chunk_overlap_chars: usize,
+    /// Also emit machine-readable JSON companions (e.g. `dm-notes.json`) using
+    /// the backend's structured-output mode. Off by default.
+    #[serde(default)]
+    pub structured: bool,
+    /// Maintain a per-campaign SQLite index of sessions and artifacts for
+    /// cross-session search (`sessionsmith search`). On by default.
+    #[serde(default = "default_true")]
+    pub index: bool,
 }
 
 fn default_timeout() -> u64 { 1800 }
+fn default_true() -> bool { true }
+fn default_chunk_overlap() -> usize { 1000 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        Self { parallel_passes: false, timeout_secs: default_timeout(), think: false }
+        Self {
+            parallel_passes: false,
+            timeout_secs: default_timeout(),
+            think: false,
+            num_ctx: None,
+            chunk: true,
+            chunk_overlap_chars: default_chunk_overlap(),
+            structured: false,
+            index: true,
+        }
     }
 }
 
@@ -98,13 +226,16 @@ impl GlobalConfig {
 
     pub fn load_or_default() -> Result<Self> {
         let p = Self::path()?;
-        if p.exists() {
+        let cfg = if p.exists() {
             let text = std::fs::read_to_string(&p)
                 .with_context(|| format!("reading {}", p.display()))?;
-            Ok(toml::from_str(&text).with_context(|| format!("parsing {}", p.display()))?)
+            toml::from_str(&text).with_context(|| format!("parsing {}", p.display()))?
         } else {
-            Ok(Self::default())
-        }
+            Self::default()
+        };
+        // Publish resolved input/output paths for the rest of the process.
+        set_global_paths(&cfg.paths);
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -120,6 +251,21 @@ impl GlobalConfig {
     /// Resolve API key, expanding `${VAR}` shell-style.
     pub fn resolved_api_key(&self) -> Option<String> {
         self.backend.api_key.as_ref().map(|raw| expand_env(raw))
+    }
+
+    /// Resolve the Hugging Face token for diarization, expanding `${VAR}`.
+    pub fn resolved_hf_token(&self) -> Option<String> {
+        self.asr.hf_token.as_ref().map(|raw| expand_env(raw)).filter(|s| !s.is_empty())
+    }
+
+    /// Effective LLM context window: explicit `[runtime] num_ctx` override, else
+    /// the detected hardware tier's recommended context hint, else `None`.
+    pub fn effective_num_ctx(&self) -> Option<u32> {
+        self.runtime.num_ctx.or_else(|| {
+            self.hardware
+                .as_ref()
+                .map(|hw| crate::hardware::recommend(hw).llm_context_hint)
+        })
     }
 }
 
@@ -269,9 +415,9 @@ impl CampaignConfig {
         if parts.is_empty() { "campaign".into() } else { parts.join("-") }
     }
 
-    /// Root output directory for this campaign: `output/<slug>/`
+    /// Root output directory for this campaign: `<output_dir>/<slug>/`
     pub fn output_root(&self) -> PathBuf {
-        PathBuf::from("output").join(self.slug())
+        output_dir().join(self.slug())
     }
 
     /// Directory for transcripts: `output/<slug>/transcripts/`

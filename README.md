@@ -83,6 +83,8 @@ multiple campaigns never pollute each other.
 | `sessionsmith run [files...] [--all]` | Full pipeline: audio → transcript → notes |
 | `sessionsmith transcribe [files...]` | Transcribe only |
 | `sessionsmith notes [transcript]` | Generate notes from an existing transcript |
+| `sessionsmith record [name]` | Capture live audio into `audio/` (via ffmpeg) |
+| `sessionsmith search <query>` | Search indexed session notes |
 | `sessionsmith log show \| rebuild` | View or regenerate the campaign log |
 | `sessionsmith models` | List, pull, and configure ASR/LLM models |
 | `sessionsmith systems list \| show <name>` | Browse game-system presets |
@@ -131,13 +133,14 @@ Custom presets are a single TOML file. See [docs/presets.md](docs/presets.md).
 | Dependency | Role |
 |---|---|
 | Rust 1.75+ | Build the binary |
+| C toolchain + `cmake` + `clang`/`libclang` | Build-time only: compiles the bundled whisper.cpp engine |
 | `ffmpeg` + `ffprobe` | Audio decoding & duration detection |
-| `whisperx` **or** `whisper-cli` | Speech-to-text engine |
 | An LLM backend | Ollama (local), OpenAI-compatible, or Anthropic |
 
-A CUDA-capable GPU with ≥8 GB VRAM is strongly recommended for both ASR
-and local LLM inference. SessionSmith works on CPU but will be
-significantly slower.
+Speech-to-text is **built in** (whisper.cpp via `whisper-rs`) — no external ASR
+tool is needed at runtime. `whisperx` is only required if you enable speaker
+diarization. Build with `--features cuda` (or `vulkan`/`metal`) for GPU
+acceleration; see [docs/setup.md](docs/setup.md).
 
 Run `sessionsmith doctor` to verify your setup.
 

@@ -2,7 +2,9 @@
 
 ## Build from source
 
-SessionSmith is a single static binary written in Rust.
+SessionSmith is a single self-contained binary written in Rust. By default it
+builds an **in-process transcription engine** (whisper.cpp via `whisper-rs`), so
+no external speech-to-text tool is required at runtime.
 
 ```bash
 # Install Rust (if not already present)
@@ -18,25 +20,64 @@ cargo build --release
 
 You can copy the binary anywhere on your `$PATH` or run it in-place.
 
+### Build prerequisites
+
+The default build compiles whisper.cpp from source, which needs a small native
+toolchain **at build time** (not at runtime — the produced binary is
+self-contained):
+
+| Tool | Purpose | Install (Debian/Ubuntu/Mint) |
+|---|---|---|
+| C/C++ compiler | Compile whisper.cpp | `sudo apt install build-essential` |
+| `cmake` | whisper.cpp build system | `sudo apt install cmake` |
+| `clang` + `libclang` | `bindgen` header parsing | `sudo apt install clang libclang-dev` |
+
+On macOS these come with the Xcode command-line tools (`xcode-tools install`)
+plus `brew install cmake`.
+
+If you would rather **not** build the in-process engine (and instead use an
+external `whisper-cli`/`whisperx`), build without default features:
+
+```bash
+cargo build --release --no-default-features
+```
+
+### GPU acceleration (build-time)
+
+The in-process engine runs on CPU by default. To build with GPU support, enable
+the matching feature (each needs its SDK/driver installed):
+
+```bash
+cargo build --release --features cuda     # NVIDIA (CUDA toolkit)
+cargo build --release --features vulkan   # AMD/Intel/NVIDIA (Vulkan SDK)
+cargo build --release --features metal    # Apple Silicon (macOS)
+```
+
+`sessionsmith doctor` reports which backend the binary was built with.
+
 ---
 
 ## Dependencies
 
-### Required
+### Required at runtime
 
 | Tool | Purpose | Install |
 |---|---|---|
-| `ffmpeg` | Audio decoding (any format → wav for ASR) | `sudo apt install ffmpeg` / `brew install ffmpeg` |
+| `ffmpeg` | Audio decoding (any format → 16 kHz mono PCM for ASR) | `sudo apt install ffmpeg` / `brew install ffmpeg` |
 | `ffprobe` | Duration detection for the audio picker | Ships with ffmpeg |
 
-### ASR engine (one of)
+### ASR engine
 
 | Engine | Notes |
 |---|---|
-| **whisperx** (recommended) | GPU-accelerated, word-level timestamps, speaker-aware. Install in a project `.venv/` and SessionSmith finds it automatically. |
-| whisper-cli (whisper.cpp) | CPU-friendly alternative. Lighter but no word timestamps. |
+| **in-process (whisper-rs)** — default | Built into the binary; no external tool. Uses the same ggml models as whisper.cpp (auto-downloaded). GPU via build features above. |
+| whisper-cli (whisper.cpp) | External binary; used when the build excludes `local-whisper`, or when `[asr] engine = "whisper-cli"`. |
+| **whisperx** | Required for **speaker diarization**. Install in a project `.venv/` and SessionSmith finds it automatically. Set `[asr] engine = "whisperx"` or `diarize = true`. |
 
-#### Installing whisperx
+Select the engine explicitly with `[asr] engine` (`local` / `whisper-cli` /
+`whisperx`); the default (`auto`) prefers the in-process engine when compiled in.
+
+#### Installing whisperx (only needed for diarization)
 
 ```bash
 cd SessionSmith
