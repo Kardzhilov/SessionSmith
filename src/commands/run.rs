@@ -92,6 +92,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             force: args.force,
             update_log: !args.no_log,
             model_override: args.model.clone(),
+            candidate: false,
         };
         pipeline::run_notes(&session_obj, &g, &campaign, &preset, &opts).await?;
         ui::ok(&format!("artifacts in {}", session_obj.notes_dir.display()));

@@ -86,12 +86,36 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     let out_txt = out_dir.join(format!("{stem}.txt"));
     let out_srt = out_dir.join(format!("{stem}.srt"));
 
-    if !opts.force && out_txt.exists() && out_srt.exists() {
+    // Reuse an existing transcript only when the model matches (or no metadata
+    // is recorded, for backward compatibility). A different ASR model forces a
+    // re-transcription even without `--force`.
+    let prior_meta = crate::meta::load(out_dir, &stem);
+    let same_model = prior_meta
+        .as_ref()
+        .map(|m| m.model == opts.model)
+        .unwrap_or(true);
+    if !opts.force && out_txt.exists() && out_srt.exists() && same_model {
         crate::ui::ok(&format!("transcript exists: {}", out_txt.display()));
         return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
     }
 
     let backend = resolve_asr_backend(g, opts)?;
+
+    // Records model + source audio after a successful transcription, so a
+    // re-run can skip transcription (same model) and the player can seek.
+    let write_meta = |engine: &str| {
+        let _ = crate::meta::save(
+            out_dir,
+            &stem,
+            &crate::meta::SessionMeta {
+                model: opts.model.clone(),
+                engine: engine.to_string(),
+                language: opts.language.clone(),
+                source_audio: Some(audio.to_path_buf()),
+                created: crate::meta::now_secs(),
+            },
+        );
+    };
 
     // whisper.cpp (external or in-process) needs a ggml model file; whisperx
     // manages its own model cache via Hugging Face.
@@ -146,6 +170,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         if out_srt.exists() {
             crate::ui::ok(&format!("wrote {}", out_srt.display()));
         }
+        write_meta(engine.label());
         return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
     }
 
@@ -173,6 +198,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         crate::ui::info(&format!("ASR device: {}", crate::whisper_local::gpu_label()));
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
+        write_meta("whisper.cpp");
         return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
     }
 
@@ -332,6 +358,11 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     if out_srt.exists() {
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
     }
+    let meta_engine = match &backend {
+        AsrBackend::WhisperX(_) => "whisperx",
+        _ => "whisper.cpp",
+    };
+    write_meta(meta_engine);
     let _ = binary_path; // used only for error context above
     Ok(TranscribeOutput { txt: out_txt, srt: out_srt })
 }

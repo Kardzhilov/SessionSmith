@@ -4,6 +4,7 @@
 
 pub mod audio;
 pub mod asr;
+pub mod campaign_log;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -11,6 +12,7 @@ pub mod deps;
 pub mod hardware;
 pub mod index;
 pub mod llm;
+pub mod meta;
 pub mod models;
 pub mod pipeline;
 pub mod presets;

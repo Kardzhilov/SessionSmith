@@ -132,10 +132,21 @@ Rules:
 - Begin with the narrative — no preamble such as \"Here is the story\".";
 
 const QUOTES_BASE: &str = "\
-You are extracting the most memorable quotes from a session. Produce a markdown \
-list of quotes. For each quote: the line in italics, then on a new line `— Speaker \
-(player) — context`. Include both in-character and table-side quotes when they're \
-memorable. Skip anything mundane. 8–20 quotes total. No preamble.";
+You extract memorable VERBATIM quotes from a session transcript. The transcript \
+lines are prefixed with timestamps like `[00:12:34]`.
+
+Rules:
+- Every quote MUST be copied WORD-FOR-WORD from the transcript. Never paraphrase, \
+summarise, translate, invent, or 'clean up' a line. If you cannot quote the \
+transcript verbatim, do not include it at all.
+- For each quote, output EXACTLY this two-line form:
+  > *\"<verbatim quote>\"*
+  > — <speaker or 'Unknown'> — [HH:MM:SS]
+  The timestamp is the `[HH:MM:SS]` prefix of the transcript line the quote \
+  starts on. Copy it exactly; never guess a timestamp.
+- Include both in-character lines and memorable table-side moments. Skip mundane \
+chatter, filler and rules talk.
+- 8–20 quotes, in chronological order. No preamble, no headers, nothing else.";
 
 const CAMPAIGN_LOG_BASE: &str = "\
 You are maintaining a long-running campaign log. You will be given the current log \
@@ -181,7 +192,7 @@ fn compose_system(base: &str, campaign: &CampaignConfig, preset: &Preset, extra:
         s.push('\n');
     }
     if !extra.is_empty() {
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(extra);
     }
     s
@@ -220,6 +231,57 @@ pub fn campaign_log_system(campaign: &CampaignConfig, preset: &Preset) -> String
     let base = campaign.prompts.campaign_log.clone()
         .unwrap_or_else(|| CAMPAIGN_LOG_BASE.to_string());
     compose_system(&base, campaign, preset, "", false)
+}
+
+/// System prompt for a single session's campaign-log entry. Deterministic
+/// assembly places it under a stem-keyed marker, so this only produces the
+/// title + recap body for ONE session.
+pub fn session_log_entry_system(campaign: &CampaignConfig, preset: &Preset) -> String {
+    let base = "\
+You are maintaining a long-running campaign log. Given ONE session's summary, \
+write that session's log entry.
+
+Output format (exactly):
+- The FIRST line is a short session title of 3–6 words. No prefix, no markdown, \
+no quotes — just the title text.
+- Then a blank line.
+- Then a 2–5 sentence recap paragraph of what happened, in past tense. Name the \
+NPCs, places and outcomes that actually appear in the summary. Do not invent \
+anything not in the summary. No headers, no bullet lists, no preamble.";
+    compose_system(base, campaign, preset, "", false)
+}
+
+/// User prompt for a session log entry.
+pub fn user_session_log_entry(summary: &str, date: &str) -> String {
+    format!("Session date: {date}\n\nSession summary:\n\n{summary}")
+}
+
+/// System prompt for (re)generating the `Ongoing Threads` section.
+pub fn ongoing_threads_system(campaign: &CampaignConfig, preset: &Preset) -> String {
+    let base = "\
+You maintain the `Ongoing Threads` section of a campaign log: the open plot \
+threads, mysteries, goals and dangling hooks that are still unresolved.
+
+You are given the CURRENT threads (may be empty) and the newest session's recap. \
+Produce the UPDATED threads as a short markdown bullet list:
+- Add threads opened by the new session.
+- Remove or rephrase threads the new session resolved.
+- Keep still-open threads.
+- 3–10 bullets. Only threads grounded in the material given. No headers, no \
+preamble — just the bullet list.";
+    compose_system(base, campaign, preset, "", false)
+}
+
+/// User prompt for updating ongoing threads.
+pub fn user_ongoing_threads(current_threads: &str, latest_session: &str) -> String {
+    let cur = if current_threads.trim().is_empty() {
+        "(none yet)"
+    } else {
+        current_threads.trim()
+    };
+    format!(
+        "Current ongoing threads:\n\n{cur}\n\n---\n\nNewest session recap:\n\n{latest_session}"
+    )
 }
 
 fn artifact_base(a: Artifact) -> &'static str {
@@ -321,6 +383,12 @@ object, no markdown, no preamble.";
 
 pub fn user_from_bullets(bullets: &str) -> String {
     format!("Bullet-point outline of the session:\n\n{bullets}")
+}
+
+/// User prompt for verbatim, timestamped quote extraction (reads the
+/// timestamped transcript directly rather than the paraphrased outline).
+pub fn user_quotes_from_transcript(transcript: &str) -> String {
+    format!("Timestamped transcript (lines prefixed with [HH:MM:SS]):\n\n{transcript}")
 }
 
 pub fn user_campaign_log_merge(existing: &str, summary: &str, session_date: &str, session_title: &str) -> String {

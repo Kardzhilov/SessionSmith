@@ -41,8 +41,14 @@ pub struct JobRequest {
     pub transcripts: Vec<PathBuf>,
     pub artifacts: Vec<Artifact>,
     pub force: bool,
+    /// Force re-transcription (separate from `force`, which forces notes). A
+    /// re-run leaves this `false` so transcription is reused when the ASR model
+    /// is unchanged.
+    pub force_transcribe: bool,
     pub resume: bool,
     pub update_log: bool,
+    /// Write regenerated artifacts as `.candidate` files for comparison.
+    pub candidate: bool,
     pub model_override: Option<String>,
 }
 
@@ -55,7 +61,7 @@ pub fn spawn(handle: &tokio::runtime::Handle, tx: UnboundedSender<UiEvent>, req:
         let res = run(req).await;
         crate::ui::set_event_sink(None);
         let _ = tx2.send(UiEvent::JobDone(
-            res.map(|summary| summary).map_err(|e| format!("{e:#}")),
+            res.map_err(|e| format!("{e:#}")),
         ));
     });
 }
@@ -132,7 +138,7 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
     let tx_opts = TranscribeOpts {
         model: req.asr_model.clone(),
         language: "auto".into(),
-        force: req.force,
+        force: req.force_transcribe,
         diarize: req.g.asr.diarize,
         vad: req.g.asr.vad,
     };
@@ -174,6 +180,7 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
                 force: req.force,
                 update_log: req.update_log,
                 model_override: req.model_override.clone(),
+                candidate: req.candidate,
             };
             pipeline::run_notes(&session_obj, &req.g, &req.campaign, &req.preset, &opts).await?;
             crate::ui::ok(&format!("artifacts in {}", session_obj.notes_dir.display()));
@@ -206,6 +213,7 @@ async fn run_notes_only(req: JobRequest) -> anyhow::Result<String> {
             force: req.force,
             update_log: req.update_log,
             model_override: req.model_override.clone(),
+            candidate: req.candidate,
         };
         pipeline::run_notes(&session_obj, &req.g, &req.campaign, &req.preset, &opts).await?;
         crate::ui::ok(&format!("artifacts in {}", session_obj.notes_dir.display()));

@@ -142,7 +142,7 @@ impl Default for BackendConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AsrConfig {
     /// Path to the whisper.cpp `whisper-cli` (or compatible) binary.
     pub binary: Option<PathBuf>,
@@ -176,22 +176,6 @@ pub struct AsrConfig {
     /// then falls back to whichever external binary is found.
     #[serde(default)]
     pub engine: Option<String>,
-}
-
-impl Default for AsrConfig {
-    fn default() -> Self {
-        Self {
-            binary: None,
-            model: None,
-            model_dir: None,
-            threads: None,
-            diarize: false,
-            hf_token: None,
-            vad: false,
-            device: None,
-            engine: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

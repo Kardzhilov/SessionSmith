@@ -17,6 +17,29 @@ pub struct PipelineOpts {
     pub force: bool,
     pub update_log: bool,
     pub model_override: Option<String>,
+    /// Write artifacts to `<name>.candidate.md` instead of overwriting, so the
+    /// user can compare against the existing version before keeping one.
+    pub candidate: bool,
+}
+
+/// Output filename for an artifact, honouring candidate (compare) mode.
+pub fn artifact_file(a: Artifact, candidate: bool) -> String {
+    candidate_name(a.filename(), candidate)
+}
+
+/// Turn `bullets.md` into `bullets.candidate.md` (and `.json` similarly) when
+/// `candidate` is set.
+pub fn candidate_name(fname: &str, candidate: bool) -> String {
+    if !candidate {
+        return fname.to_string();
+    }
+    if let Some(stem) = fname.strip_suffix(".md") {
+        format!("{stem}.candidate.md")
+    } else if let Some(stem) = fname.strip_suffix(".json") {
+        format!("{stem}.candidate.json")
+    } else {
+        format!("{fname}.candidate")
+    }
 }
 
 pub struct Session {
@@ -61,21 +84,35 @@ pub async fn run_notes(
     let transcript = std::fs::read_to_string(&session.transcript_path)
         .with_context(|| format!("reading {}", session.transcript_path.display()))?;
 
-    // --- Pass A: bullets (always; everything else derives from it) ---
-    let needs_derived = opts.artifacts.iter().any(|a| !matches!(a, Artifact::Bullets));
-    let want_bullets = opts.artifacts.contains(&Artifact::Bullets) || needs_derived;
+    // --- Pass A: bullets (everything except quotes derives from it) ---
+    let needs_derived = opts.artifacts.iter().any(|a| !matches!(a, Artifact::Bullets | Artifact::Quotes));
+    let regen_bullets = opts.artifacts.contains(&Artifact::Bullets);
+    let bullets_real = session.notes_dir.join(Artifact::Bullets.filename());
+    let bullets_out = session.notes_dir.join(artifact_file(Artifact::Bullets, opts.candidate));
 
-    let bullets_path = session.notes_dir.join(Artifact::Bullets.filename());
-    let bullets = if want_bullets {
+    let bullets = if regen_bullets {
         crate::ui::phase("Outline");
-        if opts.resume && bullets_path.exists() && !opts.force {
-            crate::ui::ok(&format!("bullets: reuse {}", bullets_path.display()));
-            std::fs::read_to_string(&bullets_path)?
+        if opts.resume && !opts.candidate && bullets_real.exists() && !opts.force {
+            crate::ui::ok(&format!("bullets: reuse {}", bullets_real.display()));
+            std::fs::read_to_string(&bullets_real)?
         } else {
             let sys = prompts::system_for(Artifact::Bullets, campaign, preset);
             let text = generate_bullets(backend.as_ref(), &chat_opts, sys, &transcript, g).await?;
-            std::fs::write(&bullets_path, &text)?;
-            crate::ui::ok(&format!("wrote {}", bullets_path.display()));
+            std::fs::write(&bullets_out, &text)?;
+            crate::ui::ok(&format!("wrote {}", bullets_out.display()));
+            text
+        }
+    } else if needs_derived {
+        // Bullets are needed as input but not being (re)generated: reuse the
+        // existing outline, or create it once if none exists.
+        if bullets_real.exists() {
+            std::fs::read_to_string(&bullets_real)?
+        } else {
+            crate::ui::phase("Outline");
+            let sys = prompts::system_for(Artifact::Bullets, campaign, preset);
+            let text = generate_bullets(backend.as_ref(), &chat_opts, sys, &transcript, g).await?;
+            std::fs::write(&bullets_real, &text)?;
+            crate::ui::ok(&format!("wrote {}", bullets_real.display()));
             text
         }
     } else {
@@ -84,7 +121,7 @@ pub async fn run_notes(
 
     // --- Derived passes ---
     let derived: Vec<Artifact> = opts.artifacts.iter().copied()
-        .filter(|a| !matches!(a, Artifact::Bullets))
+        .filter(|a| !matches!(a, Artifact::Bullets | Artifact::Quotes))
         .collect();
 
     if !derived.is_empty() {
@@ -93,8 +130,8 @@ pub async fn run_notes(
         if parallel {
             let mut handles = Vec::new();
             for a in derived {
-                let out = session.notes_dir.join(a.filename());
-                if opts.resume && out.exists() && !opts.force {
+                let out = session.notes_dir.join(artifact_file(a, opts.candidate));
+                if opts.resume && !opts.candidate && out.exists() && !opts.force {
                     crate::ui::ok(&format!("{}: reuse {}", a.label(), out.display()));
                     continue;
                 }
@@ -117,8 +154,8 @@ pub async fn run_notes(
             }
         } else {
             for a in derived {
-                let out = session.notes_dir.join(a.filename());
-                if opts.resume && out.exists() && !opts.force {
+                let out = session.notes_dir.join(artifact_file(a, opts.candidate));
+                if opts.resume && !opts.candidate && out.exists() && !opts.force {
                     crate::ui::ok(&format!("{}: reuse {}", a.label(), out.display()));
                     continue;
                 }
@@ -137,10 +174,31 @@ pub async fn run_notes(
         }
     }
 
+    // --- Quotes (verbatim, timestamped — read from the transcript directly) ---
+    if opts.artifacts.contains(&Artifact::Quotes) {
+        let out = session.notes_dir.join(artifact_file(Artifact::Quotes, opts.candidate));
+        if opts.resume && !opts.candidate && out.exists() && !opts.force {
+            crate::ui::ok(&format!("{}: reuse {}", Artifact::Quotes.label(), out.display()));
+        } else {
+            let ts = timestamped_transcript(session);
+            let sys = prompts::system_for(Artifact::Quotes, campaign, preset);
+            match generate_quotes(backend.as_ref(), &chat_opts, sys, &ts, g).await {
+                Ok(text) => {
+                    // Grounding: drop any quote not found verbatim in the
+                    // transcript, and pin each timestamp to where it occurs.
+                    let grounded = ground_quotes(&text, &ts);
+                    std::fs::write(&out, &grounded)?;
+                    crate::ui::ok(&format!("wrote {}", out.display()));
+                }
+                Err(e) => crate::ui::warn(&format!("{}: failed — {e:#}", Artifact::Quotes.label())),
+            }
+        }
+    }
+
     // --- Structured JSON companion (opt-in) ---
     if g.runtime.structured && opts.artifacts.contains(&Artifact::DmNotes) {
-        let out = session.notes_dir.join("dm-notes.json");
-        if opts.resume && out.exists() && !opts.force {
+        let out = session.notes_dir.join(candidate_name("dm-notes.json", opts.candidate));
+        if opts.resume && !opts.candidate && out.exists() && !opts.force {
             crate::ui::ok(&format!("dm-notes.json: reuse {}", out.display()));
         } else {
             let mut sopts = chat_opts.clone();
@@ -163,7 +221,9 @@ pub async fn run_notes(
     }
 
     // --- Campaign log merge ---
-    if opts.update_log {
+    // Skipped in candidate mode: the log is only touched once the user keeps
+    // the regenerated artifacts.
+    if opts.update_log && !opts.candidate {
         crate::ui::phase("Campaign log");
         let summary_path = session.notes_dir.join(Artifact::Summary.filename());
         if summary_path.exists() {
@@ -178,7 +238,8 @@ pub async fn run_notes(
     }
 
     // --- Local search index (opt-in, on by default) ---
-    if g.runtime.index {
+    // Candidate artifacts aren't indexed until kept.
+    if g.runtime.index && !opts.candidate {
         if let Err(e) = crate::index::record_session(campaign, &session.stem, &session.notes_dir) {
             crate::ui::warn(&format!("index: {e:#}"));
         }
@@ -207,29 +268,179 @@ async fn update_campaign_log(
     chat_opts: &ChatOptions,
 ) -> Result<()> {
     let log_path = campaign.notes_dir().join("_campaign-log.md");
-    let existing = if log_path.exists() { std::fs::read_to_string(&log_path)? } else { String::new() };
+    let existing = if log_path.exists() {
+        std::fs::read_to_string(&log_path)?
+    } else {
+        String::new()
+    };
+
+    // Migrate a legacy (pre-marker) log by rebuilding deterministically from all
+    // session summaries — this also collapses any historical duplicates.
+    if !existing.trim().is_empty() && !crate::campaign_log::is_v2(&existing) {
+        crate::ui::info("campaign log: migrating to deduplicated format (rebuild)");
+        return rebuild_campaign_log(g, campaign, preset, chat_opts).await;
+    }
 
     let date = time::OffsetDateTime::now_local()
         .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
         .date()
         .to_string();
 
-    let sys = prompts::campaign_log_system(campaign, preset);
-    let user = prompts::user_campaign_log_merge(&existing, summary, &date, session_stem);
     let backend = llm::build(g)?;
-    let pb = crate::ui::spinner("campaign log: merging");
-    let messages = vec![
-        ChatMessage { role: Role::System, content: sys },
-        ChatMessage { role: Role::User, content: user },
-    ];
-    let merged = llm::collect(backend.as_ref(), messages, chat_opts.clone(), Some(&pb)).await?;
+    let mut log = crate::campaign_log::parse(&existing);
+
+    let pb = crate::ui::spinner("campaign log: writing session entry");
+    let (title, body) =
+        generate_session_entry(backend.as_ref(), chat_opts, campaign, preset, summary, &date)
+            .await?;
+    log.upsert(session_stem, &date, title, body);
+    let latest = log.block_body(session_stem).unwrap_or("").to_string();
+    let threads =
+        generate_threads(backend.as_ref(), chat_opts, campaign, preset, &log.threads, &latest)
+            .await?;
+    log.threads = threads;
     pb.finish_and_clear();
 
     let tmp = log_path.with_extension("md.tmp");
-    std::fs::write(&tmp, merged)?;
+    std::fs::write(&tmp, log.render())?;
     std::fs::rename(&tmp, &log_path)?;
     crate::ui::ok(&format!("updated {}", log_path.display()));
     Ok(())
+}
+
+/// Rebuild the campaign log from scratch using every `notes/<stem>/summary.md`,
+/// keyed by session stem so re-run duplicates collapse into one entry.
+pub async fn rebuild_campaign_log(
+    g: &GlobalConfig,
+    campaign: &CampaignConfig,
+    preset: &Preset,
+    chat_opts: &ChatOptions,
+) -> Result<()> {
+    let notes_dir = campaign.notes_dir();
+    let log_path = notes_dir.join("_campaign-log.md");
+
+    // Collect summaries oldest-first so numbering/threads accumulate correctly.
+    let mut sessions: Vec<(String, String, String)> = Vec::new(); // (stem, date, summary)
+    if notes_dir.exists() {
+        let mut dirs: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+        for entry in std::fs::read_dir(&notes_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let summary = entry.path().join("summary.md");
+            if !summary.exists() {
+                continue;
+            }
+            let mtime = std::fs::metadata(&summary)?.modified()?;
+            dirs.push((entry.path(), mtime));
+        }
+        dirs.sort_by_key(|d| d.1);
+        for (dir, mtime) in dirs {
+            let stem = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let summary = std::fs::read_to_string(dir.join("summary.md")).unwrap_or_default();
+            let date = time::OffsetDateTime::from(mtime).date().to_string();
+            sessions.push((stem, date, summary));
+        }
+    }
+    if sessions.is_empty() {
+        anyhow::bail!("no notes/*/summary.md files found to rebuild from");
+    }
+
+    let backend = llm::build(g)?;
+    let mut log = crate::campaign_log::CampaignLog::default();
+    let total = sessions.len();
+    for (i, (stem, date, summary)) in sessions.into_iter().enumerate() {
+        let pb = crate::ui::spinner(&format!("campaign log: {}/{} · {stem}", i + 1, total));
+        let (title, body) =
+            generate_session_entry(backend.as_ref(), chat_opts, campaign, preset, &summary, &date)
+                .await?;
+        log.upsert(&stem, &date, title, body);
+        let latest = log.block_body(&stem).unwrap_or("").to_string();
+        log.threads =
+            generate_threads(backend.as_ref(), chat_opts, campaign, preset, &log.threads, &latest)
+                .await?;
+        pb.finish_and_clear();
+        crate::ui::ok(&format!("logged {stem}"));
+    }
+
+    std::fs::create_dir_all(&notes_dir)?;
+    let tmp = log_path.with_extension("md.tmp");
+    std::fs::write(&tmp, log.render())?;
+    std::fs::rename(&tmp, &log_path)?;
+    crate::ui::ok(&format!("rebuilt {}", log_path.display()));
+    Ok(())
+}
+
+/// Generate a session's log entry, returning `(title, body)`.
+async fn generate_session_entry(
+    backend: &dyn LlmBackend,
+    chat_opts: &ChatOptions,
+    campaign: &CampaignConfig,
+    preset: &Preset,
+    summary: &str,
+    date: &str,
+) -> Result<(String, String)> {
+    let sys = prompts::session_log_entry_system(campaign, preset);
+    let user = prompts::user_session_log_entry(summary, date);
+    let out = llm::collect(
+        backend,
+        vec![
+            ChatMessage { role: Role::System, content: sys },
+            ChatMessage { role: Role::User, content: user },
+        ],
+        chat_opts.clone(),
+        None,
+    )
+    .await?;
+    // First non-empty line is the title; the rest is the body.
+    let mut lines = out.lines();
+    let mut title = lines
+        .by_ref()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("Untitled Session")
+        .trim()
+        .trim_matches(['#', '*', '"', ' '])
+        .to_string();
+    // Defensively strip a leading "Title:" / "Session Title:" label some models
+    // prepend despite instructions.
+    let low = title.to_lowercase();
+    for pfx in ["session title:", "title:"] {
+        if low.starts_with(pfx) {
+            title = title[pfx.len()..].trim().trim_matches(['*', '"', ' ']).to_string();
+            break;
+        }
+    }
+    if title.is_empty() {
+        title = "Untitled Session".to_string();
+    }
+    let body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    let body = if body.is_empty() { summary.trim().to_string() } else { body };
+    Ok((title, body))
+}
+
+/// (Re)generate the ongoing-threads section from the current threads + latest.
+async fn generate_threads(
+    backend: &dyn LlmBackend,
+    chat_opts: &ChatOptions,
+    campaign: &CampaignConfig,
+    preset: &Preset,
+    current: &str,
+    latest_session: &str,
+) -> Result<String> {
+    let sys = prompts::ongoing_threads_system(campaign, preset);
+    let user = prompts::user_ongoing_threads(current, latest_session);
+    let out = llm::collect(
+        backend,
+        vec![
+            ChatMessage { role: Role::System, content: sys },
+            ChatMessage { role: Role::User, content: user },
+        ],
+        chat_opts.clone(),
+        None,
+    )
+    .await?;
+    Ok(out.trim().to_string())
 }
 
 pub fn parse_artifacts(spec: &str) -> Result<Vec<Artifact>> {
@@ -251,6 +462,221 @@ pub fn parse_artifacts(spec: &str) -> Result<Vec<Artifact>> {
 // ---------------------------------------------------------------------------
 // Bullets generation with transcript chunking (map-reduce)
 // ---------------------------------------------------------------------------
+
+/// Build a timestamped transcript for quote extraction. Prefers the `.srt`
+/// (each cue rendered as `[HH:MM:SS] text`); falls back to the plain `.txt`
+/// when no SRT is available.
+fn timestamped_transcript(session: &Session) -> String {
+    let srt_path = session.transcript_path.with_extension("srt");
+    if let Ok(srt) = std::fs::read_to_string(&srt_path) {
+        let ts = srt_to_timestamped(&srt);
+        if !ts.trim().is_empty() {
+            return ts;
+        }
+    }
+    std::fs::read_to_string(&session.transcript_path).unwrap_or_default()
+}
+
+/// Verify each extracted quote against the transcript, dropping any that are
+/// not present verbatim (after light normalisation) and pinning the timestamp
+/// to where the quote actually occurs. This is what guarantees quotes are never
+/// fabricated, regardless of how well the LLM followed instructions.
+fn ground_quotes(raw: &str, timestamped: &str) -> String {
+    let grounder = QuoteGrounder::build(timestamped);
+    let mut out = String::new();
+    let mut kept = 0usize;
+
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(quote) = extract_quoted(lines[i]) {
+            if quote.split_whitespace().count() >= 3 {
+                // Speaker from a following attribution line, if any.
+                let mut speaker = String::from("Unknown");
+                for l in lines.iter().skip(i + 1).take(2) {
+                    if let Some(s) = parse_speaker(l) {
+                        speaker = s;
+                        break;
+                    }
+                }
+                if let Some(ts) = grounder.locate(&quote) {
+                    out.push_str(&format!("> *\"{}\"*\n> — {speaker} — [{ts}]\n\n", quote.trim()));
+                    kept += 1;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if kept == 0 {
+        return "_No verbatim quotes could be extracted from this session._\n".to_string();
+    }
+    out
+}
+
+/// Extract the quoted text from a line: prefers `*"…"*`, else the text between
+/// the first and last double-quote on a `>`-prefixed line.
+fn extract_quoted(line: &str) -> Option<String> {
+    if let (Some(a), Some(b)) = (line.find("*\""), line.rfind("\"*")) {
+        if b > a + 2 {
+            return Some(line[a + 2..b].trim().to_string());
+        }
+    }
+    let t = line.trim_start();
+    if t.starts_with('>') {
+        let first = t.find('"')?;
+        let last = t.rfind('"')?;
+        if last > first + 1 {
+            return Some(t[first + 1..last].trim().to_string());
+        }
+    }
+    None
+}
+
+/// Parse a speaker from an attribution line like `> — Player 1 — [00:12:34]`.
+fn parse_speaker(line: &str) -> Option<String> {
+    let parts: Vec<&str> = line.split('—').collect();
+    if parts.len() >= 2 {
+        let s = parts[1].trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+/// Normalised transcript with a per-character timestamp map, for verifying and
+/// locating quotes.
+struct QuoteGrounder {
+    norm: String,
+    ts_at: Vec<String>,
+}
+
+impl QuoteGrounder {
+    fn build(timestamped: &str) -> Self {
+        let mut norm = String::new();
+        let mut ts_at: Vec<String> = Vec::new();
+        for line in timestamped.lines() {
+            let (ts, text) = split_ts_line(line);
+            // Push one timestamp entry per *byte* so `norm.find` (a byte offset)
+            // maps back correctly even with multi-byte characters.
+            for ch in normalize(text).chars() {
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                norm.push_str(s);
+                for _ in 0..s.len() {
+                    ts_at.push(ts.clone());
+                }
+            }
+            // Separator space between lines (carries the same timestamp).
+            norm.push(' ');
+            ts_at.push(ts);
+        }
+        Self { norm, ts_at }
+    }
+
+    /// If `quote` occurs (normalised) in the transcript, return its timestamp.
+    fn locate(&self, quote: &str) -> Option<String> {
+        let q = normalize(quote);
+        let q = q.trim();
+        if q.is_empty() {
+            return None;
+        }
+        let pos = self.norm.find(q)?;
+        self.ts_at.get(pos).cloned().or_else(|| Some("00:00:00".to_string()))
+    }
+}
+
+/// Split a `[HH:MM:SS] text` line into `(timestamp, text)`.
+fn split_ts_line(line: &str) -> (String, &str) {
+    if let Some(rest) = line.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let ts = rest[..end].trim().to_string();
+            let text = rest[end + 1..].trim_start();
+            return (ts, text);
+        }
+    }
+    ("00:00:00".to_string(), line)
+}
+
+/// Lowercase, map every non-alphanumeric char to a space, and collapse runs of
+/// whitespace to a single space — so punctuation / quote-style differences
+/// don't defeat the verbatim check.
+fn normalize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            for lc in ch.to_lowercase() {
+                out.push(lc);
+            }
+            prev_space = false;
+        } else if !prev_space {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Convert SRT text into `[HH:MM:SS] text` lines (one per cue).
+fn srt_to_timestamped(srt: &str) -> String {
+    let mut out = String::new();
+    for block in srt.split("\n\n") {
+        let lines: Vec<&str> = block.lines().collect();
+        // Find the "HH:MM:SS,mmm --> ..." timing line.
+        let Some(ti) = lines.iter().position(|l| l.contains("-->")) else {
+            continue;
+        };
+        let start = lines[ti]
+            .split("-->")
+            .next()
+            .unwrap_or("")
+            .trim()
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if start.is_empty() {
+            continue;
+        }
+        let text = lines[ti + 1..].join(" ").trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("[{start}] {text}\n"));
+    }
+    out
+}
+
+/// Extract verbatim quotes from the timestamped transcript, chunking long
+/// transcripts (each chunk's quotes are concatenated — no merge needed).
+async fn generate_quotes(
+    backend: &dyn LlmBackend,
+    chat_opts: &ChatOptions,
+    sys: String,
+    timestamped: &str,
+    g: &GlobalConfig,
+) -> Result<String> {
+    let budget = char_budget(chat_opts.num_ctx);
+    if !g.runtime.chunk || timestamped.chars().count() <= budget {
+        let user = prompts::user_quotes_from_transcript(timestamped);
+        return call_one(backend, chat_opts, Artifact::Quotes, sys, user).await;
+    }
+    let chunks = chunk_text(timestamped, budget, g.runtime.chunk_overlap_chars);
+    let mut all: Vec<String> = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let user = prompts::user_quotes_from_transcript(chunk);
+        match call_one(backend, chat_opts, Artifact::Quotes, sys.clone(), user).await {
+            Ok(t) => all.push(t.trim().to_string()),
+            Err(e) => crate::ui::warn(&format!("quotes chunk {}/{} failed — {e:#}", i + 1, chunks.len())),
+        }
+    }
+    if all.is_empty() {
+        return Err(anyhow!("all quote chunks failed"));
+    }
+    Ok(all.join("\n\n"))
+}
 
 /// Generate the bullet outline from a transcript, chunking it into overlapping
 /// windows when it would exceed the model's context budget. Each chunk is
@@ -383,5 +809,44 @@ mod tests {
     fn chunk_text_single_when_small() {
         let chunks = chunk_text("short transcript", 1000, 100);
         assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn srt_parses_to_timestamped_lines() {
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nHello world\n\n\
+                   2\n00:00:04,500 --> 00:00:06,000\nSecond line here\n";
+        let ts = srt_to_timestamped(srt);
+        assert!(ts.contains("[00:00:01] Hello world"), "got: {ts}");
+        assert!(ts.contains("[00:00:04] Second line here"), "got: {ts}");
+    }
+
+    #[test]
+    fn ground_quotes_drops_fabricated_and_pins_timestamp() {
+        let ts = "[00:00:05] hello there general kenobi\n\
+                  [00:01:10] I have the high ground now\n";
+        // First quote is real (model gave a bogus timestamp); second is invented.
+        let raw = "> *\"I have the high ground now\"*\n> — Obi-Wan — [09:99:99]\n\n\
+                   > *\"this line was completely invented\"*\n> — Nobody — [00:00:01]\n";
+        let out = ground_quotes(raw, ts);
+        assert!(out.contains("I have the high ground now"), "kept real quote: {out}");
+        assert!(out.contains("[00:01:10]"), "timestamp pinned to transcript: {out}");
+        assert!(!out.to_lowercase().contains("invented"), "dropped fabricated: {out}");
+    }
+
+    #[test]
+    fn ground_quotes_none_when_all_fabricated() {
+        let ts = "[00:00:00] the party enters the tavern\n";
+        let raw = "> *\"totally made up nonsense here\"*\n> — Ghost — [00:00:00]\n";
+        let out = ground_quotes(raw, ts);
+        assert!(out.contains("No verbatim quotes"), "got: {out}");
+    }
+
+    #[test]
+    fn candidate_names_are_derived() {
+        assert_eq!(candidate_name("summary.md", false), "summary.md");
+        assert_eq!(candidate_name("summary.md", true), "summary.candidate.md");
+        assert_eq!(candidate_name("dm-notes.json", true), "dm-notes.candidate.json");
+        assert_eq!(artifact_file(Artifact::Quotes, true), "quotes.candidate.md");
+        assert_eq!(artifact_file(Artifact::Quotes, false), "quotes.md");
     }
 }

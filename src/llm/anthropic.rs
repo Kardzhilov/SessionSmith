@@ -121,10 +121,15 @@ impl LlmBackend for AnthropicBackend {
                     Err(e) => { let _ = tx.send(Err(anyhow!("sse: {e}"))).await; return; }
                 };
                 if ev.data.is_empty() { continue; }
+                // The send is a side effect, so it stays in the arm body rather
+                // than being folded into a (should-be-pure) match guard.
+                #[allow(clippy::collapsible_match)]
                 match serde_json::from_str::<SseEvent>(&ev.data) {
-                    Ok(SseEvent::ContentBlockDelta { delta: TextDelta::Text { text } }) => {
-                        if !text.is_empty() {
-                            if tx.send(Ok(text)).await.is_err() { return; }
+                    Ok(SseEvent::ContentBlockDelta { delta: TextDelta::Text { text } })
+                        if !text.is_empty() =>
+                    {
+                        if tx.send(Ok(text)).await.is_err() {
+                            return;
                         }
                     }
                     Ok(SseEvent::MessageStop) => return,

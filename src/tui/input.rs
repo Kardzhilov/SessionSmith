@@ -65,10 +65,11 @@ impl App {
             return;
         }
         // Model manager owns navigation keys while it occupies the content pane.
-        if self.models.is_some() && matches!(self.pane, Pane::Content) {
-            if self.on_key_models_view(key) {
-                return;
-            }
+        if self.models.is_some()
+            && matches!(self.pane, Pane::Content)
+            && self.on_key_models_view(key)
+        {
+            return;
         }
         // Reorder campaigns (Campaigns pane): Shift+↑/↓ or K/J.
         if matches!(self.pane, Pane::Campaigns) {
@@ -115,10 +116,16 @@ impl App {
             KeyCode::Char('y') => self.copy_current(),
             KeyCode::Char('s') => self.toggle_select(),
             KeyCode::Char('m') => self.dispatch(Action::ManageModels),
+            KeyCode::Char('R') => self.dispatch(Action::RerunReplace),
+            KeyCode::Char('p') => self.toggle_play_quote(),
+            KeyCode::Char('c') => self.toggle_candidate_view(),
+            KeyCode::Char('a') => self.accept_candidate(),
+            KeyCode::Char('x') => self.discard_candidate(),
             KeyCode::Char(c @ '1'..='6') => {
                 let idx = (c as u8 - b'1') as usize;
                 if self.open_session.is_some() && idx < ALL_ARTIFACTS.len() {
                     self.artifact_tab = idx;
+                    self.viewing_candidate = false;
                     self.refresh_viewer();
                 }
             }
@@ -143,16 +150,8 @@ impl App {
         let Overlay::Palette(p) = &mut self.overlay else { return };
         match key.code {
             KeyCode::Esc => self.overlay = Overlay::None,
-            KeyCode::Up => {
-                if p.cursor > 0 {
-                    p.cursor -= 1;
-                }
-            }
-            KeyCode::Down => {
-                if p.cursor + 1 < p.filtered.len() {
-                    p.cursor += 1;
-                }
-            }
+            KeyCode::Up if p.cursor > 0 => p.cursor -= 1,
+            KeyCode::Down if p.cursor + 1 < p.filtered.len() => p.cursor += 1,
             KeyCode::Backspace => {
                 p.query.pop();
                 self.refilter_palette();
@@ -398,7 +397,10 @@ impl App {
         let title = match kind {
             PickerKind::AudioRun => "Run pipeline — space to toggle, ⏎ to choose artifacts",
             PickerKind::AudioTranscribe => "Transcribe — space to toggle, ⏎ to run",
-            PickerKind::Artifacts | PickerKind::RunArtifacts => "",
+            PickerKind::Artifacts
+            | PickerKind::RunArtifacts
+            | PickerKind::RerunReplace
+            | PickerKind::RerunKeepBoth => "",
         }
         .to_string();
         self.overlay = Overlay::Picker(PickerState {
@@ -455,6 +457,48 @@ impl App {
             checked,
             cursor: 0,
             target: None,
+        });
+    }
+
+    /// Artifact picker for re-running the open (or selected) session. Defaults
+    /// to the artifacts that already exist for that session.
+    fn open_rerun_picker(&mut self, candidate: bool) {
+        // Prefer the open session; fall back to the highlighted one.
+        let si = self.open_session.or(if self.log_selected || self.sessions.is_empty() {
+            None
+        } else {
+            Some(self.session_idx)
+        });
+        let Some(si) = si else {
+            self.message("No session", "Open or select a session first.", true);
+            return;
+        };
+        let Some(sess) = self.sessions.get(si) else { return };
+        let stem = sess.stem.clone();
+        let target = sess.transcript.clone();
+        let items: Vec<String> = ALL_ARTIFACTS.iter().map(|a| a.label().to_string()).collect();
+        // Default to the artifacts that already exist for this session.
+        let mut checked: Vec<bool> = ALL_ARTIFACTS
+            .iter()
+            .enumerate()
+            .map(|(i, _)| sess.artifacts.get(i).copied().unwrap_or(false))
+            .collect();
+        if !checked.iter().any(|&b| b) {
+            let defaults = self.default_artifacts();
+            checked = ALL_ARTIFACTS.iter().map(|a| defaults.contains(a)).collect();
+        }
+        let (kind, mode) = if candidate {
+            (PickerKind::RerunKeepBoth, "keep both to compare")
+        } else {
+            (PickerKind::RerunReplace, "replace")
+        };
+        self.overlay = Overlay::Picker(PickerState {
+            title: format!("Re-run {stem} ({mode}) — space toggle, ⏎ run"),
+            kind,
+            items,
+            checked,
+            cursor: 0,
+            target: Some(target),
         });
     }
 
@@ -576,6 +620,23 @@ impl App {
                     artifacts,
                 });
             }
+            PickerKind::RerunReplace | PickerKind::RerunKeepBoth => {
+                let candidate = p.kind == PickerKind::RerunKeepBoth;
+                let artifacts: Vec<Artifact> = ALL_ARTIFACTS
+                    .iter()
+                    .zip(p.checked.iter())
+                    .filter(|(_, &c)| c)
+                    .map(|(a, _)| *a)
+                    .collect();
+                let target = p.target.clone();
+                if artifacts.is_empty() {
+                    self.message("Nothing selected", "Select at least one artifact (space).", true);
+                    return;
+                }
+                let Some(target) = target else { return };
+                self.overlay = Overlay::None;
+                self.start_rerun(target, artifacts, candidate);
+            }
         }
     }
 
@@ -629,6 +690,7 @@ impl App {
         let n = ALL_ARTIFACTS.len() as i32;
         let next = ((self.artifact_tab as i32 + delta) % n + n) % n;
         self.artifact_tab = next as usize;
+        self.viewing_candidate = false;
         self.refresh_viewer();
     }
 
@@ -661,6 +723,7 @@ impl App {
             self.viewing_log = false;
             self.open_session = Some(self.session_idx);
             self.artifact_tab = 0;
+            self.viewing_candidate = false;
             self.pane = Pane::Content;
             self.refresh_viewer();
         }
@@ -708,6 +771,8 @@ impl App {
             Action::CycleTheme => self.open_theme_picker(),
             Action::ManageModels => self.open_models(),
             Action::UpdateOllama => self.request_ollama_update(),
+            Action::RerunReplace => self.open_rerun_picker(false),
+            Action::RerunKeepBoth => self.open_rerun_picker(true),
             Action::RebuildLog => self.start_job(JobRequestBuilder {
                 title: "Rebuild campaign log".into(),
                 kind: JobKind::RebuildLog,

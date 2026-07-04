@@ -52,7 +52,7 @@ pub fn scan(dir: &Path, transcripts_dir: &Path) -> Result<Vec<AudioFile>> {
             already_transcribed: transcript_path.exists(),
         });
     }
-    files.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    files.sort_by_key(|f| std::cmp::Reverse(f.mtime));
     Ok(files)
 }
 

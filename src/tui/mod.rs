@@ -53,6 +53,7 @@ pub async fn run() -> Result<()> {
     let handle = tokio::runtime::Handle::current();
     let mut app = App::new(handle);
     let res = run_loop(&mut terminal, &mut app);
+    app.stop_audio();
     restore();
     res
 }

@@ -402,7 +402,20 @@ fn draw_viewer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .and_then(|si| app.sessions.get(si))
         .map(|s| s.stem.clone())
         .unwrap_or_default();
-    let title = format!("{} · {}", stem, ALL_ARTIFACTS[app.artifact_tab].filename());
+    let mut title = format!("{} · {}", stem, ALL_ARTIFACTS[app.artifact_tab].filename());
+    if app.viewing_quotes() {
+        match &app.audio_status {
+            Some(st) => title.push_str(&format!("  ·  {st} (p stop)")),
+            None => title.push_str("  ·  p play from timestamp"),
+        }
+    }
+    if app.has_candidate() {
+        if app.viewing_candidate {
+            title.push_str("  ·  ⬢ NEW candidate — a keep · x discard · c compare");
+        } else {
+            title.push_str("  ·  ⬢ new candidate ready — c compare · a keep · x discard");
+        }
+    }
     draw_markdown_pane(frame, app, th, parts[1], &title);
 }
 
@@ -1195,11 +1208,14 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
         ("Enter", "open session · switch campaign"),
         ("Shift+↑↓  /  K J", "reorder campaigns (saved)"),
         ("r / t / n", "run pipeline · transcribe · notes"),
+        ("R", "re-run this session (palette: keep-both to compare)"),
         ("e", "open current artifact in $EDITOR"),
         ("y", "copy current view to clipboard"),
         ("s", "select mode (mouse off, drag to select)"),
         ("m", "manage models (install / delete / default)"),
         ("u", "update Ollama (in model manager)"),
+        ("p", "play source audio at a quote's timestamp (Quotes tab)"),
+        ("c / a / x", "compare / keep / discard a re-run candidate"),
         ("/", "search notes"),
         (": or Ctrl-P", "command palette"),
         ("T", "cycle theme"),

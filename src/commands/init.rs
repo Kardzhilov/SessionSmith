@@ -123,17 +123,16 @@ pub async fn run(args: InitArgs) -> Result<()> {
     }
 
     // Offer to pull LLM (show size in prompt).
-    if g.backend.kind == "ollama" {
-        if Confirm::new(&format!(
+    if g.backend.kind == "ollama"
+        && Confirm::new(&format!(
             "Pull Ollama LLM '{}' now?  ({})",
             rec.llm_model, llm_label
         ))
         .with_default(true)
         .prompt()
         .unwrap_or(false)
-        {
-            models::ollama_pull(rec.llm_model).ok();
-        }
+    {
+        models::ollama_pull(rec.llm_model).ok();
     }
 
     ui::header(&format!(

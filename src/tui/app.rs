@@ -66,6 +66,8 @@ pub enum Action {
     CycleTheme,
     ManageModels,
     UpdateOllama,
+    RerunReplace,
+    RerunKeepBoth,
     RebuildLog,
     SystemCheck,
     Quit,
@@ -84,6 +86,8 @@ impl Action {
             Action::CycleTheme => "Change theme",
             Action::ManageModels => "Manage models — install / update / delete",
             Action::UpdateOllama => "Update Ollama — run the official installer",
+            Action::RerunReplace => "Re-run session — regenerate & replace artifacts",
+            Action::RerunKeepBoth => "Re-run session — keep both to compare",
             Action::RebuildLog => "Rebuild campaign log",
             Action::SystemCheck => "System check (doctor)",
             Action::Quit => "Quit",
@@ -101,6 +105,8 @@ impl Action {
             Action::CycleTheme,
             Action::ManageModels,
             Action::UpdateOllama,
+            Action::RerunReplace,
+            Action::RerunKeepBoth,
             Action::RebuildLog,
             Action::SystemCheck,
             Action::Quit,
@@ -127,6 +133,10 @@ pub enum PickerKind {
     Artifacts,
     /// Artifact selection shown after choosing audio for a full run.
     RunArtifacts,
+    /// Artifact selection for re-running the open session (replace in place).
+    RerunReplace,
+    /// Artifact selection for re-running the open session (keep both to compare).
+    RerunKeepBoth,
 }
 
 pub struct PickerState {
@@ -254,6 +264,10 @@ pub struct App {
     /// A shell command to run with the TUI suspended (e.g. the Ollama updater):
     /// `(title, command)`.
     pub pending_shell: Option<(String, String)>,
+    /// Background audio player process (ffplay/mpv) for quote playback.
+    pub audio_child: Option<std::process::Child>,
+    /// Human status of the audio player while active (e.g. `▶ 12:34`).
+    pub audio_status: Option<String>,
 
     pub campaigns: Vec<CampaignEntry>,
     pub campaign_idx: usize,
@@ -274,6 +288,9 @@ pub struct App {
     pub log_selected: bool,
 
     pub open_session: Option<usize>,
+    /// When true, the viewer shows the `.candidate` version of the current
+    /// artifact (from a keep-both re-run) instead of the kept one.
+    pub viewing_candidate: bool,
     /// True when the viewer is showing the rolling campaign log.
     pub viewing_log: bool,
     pub artifact_tab: usize,
@@ -343,6 +360,8 @@ impl App {
             should_quit: false,
             pending_editor: None,
             pending_shell: None,
+            audio_child: None,
+            audio_status: None,
             campaigns: Vec::new(),
             campaign_idx: 0,
             campaign: None,
@@ -356,6 +375,7 @@ impl App {
             pane: Pane::Campaigns,
             log_selected: false,
             open_session: None,
+            viewing_candidate: false,
             viewing_log: false,
             artifact_tab: 0,
             pending_run_sessions: Vec::new(),
@@ -595,7 +615,14 @@ impl App {
         let Some(sess) = self.sessions.get(si) else { return };
         let Some(cfg) = &self.campaign else { return };
         let art = ALL_ARTIFACTS[self.artifact_tab];
-        let path = cfg.notes_dir().join(&sess.stem).join(art.filename());
+        let base = cfg.notes_dir().join(&sess.stem);
+        // Show the candidate version when toggled and one exists.
+        let path = if self.viewing_candidate {
+            let c = base.join(crate::pipeline::artifact_file(art, true));
+            if c.exists() { c } else { base.join(art.filename()) }
+        } else {
+            base.join(art.filename())
+        };
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 self.viewer_lines = text.lines().map(|l| l.to_string()).collect();
@@ -618,6 +645,146 @@ impl App {
         let cfg = self.campaign.as_ref()?;
         let art = ALL_ARTIFACTS[self.artifact_tab];
         Some(cfg.notes_dir().join(&sess.stem).join(art.filename()))
+    }
+
+    // ---- audio player ----------------------------------------------------
+
+    /// Whether the currently-viewed artifact is the Quotes list (where the
+    /// player is available).
+    pub(super) fn viewing_quotes(&self) -> bool {
+        !self.viewing_log
+            && self.open_session.is_some()
+            && ALL_ARTIFACTS[self.artifact_tab] == Artifact::Quotes
+    }
+
+    /// Source audio file recorded for the open session, if it still exists.
+    fn session_source_audio(&self) -> Option<PathBuf> {
+        let si = self.open_session?;
+        let sess = self.sessions.get(si)?;
+        let cfg = self.campaign.as_ref()?;
+        let meta = crate::meta::load(&cfg.transcripts_dir(), &sess.stem)?;
+        let audio = meta.source_audio?;
+        audio.exists().then_some(audio)
+    }
+
+    /// The first `[HH:MM:SS]` timestamp at or below the current scroll position
+    /// (wrapping to the top), in seconds.
+    fn current_quote_timestamp(&self) -> Option<f64> {
+        let start = (self.viewer_scroll as usize).min(self.viewer_lines.len());
+        self.viewer_lines[start..]
+            .iter()
+            .chain(self.viewer_lines[..start].iter())
+            .find_map(|l| parse_hms_bracket(l))
+    }
+
+    /// Toggle audio playback: stop if playing, else play the source audio from
+    /// the timestamp of the quote nearest the top of the view.
+    pub(super) fn toggle_play_quote(&mut self) {
+        if self.audio_child.is_some() {
+            self.stop_audio();
+            return;
+        }
+        let Some(secs) = self.current_quote_timestamp() else {
+            self.status = "No timestamp in view to play from".into();
+            return;
+        };
+        let Some(audio) = self.session_source_audio() else {
+            self.status = "No source audio recorded for this session (re-transcribe to enable playback)".into();
+            return;
+        };
+        match spawn_player(&audio, secs) {
+            Ok(child) => {
+                self.audio_child = Some(child);
+                self.audio_status = Some(format!("▶ {}", fmt_hms(secs)));
+                self.status = format!("▶ playing from {} — press p to stop", fmt_hms(secs));
+            }
+            Err(e) => self.status = format!("audio player unavailable: {e}"),
+        }
+    }
+
+    /// Stop any active playback.
+    pub(super) fn stop_audio(&mut self) {
+        if let Some(mut c) = self.audio_child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+            self.status = "⏹ stopped".into();
+        }
+        self.audio_status = None;
+    }
+
+    // ---- candidate (keep-both compare) -----------------------------------
+
+    /// Path of the `.candidate` file for the current artifact, if a session is
+    /// open (regardless of whether it exists).
+    pub(super) fn candidate_path(&self) -> Option<PathBuf> {
+        if self.viewing_log {
+            return None;
+        }
+        let si = self.open_session?;
+        let sess = self.sessions.get(si)?;
+        let cfg = self.campaign.as_ref()?;
+        let art = ALL_ARTIFACTS[self.artifact_tab];
+        Some(
+            cfg.notes_dir()
+                .join(&sess.stem)
+                .join(crate::pipeline::artifact_file(art, true)),
+        )
+    }
+
+    /// Whether a candidate exists for the current artifact.
+    pub(super) fn has_candidate(&self) -> bool {
+        self.candidate_path().map(|p| p.exists()).unwrap_or(false)
+    }
+
+    /// Toggle between the kept artifact and its candidate.
+    pub(super) fn toggle_candidate_view(&mut self) {
+        if !self.has_candidate() {
+            return;
+        }
+        self.viewing_candidate = !self.viewing_candidate;
+        self.refresh_viewer();
+        self.status = if self.viewing_candidate {
+            "showing NEW candidate — a keep · x discard · c compare".into()
+        } else {
+            "showing current version — c compare".into()
+        };
+    }
+
+    /// Accept the candidate: replace the kept artifact with it.
+    pub(super) fn accept_candidate(&mut self) {
+        let (Some(cand), Some(real)) = (self.candidate_path(), self.current_artifact_path()) else {
+            return;
+        };
+        if !cand.exists() {
+            return;
+        }
+        if let Err(e) = std::fs::rename(&cand, &real) {
+            self.status = format!("keep failed: {e}");
+            return;
+        }
+        self.viewing_candidate = false;
+        if let (Some(si), tab) = (self.open_session, self.artifact_tab) {
+            if let Some(sess) = self.sessions.get_mut(si) {
+                if let Some(flag) = sess.artifacts.get_mut(tab) {
+                    *flag = true;
+                }
+            }
+        }
+        self.status = "kept new version (candidate promoted)".into();
+        self.refresh_viewer();
+    }
+
+    /// Discard the candidate, keeping the current artifact.
+    pub(super) fn discard_candidate(&mut self) {
+        if !self.has_candidate() {
+            return;
+        }
+        if let Some(cand) = self.candidate_path() {
+            let _ = std::fs::remove_file(&cand);
+        }
+        self.viewing_candidate = false;
+        self.status = "discarded new version".into();
+        self.refresh_viewer();
     }
 
     // ---- job events ------------------------------------------------------
@@ -734,8 +901,78 @@ impl App {
             transcripts: std::mem::take(&mut req_kind.transcripts),
             artifacts: std::mem::take(&mut req_kind.artifacts),
             force: false,
+            force_transcribe: false,
             resume: true,
             update_log: true,
+            candidate: false,
+            model_override: None,
+        };
+        jobs::spawn(&self.handle, tx, req);
+    }
+
+    /// Re-run the pipeline for one existing session. Transcription is reused
+    /// when the ASR model is unchanged (only re-runs if the model differs or
+    /// no audio metadata exists). Regenerates the selected `artifacts`; in
+    /// `candidate` mode they are written as `.candidate` files for comparison
+    /// and the campaign log is left untouched until kept.
+    pub(super) fn start_rerun(
+        &mut self,
+        transcript: PathBuf,
+        artifacts: Vec<Artifact>,
+        candidate: bool,
+    ) {
+        let Some((cfg, preset)) = self.require_ready() else { return };
+        let stem = transcript
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        // Source audio (if recorded and still present) lets us re-transcribe
+        // when the model changed; otherwise we work from the existing transcript.
+        let audio = crate::meta::load(&cfg.transcripts_dir(), &stem)
+            .and_then(|m| m.source_audio)
+            .filter(|p| p.exists());
+        let (kind, sessions, transcripts) = match audio {
+            Some(a) => (
+                JobKind::Run,
+                vec![SessionInput { files: vec![a], name: stem.clone() }],
+                Vec::new(),
+            ),
+            None => (JobKind::Notes, Vec::new(), vec![transcript]),
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.job_rx = Some(rx);
+        self.job_running = true;
+        self.job_log.clear();
+        self.job_scroll = 0;
+        self.job_follow = true;
+        self.job_progress = None;
+        self.job_stages.clear();
+        self.job_started = Some(std::time::Instant::now());
+        self.job_elapsed = None;
+        let title = if candidate {
+            format!("Re-run {stem} (compare)")
+        } else {
+            format!("Re-run {stem} (replace)")
+        };
+        self.job_title = title.clone();
+        self.status = format!("Running: {title}");
+
+        let req = JobRequest {
+            kind,
+            g: self.global.clone(),
+            campaign: cfg,
+            preset,
+            asr_model: self.asr_model(),
+            sessions,
+            transcripts,
+            artifacts,
+            force: true,          // regenerate the selected artifacts
+            force_transcribe: false, // reuse transcript when the model matches
+            resume: false,
+            update_log: !candidate,
+            candidate,
             model_override: None,
         };
         jobs::spawn(&self.handle, tx, req);
@@ -1104,6 +1341,76 @@ pub(super) struct JobRequestBuilder {
     pub(super) sessions: Vec<SessionInput>,
     pub(super) transcripts: Vec<PathBuf>,
     pub(super) artifacts: Vec<Artifact>,
+}
+
+/// Parse a leading/inline `[HH:MM:SS]` (or `[M:SS]`) timestamp from a line,
+/// returning seconds. Only numeric `:`-separated content counts, so markdown
+/// links like `[text]` are ignored.
+fn parse_hms_bracket(line: &str) -> Option<f64> {
+    let a = line.find('[')?;
+    let rest = &line[a + 1..];
+    let b = rest.find(']')?;
+    let inner = &rest[..b];
+    let parts: Vec<&str> = inner.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return None;
+    }
+    let nums: Option<Vec<f64>> = parts.iter().map(|p| p.trim().parse::<f64>().ok()).collect();
+    let nums = nums?;
+    let secs = match nums.len() {
+        3 => nums[0] * 3600.0 + nums[1] * 60.0 + nums[2],
+        2 => nums[0] * 60.0 + nums[1],
+        _ => return None,
+    };
+    Some(secs)
+}
+
+/// Format seconds as `H:MM:SS` (or `M:SS` under an hour).
+fn fmt_hms(secs: f64) -> String {
+    let s = secs as u64;
+    let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{sec:02}")
+    } else {
+        format!("{m}:{sec:02}")
+    }
+}
+
+/// Spawn a detached, headless audio player seeking to `secs`. Prefers `ffplay`
+/// (ships with ffmpeg); falls back to `mpv`.
+fn spawn_player(audio: &std::path::Path, secs: f64) -> std::io::Result<std::process::Child> {
+    use std::process::{Command, Stdio};
+    let bin_exists = |b: &str| {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {b}"))
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    let seek = format!("{secs:.3}");
+    if bin_exists("ffplay") {
+        return Command::new("ffplay")
+            .args(["-nodisp", "-autoexit", "-loglevel", "quiet", "-ss", &seek])
+            .arg(audio)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+    if bin_exists("mpv") {
+        return Command::new("mpv")
+            .args(["--no-video", "--really-quiet", &format!("--start={seek}")])
+            .arg(audio)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no audio player found (install ffmpeg for ffplay, or mpv)",
+    ))
 }
 
 /// The platform command that installs/updates Ollama, or `None` if we can't

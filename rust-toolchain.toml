@@ -1,0 +1,5 @@
+[toolchain]
+# Pin the stable channel and ensure Clippy is always available, so
+# `cargo clippy` works out of the box for linting/verification.
+channel = "stable"
+components = ["clippy"]

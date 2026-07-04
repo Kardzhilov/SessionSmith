@@ -141,8 +141,10 @@ impl LlmBackend for OllamaBackend {
                                                 let _ = tx.send(Ok(format!("\x00thinking:{thinking_words}"))).await;
                                             }
                                         }
-                                        if !m.content.is_empty() {
-                                            if tx.send(Ok(m.content.clone())).await.is_err() { return; }
+                                        if !m.content.is_empty()
+                                            && tx.send(Ok(m.content.clone())).await.is_err()
+                                        {
+                                            return;
                                         }
                                     }
                                     if c.done { return; }

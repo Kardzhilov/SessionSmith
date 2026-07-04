@@ -114,8 +114,8 @@ impl LlmBackend for OpenAIBackend {
                     Ok(c) => {
                         for ch in c.choices {
                             if let Some(text) = ch.delta.content {
-                                if !text.is_empty() {
-                                    if tx.send(Ok(text)).await.is_err() { return; }
+                                if !text.is_empty() && tx.send(Ok(text)).await.is_err() {
+                                    return;
                                 }
                             }
                         }
