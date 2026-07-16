@@ -85,7 +85,7 @@ impl Action {
             Action::Search => "Search notes",
             Action::NextCampaign => "Switch campaign",
             Action::CycleTheme => "Change theme",
-            Action::ManageModels => "Manage models — install / update / delete",
+            Action::ManageModels => "Manage models — install / check / delete",
             Action::UpdateOllama => "Update Ollama — run the official installer",
             Action::RerunReplace => "Re-run session — regenerate & replace artifacts",
             Action::RerunKeepBoth => "Re-run session — keep both to compare",
@@ -1504,6 +1504,12 @@ impl App {
     /// actions can be queued; they run one at a time in the Working pane.
     pub(super) fn model_action(&mut self, install: bool) {
         let Some((kind, id)) = self.selected_model() else { return };
+        let already_installed = self
+            .models
+            .as_ref()
+            .and_then(|s| s.rows.get(s.cursor))
+            .map(|r| r.installed)
+            .unwrap_or(false);
         let job = match (kind, install) {
             (ModelKind::Whisper, true) => ModelJob::PullWhisper(id.clone()),
             (ModelKind::Whisper, false) => ModelJob::DeleteWhisper(id.clone()),
@@ -1518,7 +1524,9 @@ impl App {
             }
         };
         let title = match (kind, install) {
+            (ModelKind::Asr, true) if already_installed => format!("Check {id}"),
             (ModelKind::Asr, _) => format!("Prepare {id}"),
+            (_, true) if already_installed => format!("Check {id}"),
             (_, true) => format!("Install {id}"),
             (_, false) => format!("Delete {id}"),
         };

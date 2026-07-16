@@ -48,7 +48,7 @@ output/<campaign>/notes/_campaign-log.md   ← auto‑merged after each session
 
 - 🖥️ **Full‑screen TUI** — a clickable, resizable, themeable terminal app with a
   command palette, live progress, and an in‑app markdown viewer.
-- � **Manage models in‑app** — install, update and delete whisper/Ollama models
+- � **Manage models in‑app** — install, check and delete whisper/Ollama models
   with a live progress bar, and set defaults that are saved to your config.
 - �🔒 **Local‑first** — Ollama + built‑in whisper.cpp by default. No account, no upload.
 - 🎛️ **System‑aware** — bundled presets for D&D 5e, PF2e, Call of Cthulhu, Blades,

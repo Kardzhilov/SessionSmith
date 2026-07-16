@@ -115,6 +115,9 @@ model   = "claude-sonnet-4-20250514"
 `cohere-transcribe-03-2026` is a local GGUF model. Preparing it downloads the
 Q5_K_M GGUF and fetches/builds the local `transcribe.cpp` runtime.
 
+For Hugging Face-hosted GGML/GGUF model files, repeated model checks use remote
+metadata headers and skip the download when the local file is already current.
+
 ### `[runtime]` section
 
 | Key | Type | Default | Description |

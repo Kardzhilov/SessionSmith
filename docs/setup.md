@@ -76,6 +76,10 @@ cargo build --release --features metal    # Apple Silicon (macOS)
 | uv bridge models | Faster-whisper, Parakeet, Canary, and Voxtral are selected by `[asr] model` and run through `uv` without manual Python setup. |
 | transcribe.cpp GGUF models | Cohere Transcribe is selected by `[asr] model`; prepare downloads the local GGUF model and fetches/builds `transcribe.cpp`. |
 
+When you check an already-downloaded Hugging Face model, SessionSmith uses
+remote metadata (ETag, Last-Modified, and Content-Length) to decide whether the
+local file is current. It does not download the full model just to compare it.
+
 Select the engine explicitly with `[asr] engine` (`local` / `whisper-cli` /
 `whisperx`); the default (`auto`) prefers the in-process engine when compiled in.
 

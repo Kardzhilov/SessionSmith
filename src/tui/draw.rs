@@ -1096,9 +1096,9 @@ fn draw_theme_picker(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let queued = app.job_queue.len();
     let title = if queued > 0 {
-        format!("Models — {queued} queued · ⏎ expand/default · i install · d delete · u update ollama · Esc")
+        format!("Models — {queued} queued · ⏎ expand/default · i install/check · d delete · u update ollama · Esc")
     } else {
-        "Models — ⏎ expand/default · i install · d delete · u update ollama · Esc".to_string()
+        "Models — ⏎ expand/default · i install/check · d delete · u update ollama · Esc".to_string()
     };
     let focused = matches!(app.pane, Pane::Content);
     let block = section_block(&title, th, focused);
@@ -1277,7 +1277,7 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             // ⏎ still sets the model as the default.
             if r.kind == ModelKind::Asr {
                 let label = if r.installed {
-                    "[ update ]"
+                    "[ check ]"
                 } else {
                     "[ prepare ]"
                 };
@@ -1296,8 +1296,9 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                 continue;
             }
 
-            // [install/update] button.
-            let inst_label = if r.installed { "[ update ]" } else { "[ install ]" };
+            // [install/check] button. Installed rows perform a cheap remote
+            // metadata check before downloading anything.
+            let inst_label = if r.installed { "[ check ]" } else { "[ install ]" };
             let iw = inst_label.chars().count() as u16;
             let mut inst_style = th.success_style();
             if hr == y && hc >= x && hc < x + iw {

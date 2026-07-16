@@ -102,7 +102,7 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
     match job {
         ModelJob::PullWhisper(id) => {
             let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
-            crate::ui::header(&format!("Downloading whisper · {id}"));
+            crate::ui::header(&format!("Checking whisper · {id}"));
             models::download_whisper(&id, &cache).await?;
             Ok(format!("whisper '{id}' ready"))
         }
@@ -112,7 +112,7 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
             Ok(format!("deleted whisper '{id}'"))
         }
         ModelJob::PullOllama(name) => {
-            crate::ui::header(&format!("Pulling Ollama model · {name}"));
+            crate::ui::header(&format!("Checking Ollama model · {name}"));
             models::ollama_pull_stream(&name, &base).await?;
             Ok(format!("model '{name}' ready"))
         }
@@ -123,7 +123,7 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
         ModelJob::PrepareAsr(id) => {
             let spec = crate::asr::find(&id)
                 .ok_or_else(|| anyhow::anyhow!("unknown ASR model '{id}'"))?;
-            crate::ui::header(&format!("Preparing {} · {}", spec.engine.label(), spec.display));
+            crate::ui::header(&format!("Checking {} · {}", spec.engine.label(), spec.display));
             if spec.engine == crate::asr::AsrEngine::TranscribeCpp {
                 let cache = models::gguf_asr_cache_dir()?;
                 models::download_gguf_asr(&id, &cache).await?;

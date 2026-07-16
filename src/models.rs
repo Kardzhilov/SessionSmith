@@ -2,6 +2,8 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, CONTENT_LENGTH, ETAG, LAST_MODIFIED};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -27,6 +29,208 @@ pub const WHISPER_MODELS: &[WhisperModel] = &[
 ];
 
 const HF_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct HfFileMeta {
+    url: String,
+    #[serde(default)]
+    etag: Option<String>,
+    #[serde(default)]
+    last_modified: Option<String>,
+    #[serde(default)]
+    content_length: Option<u64>,
+    #[serde(default)]
+    checked_at: i64,
+    #[serde(default)]
+    downloaded_at: i64,
+}
+
+fn sidecar_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
+    path.with_file_name(format!("{name}.ssmeta.json"))
+}
+
+fn read_hf_meta(path: &Path) -> Option<HfFileMeta> {
+    let text = std::fs::read_to_string(sidecar_path(path)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_hf_meta(path: &Path, meta: &HfFileMeta) -> Result<()> {
+    let sidecar = sidecar_path(path);
+    let tmp = sidecar.with_extension("json.part");
+    let text = serde_json::to_string_pretty(meta)?;
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &sidecar)?;
+    Ok(())
+}
+
+fn header_string(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+fn header_content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+}
+
+fn hf_meta_from_headers(url: &str, headers: &HeaderMap, content_length: Option<u64>) -> HfFileMeta {
+    let content_length = header_content_length(headers)
+        .or_else(|| content_length.filter(|n| *n > 0));
+    HfFileMeta {
+        url: url.to_string(),
+        etag: header_string(headers, ETAG),
+        last_modified: header_string(headers, LAST_MODIFIED),
+        content_length,
+        checked_at: crate::meta::now_secs(),
+        downloaded_at: 0,
+    }
+}
+
+async fn fetch_hf_meta(client: &reqwest::Client, url: &str) -> Result<HfFileMeta> {
+    let resp = client
+        .head(url)
+        .send()
+        .await
+        .with_context(|| format!("HEAD {url}"))?;
+    if !resp.status().is_success() {
+        bail!("HTTP {} checking {url}", resp.status());
+    }
+    Ok(hf_meta_from_headers(url, resp.headers(), resp.content_length()))
+}
+
+fn existing_len(path: &Path) -> Option<u64> {
+    path.metadata().ok().map(|m| m.len())
+}
+
+fn hf_meta_matches(path: &Path, local: Option<&HfFileMeta>, remote: &HfFileMeta) -> bool {
+    let Some(len) = existing_len(path) else { return false };
+    if let Some(remote_len) = remote.content_length {
+        if len != remote_len {
+            return false;
+        }
+    }
+
+    let Some(local) = local else {
+        return remote.content_length == Some(len);
+    };
+
+    if remote.etag.is_some() && local.etag.is_some() {
+        return local.etag == remote.etag;
+    }
+    if remote.last_modified.is_some() && local.last_modified.is_some() {
+        return local.last_modified == remote.last_modified;
+    }
+    remote.content_length == Some(len)
+}
+
+async fn download_hf_file(
+    label: &str,
+    url: &str,
+    path: &Path,
+    tmp: &Path,
+    sha256: &str,
+) -> Result<PathBuf> {
+    let client = reqwest::Client::builder()
+        .user_agent("sessionsmith/0.1")
+        .build()?;
+    let remote = match fetch_hf_meta(&client, url).await {
+        Ok(meta) => Some(meta),
+        Err(err) if path.exists() => {
+            crate::ui::warn(&format!(
+                "could not check remote metadata for {label} ({err:#}); keeping existing file"
+            ));
+            return Ok(path.to_path_buf());
+        }
+        Err(err) => {
+            crate::ui::warn(&format!(
+                "could not check remote metadata for {label} ({err:#}); downloading anyway"
+            ));
+            None
+        }
+    };
+
+    if let Some(remote) = &remote {
+        let local = read_hf_meta(path);
+        if hf_meta_matches(path, local.as_ref(), remote) {
+            let mut checked = remote.clone();
+            checked.downloaded_at = local
+                .as_ref()
+                .map(|m| m.downloaded_at)
+                .unwrap_or_else(crate::meta::now_secs);
+            if let Err(err) = write_hf_meta(path, &checked) {
+                crate::ui::warn(&format!("could not write metadata for {label}: {err:#}"));
+            }
+            crate::ui::ok(&format!("{label} already current"));
+            return Ok(path.to_path_buf());
+        }
+        if path.exists() {
+            crate::ui::info(&format!("remote metadata changed for {label}; downloading update"));
+        }
+    }
+
+    let resp = client.get(url).send().await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        bail!("HTTP {} fetching {url}", resp.status());
+    }
+    let headers = resp.headers().clone();
+    let total = resp.content_length().unwrap_or(0);
+    let pb = crate::ui::progress_bar(total, &format!("downloading {label}"));
+    let mut stream = resp.bytes_stream();
+
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(tmp).await?;
+    let mut hasher = Sha256::new();
+    let mut received: u64 = 0;
+    let mut last_emit: u64 = 0;
+    let progress_label = format!("downloading {label}");
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await?;
+        received += chunk.len() as u64;
+        pb.set_position(received);
+        if received >= last_emit + 4_194_304 || received == total {
+            last_emit = received;
+            crate::ui::progress(&progress_label, received, total);
+        }
+    }
+    file.flush().await?;
+    drop(file);
+    pb.finish_and_clear();
+
+    if !sha256.is_empty() {
+        let got = hex::encode(hasher.finalize());
+        if got != sha256 {
+            let _ = std::fs::remove_file(tmp);
+            bail!("checksum mismatch for {label} (got {got})");
+        }
+    }
+    std::fs::rename(tmp, path)?;
+
+    let mut meta = remote.unwrap_or_else(|| hf_meta_from_headers(url, &headers, Some(received)));
+    meta.checked_at = crate::meta::now_secs();
+    meta.downloaded_at = meta.checked_at;
+    if meta.content_length.is_none() {
+        meta.content_length = Some(received);
+    }
+    if let Err(err) = write_hf_meta(path, &meta) {
+        crate::ui::warn(&format!("could not write metadata for {label}: {err:#}"));
+    }
+
+    crate::ui::ok(&format!("saved {}", path.display()));
+    Ok(path.to_path_buf())
+}
 
 pub struct GgufAsrModel {
     pub id: &'static str,
@@ -76,52 +280,7 @@ pub async fn download_whisper(id: &str, cache_dir: &Path) -> Result<PathBuf> {
     let path = cache_dir.join(model.filename);
     let tmp = cache_dir.join(format!("{}.part", model.filename));
     let url = format!("{HF_BASE}/{}", model.filename);
-
-    let client = reqwest::Client::builder()
-        .user_agent("sessionsmith/0.1")
-        .build()?;
-    let resp = client.get(&url).send().await
-        .with_context(|| format!("GET {url}"))?;
-    if !resp.status().is_success() {
-        bail!("HTTP {} fetching {url}", resp.status());
-    }
-    let total = resp.content_length().unwrap_or(0);
-    let pb = crate::ui::progress_bar(total, &format!("downloading {}", model.filename));
-    let mut stream = resp.bytes_stream();
-
-    use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::File::create(&tmp).await?;
-    let mut hasher = Sha256::new();
-    let mut received: u64 = 0;
-    let mut last_emit: u64 = 0;
-    let label = format!("downloading {}", model.filename);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await?;
-        received += chunk.len() as u64;
-        pb.set_position(received);
-        // Emit a throttled progress event for the TUI (~every 4 MB).
-        if received >= last_emit + 4_194_304 || received == total {
-            last_emit = received;
-            crate::ui::progress(&label, received, total);
-        }
-    }
-    file.flush().await?;
-    drop(file);
-    pb.finish_and_clear();
-
-    if !model.sha256.is_empty() {
-        let got = hex::encode(hasher.finalize());
-        if got != model.sha256 {
-            let _ = std::fs::remove_file(&tmp);
-            bail!("checksum mismatch for {} (got {got})", model.filename);
-        }
-    }
-    std::fs::rename(&tmp, &path)?;
-    crate::ui::ok(&format!("saved {}", path.display()));
-    Ok(path)
+    download_hf_file(model.filename, &url, &path, &tmp, model.sha256).await
 }
 
 pub fn gguf_asr_cache_dir() -> Result<PathBuf> {
@@ -155,51 +314,7 @@ pub async fn download_gguf_asr(id: &str, cache_dir: &Path) -> Result<PathBuf> {
     let path = cache_dir.join(model.filename);
     let tmp = cache_dir.join(format!("{}.part", model.filename));
     let url = format!("https://huggingface.co/{}/resolve/main/{}", model.repo, model.filename);
-
-    let client = reqwest::Client::builder()
-        .user_agent("sessionsmith/0.1")
-        .build()?;
-    let resp = client.get(&url).send().await
-        .with_context(|| format!("GET {url}"))?;
-    if !resp.status().is_success() {
-        bail!("HTTP {} fetching {url}", resp.status());
-    }
-    let total = resp.content_length().unwrap_or(0);
-    let pb = crate::ui::progress_bar(total, &format!("downloading {}", model.filename));
-    let mut stream = resp.bytes_stream();
-
-    use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::File::create(&tmp).await?;
-    let mut hasher = Sha256::new();
-    let mut received: u64 = 0;
-    let mut last_emit: u64 = 0;
-    let label = format!("downloading {}", model.filename);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await?;
-        received += chunk.len() as u64;
-        pb.set_position(received);
-        if received >= last_emit + 4_194_304 || received == total {
-            last_emit = received;
-            crate::ui::progress(&label, received, total);
-        }
-    }
-    file.flush().await?;
-    drop(file);
-    pb.finish_and_clear();
-
-    if !model.sha256.is_empty() {
-        let got = hex::encode(hasher.finalize());
-        if got != model.sha256 {
-            let _ = std::fs::remove_file(&tmp);
-            bail!("checksum mismatch for {} (got {got})", model.filename);
-        }
-    }
-    std::fs::rename(&tmp, &path)?;
-    crate::ui::ok(&format!("saved {}", path.display()));
-    Ok(path)
+    download_hf_file(model.filename, &url, &path, &tmp, model.sha256).await
 }
 
 pub fn ollama_pull(name: &str) -> Result<()> {
@@ -310,6 +425,11 @@ pub fn delete_whisper(id: &str, cache_dir: &Path) -> Result<()> {
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("deleting {}", path.display()))?;
+    }
+    let sidecar = sidecar_path(&path);
+    if sidecar.exists() {
+        std::fs::remove_file(&sidecar)
+            .with_context(|| format!("deleting {}", sidecar.display()))?;
     }
     Ok(())
 }
