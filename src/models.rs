@@ -28,6 +28,22 @@ pub const WHISPER_MODELS: &[WhisperModel] = &[
 
 const HF_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
+pub struct GgufAsrModel {
+    pub id: &'static str,
+    pub repo: &'static str,
+    pub filename: &'static str,
+    pub sha256: &'static str,
+}
+
+pub const GGUF_ASR_MODELS: &[GgufAsrModel] = &[
+    GgufAsrModel {
+        id: "cohere-transcribe-03-2026",
+        repo: "handy-computer/cohere-transcribe-03-2026-gguf",
+        filename: "cohere-transcribe-03-2026-Q5_K_M.gguf",
+        sha256: "",
+    },
+];
+
 pub fn whisper_cache_dir(override_dir: Option<&Path>) -> Result<PathBuf> {
     if let Some(d) = override_dir {
         return Ok(d.to_path_buf());
@@ -87,6 +103,84 @@ pub async fn download_whisper(id: &str, cache_dir: &Path) -> Result<PathBuf> {
         received += chunk.len() as u64;
         pb.set_position(received);
         // Emit a throttled progress event for the TUI (~every 4 MB).
+        if received >= last_emit + 4_194_304 || received == total {
+            last_emit = received;
+            crate::ui::progress(&label, received, total);
+        }
+    }
+    file.flush().await?;
+    drop(file);
+    pb.finish_and_clear();
+
+    if !model.sha256.is_empty() {
+        let got = hex::encode(hasher.finalize());
+        if got != model.sha256 {
+            let _ = std::fs::remove_file(&tmp);
+            bail!("checksum mismatch for {} (got {got})", model.filename);
+        }
+    }
+    std::fs::rename(&tmp, &path)?;
+    crate::ui::ok(&format!("saved {}", path.display()));
+    Ok(path)
+}
+
+pub fn gguf_asr_cache_dir() -> Result<PathBuf> {
+    let base = dirs::cache_dir()
+        .ok_or_else(|| anyhow!("could not resolve XDG cache dir"))?;
+    Ok(base.join("sessionsmith").join("asr-gguf"))
+}
+
+pub fn gguf_asr_path(id: &str, cache_dir: &Path) -> Result<PathBuf> {
+    let model = GGUF_ASR_MODELS
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| anyhow!("unknown GGUF ASR model '{id}'"))?;
+    Ok(cache_dir.join(model.filename))
+}
+
+pub async fn ensure_gguf_asr(id: &str, cache_dir: &Path) -> Result<PathBuf> {
+    let path = gguf_asr_path(id, cache_dir)?;
+    if path.exists() {
+        return Ok(path);
+    }
+    download_gguf_asr(id, cache_dir).await
+}
+
+pub async fn download_gguf_asr(id: &str, cache_dir: &Path) -> Result<PathBuf> {
+    let model = GGUF_ASR_MODELS
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| anyhow!("unknown GGUF ASR model '{id}'"))?;
+    std::fs::create_dir_all(cache_dir)?;
+    let path = cache_dir.join(model.filename);
+    let tmp = cache_dir.join(format!("{}.part", model.filename));
+    let url = format!("https://huggingface.co/{}/resolve/main/{}", model.repo, model.filename);
+
+    let client = reqwest::Client::builder()
+        .user_agent("sessionsmith/0.1")
+        .build()?;
+    let resp = client.get(&url).send().await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        bail!("HTTP {} fetching {url}", resp.status());
+    }
+    let total = resp.content_length().unwrap_or(0);
+    let pb = crate::ui::progress_bar(total, &format!("downloading {}", model.filename));
+    let mut stream = resp.bytes_stream();
+
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    let mut hasher = Sha256::new();
+    let mut received: u64 = 0;
+    let mut last_emit: u64 = 0;
+    let label = format!("downloading {}", model.filename);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await?;
+        received += chunk.len() as u64;
+        pb.set_position(received);
         if received >= last_emit + 4_194_304 || received == total {
             last_emit = received;
             crate::ui::progress(&label, received, total);

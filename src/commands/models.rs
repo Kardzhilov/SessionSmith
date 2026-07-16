@@ -73,6 +73,28 @@ pub async fn run(args: ModelsArgs) -> Result<()> {
         Some(ModelsAction::Pull { name }) => {
             if let Some(ollama_name) = name.strip_prefix("ollama:") {
                 models::ollama_pull(ollama_name)?;
+            } else if let Some(spec) = crate::asr::find(&name) {
+                match spec.engine {
+                    crate::asr::AsrEngine::WhisperCpp => {
+                        let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
+                        models::download_whisper(&name, &cache).await?;
+                    }
+                    crate::asr::AsrEngine::TranscribeCpp => {
+                        let cache = models::gguf_asr_cache_dir()?;
+                        models::download_gguf_asr(&name, &cache).await?;
+                        tokio::task::spawn_blocking(crate::transcribe_cpp::ensure_runtime).await??;
+                        crate::asr::mark_prepared(&name);
+                    }
+                    engine => {
+                        let device = g.asr.device.clone().unwrap_or_else(|| "auto".to_string());
+                        let model_ref = spec.model_ref.to_string();
+                        tokio::task::spawn_blocking(move || {
+                            crate::pybridge::run_asr_prepare(engine, &model_ref, &device)
+                        })
+                        .await??;
+                        crate::asr::mark_prepared(&name);
+                    }
+                }
             } else {
                 let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
                 models::download_whisper(&name, &cache).await?;
@@ -136,6 +158,40 @@ async fn print_list(g: &GlobalConfig) -> Result<()> {
             }
         }
         println!("ASR — whisperx (faster-whisper HuggingFace cache)");
+        println!("{t}");
+    }
+
+    // ── advanced ASR bridge engines ───────────────────────────────────
+    {
+        let mut t = ui::new_table(&["model", "engine", "status", "size", "released", "note"]);
+        for model in crate::asr::ASR_CATALOG
+            .iter()
+            .filter(|m| m.engine != crate::asr::AsrEngine::WhisperCpp)
+        {
+            let marker = if model.id == configured_asr { " ← configured" } else { "" };
+            let local_gguf_ready = model.engine == crate::asr::AsrEngine::TranscribeCpp
+                && models::gguf_asr_cache_dir()
+                    .ok()
+                    .and_then(|cache| models::gguf_asr_path(model.id, &cache).ok())
+                    .map(|path| path.exists())
+                    .unwrap_or(false);
+            let status = if model.engine == crate::asr::AsrEngine::TranscribeCpp {
+                if local_gguf_ready { "✓  prepared" } else { "—  not prepared" }
+            } else if crate::asr::is_prepared(model.id) {
+                "✓  prepared"
+            } else {
+                "—  not prepared"
+            };
+            t.add_row(vec![
+                format!("{}{}", model.id, marker),
+                model.engine.label().into(),
+                status.into(),
+                models::human_bytes(model.size),
+                model.released.into(),
+                model.note.into(),
+            ]);
+        }
+        println!("ASR — advanced engines (uv/local bridge)");
         println!("{t}");
     }
 

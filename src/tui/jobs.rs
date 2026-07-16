@@ -124,6 +124,13 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
             let spec = crate::asr::find(&id)
                 .ok_or_else(|| anyhow::anyhow!("unknown ASR model '{id}'"))?;
             crate::ui::header(&format!("Preparing {} · {}", spec.engine.label(), spec.display));
+            if spec.engine == crate::asr::AsrEngine::TranscribeCpp {
+                let cache = models::gguf_asr_cache_dir()?;
+                models::download_gguf_asr(&id, &cache).await?;
+                tokio::task::spawn_blocking(crate::transcribe_cpp::ensure_runtime).await??;
+                crate::asr::mark_prepared(&id);
+                return Ok(format!("{} ready", spec.display));
+            }
             let device = g.asr.device.clone().unwrap_or_else(|| "auto".to_string());
             // Run the blocking uv download off the async runtime.
             let engine = spec.engine;

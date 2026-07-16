@@ -24,12 +24,14 @@ pub enum AsrEngine {
     CanaryQwen,
     /// Mistral Voxtral audio LLM (Python bridge, CUDA).
     Voxtral,
+    /// Local GGUF ASR models run by transcribe.cpp.
+    TranscribeCpp,
 }
 
 impl AsrEngine {
     /// Whether this engine runs through the `uv` Python bridge.
     pub fn is_bridge(&self) -> bool {
-        !matches!(self, AsrEngine::WhisperCpp)
+        !matches!(self, AsrEngine::WhisperCpp | AsrEngine::TranscribeCpp)
     }
 
     /// Short human label for the model manager / doctor.
@@ -40,6 +42,7 @@ impl AsrEngine {
             AsrEngine::Parakeet => "NeMo Parakeet",
             AsrEngine::CanaryQwen => "NeMo Canary-Qwen",
             AsrEngine::Voxtral => "Voxtral",
+            AsrEngine::TranscribeCpp => "transcribe.cpp",
         }
     }
 }
@@ -198,6 +201,18 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         langs: "8 langs",
         license: "Apache-2.0",
         note: "audio LLM: transcription + understanding; ~9.5GB VRAM",
+    },
+    // --- transcribe.cpp GGUF ASR (local) ----------------------------------
+    AsrModelSpec {
+        id: "cohere-transcribe-03-2026",
+        display: "Cohere Transcribe 03-2026",
+        engine: AsrEngine::TranscribeCpp,
+        model_ref: "handy-computer/cohere-transcribe-03-2026-gguf",
+        size: 1_770_270_208,
+        released: "2026-03",
+        langs: "14 langs",
+        license: "Apache-2.0",
+        note: "local GGUF Q5_K_M; runs with transcribe.cpp",
     },
 ];
 

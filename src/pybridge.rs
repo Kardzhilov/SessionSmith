@@ -76,6 +76,7 @@ fn script_for(engine: AsrEngine) -> Result<(&'static str, String)> {
         AsrEngine::FasterWhisper => ("asr_faster_whisper.py", FASTER_WHISPER_PY),
         AsrEngine::Parakeet | AsrEngine::CanaryQwen => ("asr_nemo.py", NEMO_PY),
         AsrEngine::Voxtral => ("asr_voxtral.py", VOXTRAL_PY),
+        AsrEngine::TranscribeCpp => bail!("transcribe.cpp does not use the Python bridge"),
         AsrEngine::WhisperCpp => bail!("whisper.cpp does not use the Python bridge"),
     };
     // Inline the shared helpers where the `COMMON` marker line appears.
@@ -102,7 +103,7 @@ pub fn run_asr(
     // decodes internally so it keeps the original file.
     let temp_wav = match engine {
         AsrEngine::Parakeet | AsrEngine::CanaryQwen | AsrEngine::Voxtral => normalize_audio(audio),
-        AsrEngine::FasterWhisper | AsrEngine::WhisperCpp => None,
+        AsrEngine::FasterWhisper | AsrEngine::TranscribeCpp | AsrEngine::WhisperCpp => None,
     };
     let effective_audio = temp_wav.as_deref().unwrap_or(audio);
 
@@ -605,3 +606,4 @@ def main():
 if __name__ == "__main__":
     main()
 "#;
+

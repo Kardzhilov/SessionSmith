@@ -36,9 +36,11 @@ enum AsrBackend {
     #[cfg(feature = "local-whisper")]
     Local,
     /// A modern engine run through the `uv` Python bridge (faster-whisper,
-    /// NVIDIA Parakeet / Canary, Voxtral). Carries the engine and its backend
-    /// model reference (HF / NeMo id).
+    /// NVIDIA Parakeet / Canary, Voxtral). Carries the
+    /// engine and its backend model reference (HF / NeMo id).
     Bridge(AsrEngine, String),
+    /// Local GGUF ASR through transcribe.cpp.
+    TranscribeCpp(String),
 }
 
 impl AsrBackend {
@@ -175,6 +177,33 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             crate::ui::ok(&format!("wrote {}", out_srt.display()));
         }
         write_meta(engine.label());
+        return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
+    }
+
+    if let AsrBackend::TranscribeCpp(model_id) = &backend {
+        let cache = models::gguf_asr_cache_dir()?;
+        let model_path = models::ensure_gguf_asr(model_id, &cache).await?;
+        let prefix = out_dir.join(&stem);
+        let device = g.asr.device.as_deref();
+        let pb = crate::ui::spinner(&format!(
+            "transcribing {stem} with transcribe.cpp ({model_id})"
+        ));
+        let res = crate::transcribe_cpp::run_asr(
+            &model_path,
+            &asr_input,
+            &prefix,
+            &opts.language,
+            device,
+        );
+        pb.finish_and_clear();
+        if let Some(tmp) = &vad_temp {
+            std::fs::remove_file(tmp).ok();
+        }
+        res?;
+        crate::ui::info("ASR engine: transcribe.cpp");
+        crate::ui::ok(&format!("wrote {}", out_txt.display()));
+        crate::ui::ok(&format!("wrote {}", out_srt.display()));
+        write_meta("transcribe.cpp");
         return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
     }
 
@@ -351,6 +380,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         #[cfg(feature = "local-whisper")]
         AsrBackend::Local => unreachable!("local engine handled before this match"),
         AsrBackend::Bridge(..) => unreachable!("bridge engine handled before this match"),
+        AsrBackend::TranscribeCpp(..) => unreachable!("transcribe.cpp engine handled before this match"),
     };
 
     spinner.finish_and_clear();
@@ -492,9 +522,12 @@ fn resolve_asr_backend(g: &GlobalConfig, opts: &TranscribeOpts) -> Result<AsrBac
         ));
     }
 
-    // Modern engines (faster-whisper, Parakeet, Canary, Voxtral) are selected
-    // by the model id and run through the `uv` Python bridge.
+    // Modern engines are selected by model id. Python-ecosystem engines run
+    // through the `uv` bridge; GGUF ASR models run through transcribe.cpp.
     let engine = crate::asr::engine_of(&opts.model);
+    if engine == AsrEngine::TranscribeCpp {
+        return Ok(AsrBackend::TranscribeCpp(opts.model.clone()));
+    }
     if engine.is_bridge() {
         let model_ref = crate::asr::find(&opts.model)
             .map(|m| m.model_ref.to_string())

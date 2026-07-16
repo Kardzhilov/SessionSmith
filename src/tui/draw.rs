@@ -1273,11 +1273,14 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             spans.push(Span::styled(size_field, th.muted_style()));
             x += sw;
 
-            // ASR bridge engines are downloaded via uv. Offer an in-app
-            // [ prepare ] action (download env + weights) plus the engine tag;
+            // ASR bridge engines are prepared locally (uv envs or GGUF weights).
             // ⏎ still sets the model as the default.
             if r.kind == ModelKind::Asr {
-                let label = if r.installed { "[ update ]" } else { "[ prepare ]" };
+                let label = if r.installed {
+                    "[ update ]"
+                } else {
+                    "[ prepare ]"
+                };
                 let lw = label.chars().count() as u16;
                 let mut st = th.success_style();
                 if hr == y && hc >= x && hc < x + lw {

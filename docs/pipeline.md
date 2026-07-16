@@ -37,7 +37,12 @@ SessionSmith processes audio through a two-phase pipeline:
 
 ### Engine selection
 
-SessionSmith checks for ASR engines in this order:
+SessionSmith first checks whether `[asr] model` is a modern bridge model such as
+`faster-large-v3-turbo`, `parakeet-v3`, `voxtral-mini`, or
+`cohere-transcribe-03-2026`. Python-family models run through the `uv` bridge;
+GGUF models run locally through `transcribe.cpp`.
+
+For legacy Whisper models, SessionSmith checks for ASR engines in this order:
 
 1. `.venv/bin/whisperx` — project-local virtualenv (preferred)
 2. `whisperx` on `$PATH`

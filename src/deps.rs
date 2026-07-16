@@ -36,8 +36,8 @@ pub fn check_ffprobe() -> DepStatus {
 }
 
 /// `uv` powers the modern ASR engines (faster-whisper, Parakeet, Canary,
-/// Voxtral) and auto-installed diarization. Not fatal — whisper.cpp works
-/// without it — but required to use those models.
+/// Voxtral) and auto-installed diarization. Not fatal —
+/// whisper.cpp works without it — but required to use those models.
 pub fn check_uv() -> DepStatus {
     match crate::pybridge::uv_path() {
         Some(p) => DepStatus {

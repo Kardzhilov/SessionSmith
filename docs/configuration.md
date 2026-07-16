@@ -20,7 +20,7 @@ base_url = "http://localhost:11434"    # API endpoint
 model    = "qwen3.5:27b"              # default model for all LLM calls
 
 [asr]
-model     = "large-v3-turbo"           # whisperx/whisper model name
+model     = "large-v3-turbo"           # ASR model id
 # engine  = "auto"                     # auto | local | whisper-cli | whisperx
 # binary  = "/usr/local/bin/whisper-cli"  # override ASR binary path
 # model_dir = "~/.cache/whisper"       # ggml model cache (local/whisper-cli)
@@ -102,7 +102,7 @@ model   = "claude-sonnet-4-20250514"
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `model` | string | auto-detected | Model name. whisperx: `large-v3-turbo`, `large-v3`, `medium`, etc. |
+| `model` | string | auto-detected | ASR model id. Built-in examples: `large-v3-turbo`, `faster-large-v3-turbo`, `parakeet-v3`, `voxtral-mini`, `cohere-transcribe-03-2026`. |
 | `engine` | string | `auto` | ASR engine: `local` (in-process whisper-rs), `whisper-cli`, `whisperx`, or `auto`. `auto` prefers the in-process engine when compiled in, else an external binary. |
 | `binary` | path | auto-detected | Path to ASR binary. Usually not needed. |
 | `model_dir` | path | platform default | Where to store downloaded ggml models (whisper-cli only) |
@@ -110,7 +110,10 @@ model   = "claude-sonnet-4-20250514"
 | `diarize` | bool | `false` | Speaker diarization (whisperX only). **Off by default** — current local models often confuse the GM with players, causing more harm than help. Kept as an opt-in for future, better models. |
 | `hf_token` | string | — | Hugging Face token for the pyannote diarization models. Supports `${ENV_VAR}`. Pre-download the models to stay fully offline. |
 | `vad` | bool | `false` | Run an ffmpeg silence-removal pre-pass before ASR to skip long gaps in the recording. |
-| `device` | string | auto | Force the whisperX compute device: `cuda` or `cpu`. Unset auto-detects (CUDA when ≥4 GB VRAM is free). Lets non-NVIDIA users override the default. |
+| `device` | string | auto | Force the ASR compute device where supported: `cuda`, `vulkan`, `metal`, or `cpu`. Unset auto-detects when the selected engine supports it. |
+
+`cohere-transcribe-03-2026` is a local GGUF model. Preparing it downloads the
+Q5_K_M GGUF and fetches/builds the local `transcribe.cpp` runtime.
 
 ### `[runtime]` section
 

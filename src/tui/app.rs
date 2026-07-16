@@ -172,7 +172,7 @@ pub enum ModelKind {
     Whisper,
     Ollama,
     /// A modern ASR engine run via the uv bridge (faster-whisper, Parakeet,
-    /// Canary, Voxtral). Selectable as the default; prepared lazily on first use.
+    /// Canary, Voxtral, Cohere). Selectable as the default; prepared lazily on first use.
     Asr,
 }
 
@@ -1267,18 +1267,26 @@ impl App {
             });
         }
 
-        // --- Advanced ASR engines (via uv bridge; select as default only) ---
-        rows.push(header_row("Advanced ASR engines (GPU, auto-installed via uv)"));
+        // --- Advanced ASR engines (via uv/local bridge; select as default only) ---
+        rows.push(header_row("Advanced ASR engines (uv/local bridge)"));
         rows.push(col_header_row());
         for m in crate::asr::ASR_CATALOG {
-            if !m.engine.is_bridge() {
+            if m.engine == crate::asr::AsrEngine::WhisperCpp {
                 continue; // whisper.cpp ggml models are listed above
             }
             rows.push(ModelRow {
                 kind: ModelKind::Asr,
                 display: m.display.to_string(),
                 id: m.id.to_string(),
-                installed: crate::asr::is_prepared(m.id),
+                installed: if m.engine == crate::asr::AsrEngine::TranscribeCpp {
+                    models::gguf_asr_cache_dir()
+                        .ok()
+                        .and_then(|cache| models::gguf_asr_path(m.id, &cache).ok())
+                        .map(|path| path.exists())
+                        .unwrap_or(false)
+                } else {
+                    crate::asr::is_prepared(m.id)
+                },
                 is_default: m.id == asr_default,
                 size: m.size,
                 released: m.released.to_string(),

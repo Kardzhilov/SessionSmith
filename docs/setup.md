@@ -73,6 +73,8 @@ cargo build --release --features metal    # Apple Silicon (macOS)
 | **in-process (whisper-rs)** — default | Built into the binary; no external tool. Uses the same ggml models as whisper.cpp (auto-downloaded). GPU via build features above. |
 | whisper-cli (whisper.cpp) | External binary; used when the build excludes `local-whisper`, or when `[asr] engine = "whisper-cli"`. |
 | **whisperx** | Required for **speaker diarization**. Install in a project `.venv/` and SessionSmith finds it automatically. Set `[asr] engine = "whisperx"` or `diarize = true`. |
+| uv bridge models | Faster-whisper, Parakeet, Canary, and Voxtral are selected by `[asr] model` and run through `uv` without manual Python setup. |
+| transcribe.cpp GGUF models | Cohere Transcribe is selected by `[asr] model`; prepare downloads the local GGUF model and fetches/builds `transcribe.cpp`. |
 
 Select the engine explicitly with `[asr] engine` (`local` / `whisper-cli` /
 `whisperx`); the default (`auto`) prefers the in-process engine when compiled in.
