@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::hardware::HardwareProfile;
@@ -334,6 +335,8 @@ pub struct CampaignConfig {
     #[serde(default)]
     pub players: Vec<Player>,
     #[serde(default)]
+    pub transcription: TranscriptionConfig,
+    #[serde(default)]
     pub system: SystemRef,
     #[serde(default)]
     pub outputs: OutputsConfig,
@@ -360,6 +363,15 @@ pub struct Player {
     pub ancestry: String,
     #[serde(default)]
     pub class: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TranscriptionConfig {
+    /// Literal, case-sensitive corrections applied longest-first to transcript
+    /// TXT and SRT output. Useful for fictional names unsupported by an ASR
+    /// engine's vocabulary prompting interface.
+    #[serde(default)]
+    pub replacements: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -529,6 +541,7 @@ mod tests {
                 ancestry: "Dwarf".into(),
                 class: "Fighter".into(),
             }],
+            transcription: TranscriptionConfig::default(),
             system: SystemRef { preset: "dnd5e".into(), overrides: String::new() },
             outputs: OutputsConfig::default(),
             prompts: PromptOverrides::default(),

@@ -258,6 +258,13 @@ pub fn mark_prepared(id: &str) {
     }
 }
 
+/// Remove the in-app prepared marker for model `id`.
+pub fn clear_prepared(id: &str) {
+    if let Some(d) = prepared_dir() {
+        let _ = std::fs::remove_file(d.join(marker_name(id)));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Diarization catalog
 // ---------------------------------------------------------------------------

@@ -1096,9 +1096,9 @@ fn draw_theme_picker(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let queued = app.job_queue.len();
     let title = if queued > 0 {
-        format!("Models — {queued} queued · ⏎ expand/default · i install/check · d delete · u update ollama · Esc")
+        format!("Models — {queued} queued · ⏎ default · i check · d delete · g CUDA · u Ollama · Esc")
     } else {
-        "Models — ⏎ expand/default · i install/check · d delete · u update ollama · Esc".to_string()
+        "Models — ⏎ default · i check · d delete · g CUDA · u Ollama · Esc".to_string()
     };
     let focused = matches!(app.pane, Pane::Content);
     let block = section_block(&title, th, focused);
@@ -1288,6 +1288,17 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                 }
                 spans.push(Span::styled(label.to_string(), st));
                 buttons.push((x, x + lw, y, ri, true));
+                x += lw;
+                spans.push(Span::raw(" "));
+                x += 1;
+                let del_label = "[ delete ]";
+                let dw = del_label.chars().count() as u16;
+                let mut del_style = th.error_style();
+                if hr == y && hc >= x && hc < x + dw {
+                    del_style = del_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+                }
+                spans.push(Span::styled(del_label.to_string(), del_style));
+                buttons.push((x, x + dw, y, ri, false));
                 let tag = crate::asr::find(&r.id)
                     .map(|m| format!("  via {}", m.engine.label()))
                     .unwrap_or_else(|| "  via uv".to_string());

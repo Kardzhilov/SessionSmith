@@ -177,6 +177,7 @@ async fn ai_sort_by_content(
         model: fast_model.to_string(),
         language: "auto".to_string(),
         force: true,
+        replacements: std::collections::BTreeMap::new(),
         diarize: false,
         vad: false,
     };

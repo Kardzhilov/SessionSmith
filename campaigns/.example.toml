@@ -23,6 +23,10 @@ character = "Drokel"
 ancestry  = "Dwarf"
 class     = "Fighter"
 
+# Optional local corrections for names the ASR consistently mishears.
+# [transcription.replacements]
+# "the Mosses" = "Damasus"
+
 [system]
 # One of: dnd5e | pf2e | coc | blades | daggerheart | generic | wordsmith
 # Run `sessionsmith systems list` to see all bundled presets.

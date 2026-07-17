@@ -82,7 +82,11 @@ pub async fn run(args: ModelsArgs) -> Result<()> {
                     crate::asr::AsrEngine::TranscribeCpp => {
                         let cache = models::gguf_asr_cache_dir()?;
                         models::download_gguf_asr(&name, &cache).await?;
-                        tokio::task::spawn_blocking(crate::transcribe_cpp::ensure_runtime).await??;
+                        let device = g.asr.device.clone();
+                        tokio::task::spawn_blocking(move || {
+                            crate::transcribe_cpp::ensure_runtime_for(device.as_deref())
+                        })
+                        .await??;
                         crate::asr::mark_prepared(&name);
                     }
                     engine => {

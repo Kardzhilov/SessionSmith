@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         model: model.clone(),
         language: "en".to_string(),
         force: true,
+        replacements: std::collections::BTreeMap::new(),
         diarize: false,
         vad: false,
     };

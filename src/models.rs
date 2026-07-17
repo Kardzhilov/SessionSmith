@@ -297,6 +297,21 @@ pub fn gguf_asr_path(id: &str, cache_dir: &Path) -> Result<PathBuf> {
     Ok(cache_dir.join(model.filename))
 }
 
+/// Delete a downloaded GGUF ASR model. No error if it is not present.
+pub fn delete_gguf_asr(id: &str, cache_dir: &Path) -> Result<()> {
+    let path = gguf_asr_path(id, cache_dir)?;
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("deleting {}", path.display()))?;
+    }
+    let sidecar = sidecar_path(&path);
+    if sidecar.exists() {
+        std::fs::remove_file(&sidecar)
+            .with_context(|| format!("deleting {}", sidecar.display()))?;
+    }
+    Ok(())
+}
+
 pub async fn ensure_gguf_asr(id: &str, cache_dir: &Path) -> Result<PathBuf> {
     let path = gguf_asr_path(id, cache_dir)?;
     if path.exists() {

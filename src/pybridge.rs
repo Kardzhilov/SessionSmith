@@ -56,6 +56,40 @@ fn bridge_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+fn hf_cache_model_dir(repo: &str) -> Option<PathBuf> {
+    let cache = dirs::cache_dir()?;
+    let safe = repo.replace('/', "--");
+    Some(cache.join("huggingface").join("hub").join(format!("models--{safe}")))
+}
+
+fn bridge_model_cache(engine: AsrEngine, model_ref: &str) -> Option<PathBuf> {
+    match engine {
+        AsrEngine::FasterWhisper => hf_cache_model_dir(&format!("Systran/faster-whisper-{model_ref}")),
+        AsrEngine::Parakeet | AsrEngine::CanaryQwen | AsrEngine::Voxtral => {
+            hf_cache_model_dir(model_ref)
+        }
+        AsrEngine::TranscribeCpp | AsrEngine::WhisperCpp => None,
+    }
+}
+
+/// Best-effort deletion of local files SessionSmith can confidently attribute
+/// to one Python bridge ASR model.
+pub fn delete_asr_cache(engine: AsrEngine, model_ref: &str) -> Result<()> {
+    let (script_name, _) = script_for(engine)?;
+    let script = bridge_dir()?.join(script_name);
+    if script.exists() {
+        std::fs::remove_file(&script)
+            .with_context(|| format!("deleting {}", script.display()))?;
+    }
+    if let Some(model_dir) = bridge_model_cache(engine, model_ref) {
+        if model_dir.exists() {
+            std::fs::remove_dir_all(&model_dir)
+                .with_context(|| format!("deleting {}", model_dir.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Materialise `contents` at `<bridge_dir>/<name>`, rewriting only when changed
 /// (keeps `uv`'s per-script environment cache warm across runs).
 fn write_script(name: &str, contents: &str) -> Result<PathBuf> {

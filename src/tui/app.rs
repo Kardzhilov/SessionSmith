@@ -66,6 +66,7 @@ pub enum Action {
     CycleTheme,
     ManageModels,
     UpdateOllama,
+    InstallCudaToolkit,
     RerunReplace,
     RerunKeepBoth,
     ToggleDiarize,
@@ -87,6 +88,7 @@ impl Action {
             Action::CycleTheme => "Change theme",
             Action::ManageModels => "Manage models — install / check / delete",
             Action::UpdateOllama => "Update Ollama — run the official installer",
+            Action::InstallCudaToolkit => "Install CUDA toolkit — enable transcribe.cpp GPU",
             Action::RerunReplace => "Re-run session — regenerate & replace artifacts",
             Action::RerunKeepBoth => "Re-run session — keep both to compare",
             Action::ToggleDiarize => "Toggle speaker diarization (on/off)",
@@ -107,6 +109,7 @@ impl Action {
             Action::CycleTheme,
             Action::ManageModels,
             Action::UpdateOllama,
+            Action::InstallCudaToolkit,
             Action::RerunReplace,
             Action::RerunKeepBoth,
             Action::ToggleDiarize,
@@ -1490,6 +1493,19 @@ impl App {
         }
     }
 
+    pub(super) fn request_cuda_toolkit_install(&mut self) {
+        match cuda_toolkit_command() {
+            Some(cmd) => {
+                self.pending_shell = Some(("Install CUDA toolkit".to_string(), cmd));
+            }
+            None => self.message(
+                "Not supported here",
+                "Automatic CUDA toolkit installation is only scripted for Linux package managers. Install CUDA toolkit/nvcc, then run models pull for Cohere again.",
+                true,
+            ),
+        }
+    }
+
     /// Queue an install/update (`install = true`) or delete of a specific row.
     pub(super) fn model_action_at(&mut self, row_idx: usize, install: bool) {
         if let Some(s) = &mut self.models {
@@ -1516,12 +1532,7 @@ impl App {
             (ModelKind::Ollama, true) => ModelJob::PullOllama(id.clone()),
             (ModelKind::Ollama, false) => ModelJob::DeleteOllama(id.clone()),
             (ModelKind::Asr, true) => ModelJob::PrepareAsr(id.clone()),
-            (ModelKind::Asr, false) => {
-                self.status = format!(
-                    "{id}: managed by uv — nothing to delete here. Press ⏎ to set as default."
-                );
-                return;
-            }
+            (ModelKind::Asr, false) => ModelJob::DeleteAsr(id.clone()),
         };
         let title = match (kind, install) {
             (ModelKind::Asr, true) if already_installed => format!("Check {id}"),
@@ -1638,6 +1649,33 @@ fn campaign_stem(path: &std::path::Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn cuda_toolkit_command() -> Option<String> {
+        if !cfg!(target_os = "linux") {
+                return None;
+        }
+        let exe = std::env::current_exe().ok()?;
+        let exe = shell_quote(&exe.display().to_string());
+        Some(format!(
+                "set -e; \
+                 if command -v nvcc >/dev/null 2>&1; then \
+                     echo 'CUDA toolkit already installed.'; \
+                 elif command -v apt-get >/dev/null 2>&1; then \
+                     sudo apt-get update && sudo apt-get install -y nvidia-cuda-toolkit; \
+                 elif command -v dnf >/dev/null 2>&1; then \
+                     sudo dnf install -y cuda-toolkit || sudo dnf install -y nvidia-cuda-toolkit; \
+                 elif command -v pacman >/dev/null 2>&1; then \
+                     sudo pacman -S --needed cuda; \
+                 else \
+                     echo 'No supported package manager found. Install CUDA toolkit/nvcc manually.'; exit 1; \
+                 fi; \
+                 {exe} models pull cohere-transcribe-03-2026"
+        ))
 }
 
 fn header_row(title: &str) -> ModelRow {

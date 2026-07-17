@@ -3,7 +3,7 @@ use inquire::{Confirm, Select, Text};
 use std::path::PathBuf;
 
 use crate::cli::InitArgs;
-use crate::config::{Campaign, CampaignConfig, GlobalConfig, OutputsConfig, Player, PromptOverrides, SystemRef};
+use crate::config::{Campaign, CampaignConfig, GlobalConfig, OutputsConfig, Player, PromptOverrides, SystemRef, TranscriptionConfig};
 use crate::{commands, deps, hardware, models, presets, ui};
 
 pub async fn run(args: InitArgs) -> Result<()> {
@@ -64,6 +64,7 @@ pub async fn run(args: InitArgs) -> Result<()> {
     let cfg = CampaignConfig {
         campaign: Campaign { name: name.clone(), gm, setting, notes: notes_seed },
         players,
+        transcription: TranscriptionConfig::default(),
         system: SystemRef { preset: preset_id, overrides: String::new() },
         outputs: OutputsConfig::default(),
         prompts: PromptOverrides::default(),

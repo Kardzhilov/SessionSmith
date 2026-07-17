@@ -315,6 +315,10 @@ impl App {
                 self.request_ollama_update();
                 true
             }
+            KeyCode::Char('g') => {
+                self.request_cuda_toolkit_install();
+                true
+            }
             _ => false,
         }
     }
@@ -830,6 +834,7 @@ impl App {
             Action::CycleTheme => self.open_theme_picker(),
             Action::ManageModels => self.open_models(),
             Action::UpdateOllama => self.request_ollama_update(),
+            Action::InstallCudaToolkit => self.request_cuda_toolkit_install(),
             Action::RerunReplace => self.open_rerun_picker(false),
             Action::RerunKeepBoth => self.open_rerun_picker(true),
             Action::ToggleDiarize => self.toggle_diarize(),

@@ -74,6 +74,8 @@ pub enum ModelJob {
     DeleteOllama(String),
     /// Download the uv environment + weights for a bridge ASR model (id).
     PrepareAsr(String),
+    /// Delete local files/markers for an advanced ASR model (id).
+    DeleteAsr(String),
 }
 
 /// Spawn a model-management job.
@@ -127,7 +129,11 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
             if spec.engine == crate::asr::AsrEngine::TranscribeCpp {
                 let cache = models::gguf_asr_cache_dir()?;
                 models::download_gguf_asr(&id, &cache).await?;
-                tokio::task::spawn_blocking(crate::transcribe_cpp::ensure_runtime).await??;
+                let device = g.asr.device.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::transcribe_cpp::ensure_runtime_for(device.as_deref())
+                })
+                .await??;
                 crate::asr::mark_prepared(&id);
                 return Ok(format!("{} ready", spec.display));
             }
@@ -141,6 +147,23 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
             .await??;
             crate::asr::mark_prepared(&id);
             Ok(format!("{} ready", spec.display))
+        }
+        ModelJob::DeleteAsr(id) => {
+            let spec = crate::asr::find(&id)
+                .ok_or_else(|| anyhow::anyhow!("unknown ASR model '{id}'"))?;
+            match spec.engine {
+                crate::asr::AsrEngine::TranscribeCpp => {
+                    let cache = models::gguf_asr_cache_dir()?;
+                    models::delete_gguf_asr(&id, &cache)?;
+                }
+                engine if engine.is_bridge() => {
+                    crate::pybridge::delete_asr_cache(engine, spec.model_ref)?;
+                }
+                crate::asr::AsrEngine::WhisperCpp => {}
+                _ => {}
+            }
+            crate::asr::clear_prepared(&id);
+            Ok(format!("deleted {}", spec.display))
         }
     }
 }
@@ -163,6 +186,7 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
         model: req.asr_model.clone(),
         language: "auto".into(),
         force: req.force_transcribe,
+        replacements: req.campaign.transcription.replacements.clone(),
         diarize: req.g.asr.diarize,
         vad: req.g.asr.vad,
     };

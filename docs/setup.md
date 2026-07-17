@@ -76,6 +76,27 @@ cargo build --release --features metal    # Apple Silicon (macOS)
 | uv bridge models | Faster-whisper, Parakeet, Canary, and Voxtral are selected by `[asr] model` and run through `uv` without manual Python setup. |
 | transcribe.cpp GGUF models | Cohere Transcribe is selected by `[asr] model`; prepare downloads the local GGUF model and fetches/builds `transcribe.cpp`. |
 
+For Cohere/transcribe.cpp, SessionSmith splits long recordings into chunks that
+fit the model's single-call audio and decoder-output limits, then stitches the
+transcript and SRT cues back together. If one chunk is still too dense and hits
+the model's output cap, SessionSmith splits that chunk smaller and retries it.
+Cohere uses 30-second target chunks with 5 seconds of leading overlap. This
+avoids silent early endings and greedy repetition loops seen on denser audio.
+Repeated boundary text is removed while stitching so words at hard cuts are not
+lost. Detected repetition loops are retried as smaller chunks.
+
+The cached `transcribe.cpp` runtime is built with GPU support when the matching
+toolchain is available: CUDA needs `nvcc` on `PATH`, Vulkan needs `glslc` and
+Vulkan development libraries, and Metal is enabled on Apple Silicon. Set
+`[asr] device = "cuda"`, `"vulkan"`, `"metal"`, or leave it unset for auto.
+In the model manager, press `g` to install CUDA toolkit through your Linux
+package manager and rebuild Cohere/transcribe.cpp with CUDA.
+
+Advanced ASR rows can be deleted from the model manager. For Cohere this removes
+the local GGUF and prepared marker; for uv bridge models it removes the prepared
+marker plus the model-specific Hugging Face cache when SessionSmith can identify
+it safely.
+
 When you check an already-downloaded Hugging Face model, SessionSmith uses
 remote metadata (ETag, Last-Modified, and Content-Length) to decide whether the
 local file is current. It does not download the full model just to compare it.

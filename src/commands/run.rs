@@ -59,6 +59,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         model: asr_model,
         language: "auto".into(),
         force: args.force,
+        replacements: campaign.transcription.replacements.clone(),
         diarize: args.diarize || g.asr.diarize,
         vad: args.vad || g.asr.vad,
     };

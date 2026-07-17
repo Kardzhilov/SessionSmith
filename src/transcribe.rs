@@ -2,6 +2,7 @@
 //! (whichever is found first), producing `transcripts/<stem>.txt` and `.srt`.
 
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -60,6 +61,7 @@ pub struct TranscribeOpts {
     pub model: String,
     pub language: String,
     pub force: bool,
+    pub replacements: BTreeMap<String, String>,
     /// Enable speaker diarization (whisperX only). Off by default.
     pub diarize: bool,
     /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
@@ -69,8 +71,46 @@ pub struct TranscribeOpts {
 impl TranscribeOpts {
     /// Options for a plain transcription, diarization/VAD taken from config.
     pub fn from_config(model: String, language: String, force: bool, g: &GlobalConfig) -> Self {
-        Self { model, language, force, diarize: g.asr.diarize, vad: g.asr.vad }
+        Self {
+            model,
+            language,
+            force,
+            replacements: BTreeMap::new(),
+            diarize: g.asr.diarize,
+            vad: g.asr.vad,
+        }
     }
+}
+
+fn apply_replacements(text: &str, replacements: &BTreeMap<String, String>) -> String {
+    let mut ordered: Vec<(&String, &String)> = replacements.iter().collect();
+    ordered.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    ordered.into_iter().fold(text.to_string(), |text, (from, to)| {
+        if from.is_empty() { text } else { text.replace(from, to) }
+    })
+}
+
+fn correct_transcript_files(
+    txt: &Path,
+    srt: &Path,
+    replacements: &BTreeMap<String, String>,
+) -> Result<()> {
+    if replacements.is_empty() {
+        return Ok(());
+    }
+    for path in [txt, srt] {
+        if path.exists() {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading transcript corrections input: {}", path.display()))?;
+            std::fs::write(path, apply_replacements(&text, replacements))
+                .with_context(|| format!("writing transcript corrections: {}", path.display()))?;
+        }
+    }
+    crate::ui::info(&format!(
+        "applied {} campaign transcript correction(s)",
+        replacements.len()
+    ));
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -171,6 +211,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             std::fs::remove_file(tmp).ok();
         }
         res?;
+        correct_transcript_files(&out_txt, &out_srt, &opts.replacements)?;
         crate::ui::info(&format!("ASR engine: {}", engine.label()));
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         if out_srt.exists() {
@@ -200,6 +241,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             std::fs::remove_file(tmp).ok();
         }
         res?;
+        correct_transcript_files(&out_txt, &out_srt, &opts.replacements)?;
         crate::ui::info("ASR engine: transcribe.cpp");
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
@@ -242,6 +284,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         let segments = result?;
         std::fs::write(&out_txt, crate::whisper_local::segments_to_text(&segments))?;
         std::fs::write(&out_srt, crate::whisper_local::segments_to_srt(&segments))?;
+        correct_transcript_files(&out_txt, &out_srt, &opts.replacements)?;
         crate::ui::info(&format!("ASR device: {}", crate::whisper_local::gpu_label()));
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
@@ -395,6 +438,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     if !out_txt.exists() {
         bail!("ASR did not produce {} — check stderr above", out_txt.display());
     }
+    correct_transcript_files(&out_txt, &out_srt, &opts.replacements)?;
     if opts.diarize {
         crate::ui::info("diarization enabled (whisperX) — transcript includes speaker labels");
     }
@@ -652,4 +696,21 @@ fn path_of(cmd: &str) -> Option<PathBuf> {
     if !out.status.success() { return None; }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_replacements_apply_longest_first() {
+        let replacements = BTreeMap::from([
+            ("the Mosses".to_string(), "Damasus".to_string()),
+            ("the Mosses or Ports".to_string(), "Damasus".to_string()),
+        ]);
+        assert_eq!(
+            apply_replacements("the Mosses or Ports and the Mosses", &replacements),
+            "Damasus and Damasus"
+        );
+    }
 }

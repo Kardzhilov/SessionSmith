@@ -24,6 +24,7 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         model,
         language: args.language,
         force: args.force,
+        replacements: campaign.transcription.replacements.clone(),
         diarize: args.diarize || g.asr.diarize,
         vad: args.vad || g.asr.vad,
     };

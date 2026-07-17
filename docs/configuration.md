@@ -110,10 +110,12 @@ model   = "claude-sonnet-4-20250514"
 | `diarize` | bool | `false` | Speaker diarization (whisperX only). **Off by default** — current local models often confuse the GM with players, causing more harm than help. Kept as an opt-in for future, better models. |
 | `hf_token` | string | — | Hugging Face token for the pyannote diarization models. Supports `${ENV_VAR}`. Pre-download the models to stay fully offline. |
 | `vad` | bool | `false` | Run an ffmpeg silence-removal pre-pass before ASR to skip long gaps in the recording. |
-| `device` | string | auto | Force the ASR compute device where supported: `cuda`, `vulkan`, `metal`, or `cpu`. Unset auto-detects when the selected engine supports it. |
+| `device` | string | auto | Force the ASR compute device where supported: `cuda`, `vulkan`, `metal`, or `cpu`. Unset auto-detects when the selected engine supports it. For `transcribe.cpp`, preparing/running a model will build the local runtime with the requested GPU backend when the matching toolchain is installed. |
 
 `cohere-transcribe-03-2026` is a local GGUF model. Preparing it downloads the
-Q5_K_M GGUF and fetches/builds the local `transcribe.cpp` runtime.
+Q5_K_M GGUF and fetches/builds the local `transcribe.cpp` runtime. Long audio is
+split into model-safe chunks automatically and stitched back into `.txt` and
+`.srt` outputs.
 
 For Hugging Face-hosted GGML/GGUF model files, repeated model checks use remote
 metadata headers and skip the download when the local file is already current.
@@ -157,6 +159,10 @@ character = "Whisper"
 ancestry  = "Tiefling"
 class     = "Rogue"
 
+[transcription.replacements]
+"the Mosses" = "Damasus"
+"the Masses" = "Damasus"
+
 [system]
 preset    = "dnd5e"
 overrides = "We track inspiration as a shared pool of 3 tokens."
@@ -189,6 +195,13 @@ default = ["bullets", "dm-notes", "recap", "summary", "story", "quotes"]
 
 The player list is injected into prompts so the LLM can attribute actions
 to the correct characters. Uncertain attributions are marked with `(?)`.
+
+### `[transcription.replacements]` section
+
+Optional literal, case-sensitive corrections applied to both `.txt` and `.srt`
+transcripts. Longer keys are applied first. This is useful for fictional names
+when an ASR engine does not support vocabulary prompting. Re-run transcription
+with `--force` after changing corrections.
 
 ### `[system]` section
 
