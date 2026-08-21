@@ -919,7 +919,10 @@ fn draw_search(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         Span::raw(s.query.clone()),
         Span::styled("▏", th.accent_style()),
     ]))
-    .block(popup_block("Search notes", th))
+    .block(popup_block(
+        if s.all_campaigns { "Search notes · all campaigns (Ctrl-A)" } else { "Search notes · current campaign (Ctrl-A)" },
+        th,
+    ))
     .style(th.base());
     frame.render_widget(input, parts[0]);
 
@@ -934,11 +937,21 @@ fn draw_search(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .iter()
         .enumerate()
         .map(|(row, h)| {
-            ListItem::new(Line::from(vec![
+            let mut spans = Vec::new();
+            if s.all_campaigns {
+                if let Some(name) = s.hit_campaigns.get(row)
+                    .and_then(|index| app.campaigns.get(*index))
+                    .map(|campaign| campaign.name.as_str())
+                {
+                    spans.push(Span::styled(format!("{name} · "), th.muted_style()));
+                }
+            }
+            spans.extend([
                 Span::styled(format!("{} ", h.session), th.accent_style()),
                 Span::styled(format!("[{}] ", h.kind), th.muted_style()),
                 Span::raw(h.snippet.replace('\n', " ")),
-            ]))
+            ]);
+            ListItem::new(Line::from(spans))
             .style(hover_style(th, Some(row) == hov))
         })
         .collect();

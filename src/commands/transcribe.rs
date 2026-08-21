@@ -11,11 +11,20 @@ use crate::{deps, hardware, ui};
 pub async fn run(args: TranscribeArgs) -> Result<()> {
     ui::header("SessionSmith · transcribe");
     deps::ensure_dirs()?;
-    let g = GlobalConfig::load_or_default()?;
-
     let camp_path = crate::commands::resolve_campaign(None)?;
     let campaign  = crate::commands::load_campaign_or_die(&camp_path)?;
+    let g = crate::config::effective(&GlobalConfig::load_or_default()?, &campaign);
     let tx_dir    = campaign.transcripts_dir();
+    let mut speaker_map = campaign.transcription.speakers.clone();
+    for value in &args.speakers {
+        let (label, name) = crate::speakers::parse_mapping(value)?;
+        speaker_map.insert(label, name);
+    }
+    if let Some(stem) = &args.remap {
+        crate::speakers::apply_to_session(&tx_dir, stem, &speaker_map)?;
+        ui::ok(&format!("updated speaker mapping for {stem}"));
+        return Ok(());
+    }
 
     let model = args.asr_model
         .or_else(|| g.asr.model.clone())
@@ -26,11 +35,24 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         force: args.force,
         replacements: campaign.transcription.replacements.clone(),
         source_files: Vec::new(),
+        initial_prompt: crate::transcribe::vocabulary_prompt(
+            &campaign,
+            &crate::presets::load(&campaign.system.preset)?,
+        ),
+        session_date: args.date.clone(),
         diarize: args.diarize || g.asr.diarize,
         vad: args.vad || g.asr.vad,
     };
 
-    let sessions: Vec<SessionInput> = if args.files.is_empty() {
+    let sessions: Vec<SessionInput> = if args.combine {
+        if args.files.is_empty() {
+            anyhow::bail!("--combine needs at least one audio file");
+        }
+        vec![SessionInput {
+            files: args.files.clone(),
+            name: args.name.clone().expect("clap requires --name with --combine"),
+        }]
+    } else if args.files.is_empty() {
         pick_and_build_sessions(&g, &tx_dir).await?
     } else {
         args.files.iter().map(|f| SessionInput {
@@ -46,7 +68,11 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         let audio_path = prepare_audio(sess, &merge_dir).await?;
         let mut session_opts = tx_opts.clone();
         session_opts.source_files = sess.files.clone();
-        transcribe::transcribe(&audio_path, &tx_dir, &g, &session_opts).await?;
+        let out = transcribe::transcribe(&audio_path, &tx_dir, &g, &session_opts).await?;
+        if !speaker_map.is_empty() {
+            let stem = out.txt.file_stem().and_then(|value| value.to_str()).unwrap_or(&sess.name);
+            crate::speakers::apply_to_session(&tx_dir, stem, &speaker_map)?;
+        }
     }
     Ok(())
 }

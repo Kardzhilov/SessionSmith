@@ -6,6 +6,7 @@
 //! player can seek into it at a quote's timestamp).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +39,12 @@ pub struct SessionMeta {
     /// Silence intervals removed before ASR, expressed in original time.
     #[serde(default)]
     pub vad_removed_spans: Vec<VadSpan>,
+    /// Names selected for diarized speaker labels in this session.
+    #[serde(default)]
+    pub speaker_map: Option<BTreeMap<String, String>>,
+    /// Calendar date on which the session was played (`YYYY-MM-DD`).
+    #[serde(default)]
+    pub session_date: Option<String>,
     /// Unix seconds when the transcript was produced.
     #[serde(default)]
     pub created: i64,

@@ -102,15 +102,13 @@ impl LlmBackend for AnthropicBackend {
             temperature: opts.temperature,
         };
 
-        let resp = self.client.post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body).send().await?;
-        if !resp.status().is_success() {
-            let s = resp.status();
-            let t = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("anthropic HTTP {s}: {t}"));
-        }
+        let resp = crate::llm::send_with_retry("anthropic", || {
+            self.client.post(format!("{}/v1/messages", self.base_url))
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+        }).await?;
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {

@@ -335,11 +335,20 @@ impl App {
         self.overlay = Overlay::Search(SearchState {
             query: String::new(),
             hits: Vec::new(),
+            hit_campaigns: Vec::new(),
+            all_campaigns: false,
             cursor: 0,
         });
     }
 
     fn on_key_search(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
+            if let Overlay::Search(search) = &mut self.overlay {
+                search.all_campaigns = !search.all_campaigns;
+            }
+            self.run_search();
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.overlay = Overlay::None;
@@ -381,19 +390,35 @@ impl App {
     }
 
     fn run_search(&mut self) {
-        let Some(cfg) = &self.campaign else { return };
-        let query = if let Overlay::Search(s) = &self.overlay {
-            s.query.clone()
+        let (query, all_campaigns) = if let Overlay::Search(search) = &self.overlay {
+            (search.query.clone(), search.all_campaigns)
         } else {
             return;
         };
-        let hits = if query.trim().is_empty() {
+        let scoped_hits = if query.trim().is_empty() {
             Vec::new()
+        } else if all_campaigns {
+            let mut hits = Vec::new();
+            for (index, entry) in self.campaigns.iter().enumerate() {
+                if let Ok(campaign) = crate::config::CampaignConfig::load(&entry.path) {
+                    hits.extend(
+                        index::search(&campaign, query.trim())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|hit| (index, hit)),
+                    );
+                }
+            }
+            hits
         } else {
-            index::search(cfg, query.trim()).unwrap_or_default()
+            self.campaign.as_ref()
+                .map(|campaign| index::search(campaign, query.trim()).unwrap_or_default()
+                    .into_iter().map(|hit| (self.campaign_idx, hit)).collect())
+                .unwrap_or_default()
         };
         if let Overlay::Search(s) = &mut self.overlay {
-            s.hits = hits;
+            s.hit_campaigns = scoped_hits.iter().map(|(index, _)| *index).collect();
+            s.hits = scoped_hits.into_iter().map(|(_, hit)| hit).collect();
             if s.cursor >= s.hits.len() {
                 s.cursor = 0;
             }
@@ -401,14 +426,19 @@ impl App {
     }
 
     fn open_search_hit(&mut self) {
-        let (stem, kind) = if let Overlay::Search(s) = &self.overlay {
+        let (stem, kind, campaign_idx) = if let Overlay::Search(s) = &self.overlay {
             match s.hits.get(s.cursor) {
-                Some(h) => (h.session.clone(), h.kind.clone()),
+            Some(h) => (h.session.clone(), h.kind.clone(), s.hit_campaigns.get(s.cursor).copied()),
                 None => return,
             }
         } else {
             return;
         };
+        if let Some(index) = campaign_idx.filter(|index| *index != self.campaign_idx) {
+            self.campaign_idx = index;
+            self.camp_state.select(Some(index));
+            self.load_campaign_data();
+        }
         if let Some(si) = self.sessions.iter().position(|s| s.stem == stem) {
             self.viewing_log = false;
             self.open_session = Some(si);

@@ -170,13 +170,11 @@ impl LlmBackend for OllamaBackend {
             think: opts.think,
             format: opts.format.clone(),
         };
-        let resp = self.client.post(format!("{}/api/chat", self.base_url))
-            .json(&body).send().await?;
-        if !resp.status().is_success() {
-            let s = resp.status();
-            let t = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("ollama HTTP {s}: {t}"));
-        }
+        let resp = crate::llm::send_with_retry("ollama", || {
+            self.client.post(format!("{}/api/chat", self.base_url))
+                .json(&body)
+                .send()
+        }).await?;
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {

@@ -129,6 +129,8 @@ pub struct PaletteState {
 pub struct SearchState {
     pub query: String,
     pub hits: Vec<SearchHit>,
+    pub hit_campaigns: Vec<usize>,
+    pub all_campaigns: bool,
     pub cursor: usize,
 }
 
@@ -1025,6 +1027,13 @@ impl App {
             self.job_rx = None;
             self.job_progress = None;
             self.job_elapsed = self.job_started.map(|s| s.elapsed());
+            if self.job_elapsed.unwrap_or_default() >= std::time::Duration::from_secs(60) {
+                print!("\x07");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                if self.global.ui.notify {
+                    notify_job_done(&self.job_title, res.is_ok());
+                }
+            }
             match &res {
                 Ok(summary) => {
                     self.job_log.push((LogLevel::Ok, summary.clone()));
@@ -1094,6 +1103,10 @@ impl App {
 
     pub(super) fn start_job(&mut self, mut req_kind: JobRequestBuilder) {
         let Some((cfg, preset)) = self.require_ready() else { return };
+        let g = crate::config::effective(&self.global, &cfg);
+        let asr_model = g.asr.model.clone().unwrap_or_else(|| {
+            crate::hardware::recommend(&crate::hardware::detect()).whisper_model.to_string()
+        });
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.job_rx = Some(rx);
         self.job_running = true;
@@ -1109,10 +1122,10 @@ impl App {
 
         let req = JobRequest {
             kind: req_kind.kind,
-            g: self.global.clone(),
+            g,
             campaign: cfg,
             preset,
-            asr_model: self.asr_model(),
+            asr_model,
             sessions: std::mem::take(&mut req_kind.sessions),
             transcripts: std::mem::take(&mut req_kind.transcripts),
             artifacts: std::mem::take(&mut req_kind.artifacts),
@@ -1140,6 +1153,10 @@ impl App {
         retranscribe: bool,
     ) {
         let Some((cfg, preset)) = self.require_ready() else { return };
+        let g = crate::config::effective(&self.global, &cfg);
+        let asr_model = g.asr.model.clone().unwrap_or_else(|| {
+            crate::hardware::recommend(&crate::hardware::detect()).whisper_model.to_string()
+        });
         let stem = transcript
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -1185,10 +1202,10 @@ impl App {
 
         let req = JobRequest {
             kind,
-            g: self.global.clone(),
+            g,
             campaign: cfg,
             preset,
-            asr_model: self.asr_model(),
+            asr_model,
             sessions,
             transcripts,
             artifacts,
@@ -1604,6 +1621,34 @@ impl App {
         self.status = format!("Running: {title}");
         jobs::spawn_model(&self.handle, tx, self.global.clone(), job);
     }
+}
+
+fn notify_job_done(title: &str, succeeded: bool) {
+    let body = if succeeded { "SessionSmith job completed" } else { "SessionSmith job failed" };
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .args([title, body])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification {} with title {}",
+            applescript_string(body),
+            applescript_string(title),
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (title, body);
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('\"', "\\\""))
 }
 
 /// Small builder used to hand a job over to [`App::start_job`].

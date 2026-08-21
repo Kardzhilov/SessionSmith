@@ -50,6 +50,7 @@ pub fn transcribe_file(
     language: &str,
     threads: i32,
     use_gpu: bool,
+    initial_prompt: Option<&str>,
 ) -> Result<Vec<LocalSegment>> {
     init_logging();
     let samples = decode_audio(audio)?;
@@ -68,6 +69,9 @@ pub fn transcribe_file(
     params.set_n_threads(threads.max(1));
     if language != "auto" {
         params.set_language(Some(language));
+    }
+    if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.is_empty()) {
+        params.set_initial_prompt(prompt);
     }
     params.set_print_special(false);
     params.set_print_progress(false);

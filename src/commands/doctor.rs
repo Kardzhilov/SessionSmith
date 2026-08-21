@@ -7,7 +7,12 @@ use crate::config::GlobalConfig;
 use crate::{deps, hardware, models, ui};
 
 pub async fn run(args: DoctorArgs) -> Result<()> {
-    let g = GlobalConfig::load_or_default()?;
+    let global = GlobalConfig::load_or_default()?;
+    let g = crate::commands::resolve_campaign(None)
+        .ok()
+        .and_then(|path| crate::commands::load_campaign_or_die(&path).ok())
+        .map(|campaign| crate::config::effective(&global, &campaign))
+        .unwrap_or(global);
     let hw = hardware::detect();
     let rec = hardware::recommend(&hw);
 

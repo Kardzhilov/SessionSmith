@@ -127,6 +127,7 @@ pub fn run_asr(
     out_prefix: &Path,
     device: &str,
     language: &str,
+    initial_prompt: Option<&str>,
 ) -> Result<()> {
     let (name, contents) = script_for(engine)?;
     let script = write_script(name, &contents)?;
@@ -148,6 +149,11 @@ pub fn run_asr(
     cmd.args(["--model", model_ref]);
     cmd.args(["--device", device]);
     cmd.args(["--language", language]);
+    if engine == AsrEngine::FasterWhisper {
+        if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.is_empty()) {
+            cmd.args(["--initial-prompt", prompt]);
+        }
+    }
     if let Some(arch) = arch_of(engine) {
         cmd.args(["--arch", arch]);
     }
@@ -331,6 +337,7 @@ def parse_args():
     ap.add_argument("--model", required=True)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--language", default="auto")
+    ap.add_argument("--initial-prompt", default="")
     ap.add_argument("--arch", default="")
     # Prepare mode: create the environment and download the model weights, then
     # exit without transcribing (used by the in-app "prepare" action).
@@ -402,13 +409,14 @@ def cuda_available():
     except Exception:
         return False
 
-def transcribe_with(model_name, device, audio, language):
+def transcribe_with(model_name, device, audio, language, initial_prompt):
     from faster_whisper import WhisperModel
     compute = "float16" if device == "cuda" else "int8"
     emit(0, 0, f"loading {model_name} on {device}")
     model = WhisperModel(model_name, device=device, compute_type=compute)
     lang = None if language in ("auto", "") else language
-    segments, info = model.transcribe(audio, language=lang, vad_filter=True)
+    prompt = initial_prompt or None
+    segments, info = model.transcribe(audio, language=lang, vad_filter=True, initial_prompt=prompt)
     total = getattr(info, "duration", 0) or 0
     out = []
     for seg in segments:
@@ -431,11 +439,11 @@ def main():
         emit(1, 1, "ready")
         return
     try:
-        out, total = transcribe_with(args.model, device, args.audio, args.language)
+        out, total = transcribe_with(args.model, device, args.audio, args.language, args.initial_prompt)
     except Exception as e:
         if device == "cuda":
             sys.stderr.write(f"CUDA path failed ({e}); retrying on CPU\n")
-            out, total = transcribe_with(args.model, "cpu", args.audio, args.language)
+            out, total = transcribe_with(args.model, "cpu", args.audio, args.language, args.initial_prompt)
         else:
             raise
     write_outputs(args.out, out)

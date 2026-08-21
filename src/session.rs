@@ -179,6 +179,8 @@ async fn ai_sort_by_content(
         force: true,
         replacements: std::collections::BTreeMap::new(),
         source_files: Vec::new(),
+        initial_prompt: None,
+        session_date: None,
         diarize: false,
         vad: false,
     };

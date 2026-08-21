@@ -8,8 +8,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::asr::AsrEngine;
-use crate::config::GlobalConfig;
+use crate::config::{CampaignConfig, GlobalConfig};
 use crate::models;
+use crate::presets::Preset;
 
 /// PID of the currently-running whisperx child process (0 = none).
 /// Set before spawn, cleared after wait. The Ctrl-C handler reads this
@@ -64,6 +65,10 @@ pub struct TranscribeOpts {
     pub replacements: BTreeMap<String, String>,
     /// Original session inputs retained in metadata for merged sessions.
     pub source_files: Vec<PathBuf>,
+    /// Decoding prompt built from campaign vocabulary for supporting engines.
+    pub initial_prompt: Option<String>,
+    /// Optional ISO session date supplied by the user.
+    pub session_date: Option<String>,
     /// Enable speaker diarization (whisperX only). Off by default.
     pub diarize: bool,
     /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
@@ -79,10 +84,79 @@ impl TranscribeOpts {
             force,
             replacements: BTreeMap::new(),
             source_files: Vec::new(),
+            initial_prompt: None,
+            session_date: None,
             diarize: g.asr.diarize,
             vad: g.asr.vad,
         }
     }
+}
+
+fn valid_date(year: i32, month: u8, day: u8) -> Option<String> {
+    let month = time::Month::try_from(month).ok()?;
+    time::Date::from_calendar_date(year, month, day).ok().map(|date| date.to_string())
+}
+
+pub fn session_date_for(audio: &Path, override_date: Option<&str>) -> Result<String> {
+    if let Some(date) = override_date {
+        let parsed = regex::Regex::new(r"^(\d{4})-(\d{2})-(\d{2})$")?
+            .captures(date)
+            .and_then(|parts| valid_date(parts[1].parse().ok()?, parts[2].parse().ok()?, parts[3].parse().ok()?));
+        return parsed.ok_or_else(|| anyhow!("invalid --date '{date}'; expected YYYY-MM-DD"));
+    }
+    let name = audio.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    for pattern in [r"(\d{4})-(\d{2})-(\d{2})", r"(\d{4})(\d{2})(\d{2})", r"(\d{2})-(\d{2})-(\d{4})"] {
+        let captures = regex::Regex::new(pattern)?.captures(name);
+        let Some(parts) = captures else { continue };
+        let values: Option<Vec<i32>> = (1..=3).map(|index| parts[index].parse().ok()).collect();
+        let Some(values) = values else { continue };
+        let (year, month, day) = if pattern.starts_with("(\\d{2})") {
+            (values[2], values[1] as u8, values[0] as u8)
+        } else {
+            (values[0], values[1] as u8, values[2] as u8)
+        };
+        if let Some(date) = valid_date(year, month, day) {
+            return Ok(date);
+        }
+    }
+    let modified = std::fs::metadata(audio).and_then(|metadata| metadata.modified())
+        .unwrap_or(std::time::SystemTime::now());
+    Ok(time::OffsetDateTime::from(modified).date().to_string())
+}
+
+const VOCABULARY_PROMPT_CHAR_LIMIT: usize = 720;
+
+pub fn vocabulary_terms(campaign: &CampaignConfig, preset: &Preset) -> Vec<String> {
+    let mut terms = Vec::new();
+    for player in &campaign.players {
+        terms.extend([player.player.trim(), player.character.trim()].into_iter()
+            .filter(|term| !term.is_empty()).map(ToOwned::to_owned));
+    }
+    terms.extend(campaign.transcription.replacements.values().map(|term| term.trim().to_owned()));
+    terms.extend(campaign.transcription.vocabulary.iter().map(|term| term.trim().to_owned()));
+    terms.extend(preset.terminology.lines().flat_map(|line| line.split([',', ';']))
+        .map(|term| term.trim().trim_start_matches(['-', '*', ' ']).to_owned()));
+    terms.retain(|term| !term.is_empty());
+    terms.sort_by_key(|term| term.to_lowercase());
+    terms.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    terms
+}
+
+pub fn vocabulary_prompt(campaign: &CampaignConfig, preset: &Preset) -> Option<String> {
+    if !campaign.transcription.vocab_prompt {
+        return None;
+    }
+    let mut terms = Vec::new();
+    let mut length = "Glossary: .".len();
+    for term in vocabulary_terms(campaign, preset) {
+        let separator = if terms.is_empty() { 0 } else { 2 };
+        if length + separator + term.len() > VOCABULARY_PROMPT_CHAR_LIMIT {
+            break;
+        }
+        length += separator + term.len();
+        terms.push(term);
+    }
+    (!terms.is_empty()).then(|| format!("Glossary: {}.", terms.join(", ")))
 }
 
 fn apply_replacements(text: &str, replacements: &BTreeMap<String, String>) -> String {
@@ -243,6 +317,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         (audio.to_path_buf(), Vec::new())
     };
     let vad_temp = if asr_input != *audio { Some(asr_input.clone()) } else { None };
+    let session_date = session_date_for(audio, opts.session_date.as_deref())?;
 
     // Records model + source audio after a successful transcription, so a
     // re-run can skip transcription (same model) and the player can seek.
@@ -262,6 +337,8 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
                 },
                 vad: opts.vad,
                 vad_removed_spans: vad_spans.clone(),
+                speaker_map: None,
+                session_date: Some(session_date.clone()),
                 created: crate::meta::now_secs(),
             },
         );
@@ -277,6 +354,17 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             engine.label(),
             model_ref
         ));
+        let bridge_prompt = if *engine == AsrEngine::FasterWhisper {
+            opts.initial_prompt.as_deref()
+        } else {
+            if opts.initial_prompt.is_some() {
+                crate::ui::info(&format!(
+                    "ASR vocabulary prompting is not supported by {}",
+                    engine.label()
+                ));
+            }
+            None
+        };
         let res = crate::pybridge::run_asr(
             *engine,
             model_ref,
@@ -284,6 +372,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             &prefix,
             &device,
             &opts.language,
+            bridge_prompt,
         );
         pb.finish_and_clear();
         if let Some(tmp) = &vad_temp {
@@ -308,6 +397,9 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         let pb = crate::ui::spinner(&format!(
             "transcribing {stem} with transcribe.cpp ({model_id})"
         ));
+        if opts.initial_prompt.is_some() {
+            crate::ui::info("ASR vocabulary prompting is not supported by transcribe.cpp");
+        }
         let res = crate::transcribe_cpp::run_asr(
             &model_path,
             &asr_input,
@@ -354,7 +446,9 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         }
 
         let pb = crate::ui::spinner(&format!("transcribing {stem} with whisper-{} (in-process)", opts.model));
-        let result = crate::whisper_local::transcribe_file(model_path, &asr_input, &opts.language, threads, use_gpu);
+        let result = crate::whisper_local::transcribe_file(
+            model_path, &asr_input, &opts.language, threads, use_gpu, opts.initial_prompt.as_deref(),
+        );
         pb.finish_and_clear();
 
         if let Some(tmp) = &vad_temp {
@@ -390,6 +484,9 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
                 .args(["-p", "1"]);
             if opts.language != "auto" {
                 cmd.args(["-l", &opts.language]);
+            }
+            if let Some(prompt) = &opts.initial_prompt {
+                cmd.args(["--prompt", prompt]);
             }
             cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
             let o = cmd.output().with_context(|| format!("running {}", binary.display()))?;
@@ -885,5 +982,56 @@ mod tests {
             concat_list_entry(Path::new("Bob's session.wav")),
             "file 'Bob'\\''s session.wav'\n"
         );
+    }
+
+    fn vocabulary_fixture() -> (CampaignConfig, Preset) {
+        let mut campaign = CampaignConfig::default();
+        campaign.players = vec![crate::config::Player {
+            player: "Alice".into(),
+            character: "Strahd".into(),
+            ancestry: String::new(),
+            class: String::new(),
+        }];
+        campaign.transcription.replacements.insert("Strawd".into(), "Strahd".into());
+        campaign.transcription.vocabulary = vec!["Barovia".into(), "barovia".into()];
+        let preset = Preset {
+            name: "test".into(),
+            description: String::new(),
+            terminology: "HP, spell slots".into(),
+            capture: String::new(),
+            extra_sections: String::new(),
+            forbidden_phrases: Vec::new(),
+        };
+        (campaign, preset)
+    }
+
+    #[test]
+    fn vocabulary_terms_combine_sources_case_insensitively() {
+        let (campaign, preset) = vocabulary_fixture();
+        let terms = vocabulary_terms(&campaign, &preset);
+        assert_eq!(terms, vec!["Alice", "Barovia", "HP", "spell slots", "Strahd"]);
+    }
+
+    #[test]
+    fn vocabulary_prompt_has_whole_term_cap_and_toggle() {
+        let (mut campaign, preset) = vocabulary_fixture();
+        campaign.transcription.vocabulary = (0..200)
+            .map(|index| format!("very-long-proper-noun-{index:03}"))
+            .collect();
+        let prompt = vocabulary_prompt(&campaign, &preset).unwrap();
+        assert!(prompt.starts_with("Glossary: "));
+        assert!(prompt.ends_with('.'));
+        assert!(prompt.len() <= VOCABULARY_PROMPT_CHAR_LIMIT);
+
+        campaign.transcription.vocab_prompt = false;
+        assert_eq!(vocabulary_prompt(&campaign, &preset), None);
+    }
+
+    #[test]
+    fn session_dates_parse_supported_filename_formats() {
+        assert_eq!(session_date_for(Path::new("2026-08-14_session.wav"), None).unwrap(), "2026-08-14");
+        assert_eq!(session_date_for(Path::new("session_20260814.wav"), None).unwrap(), "2026-08-14");
+        assert_eq!(session_date_for(Path::new("14-08-2026-session.wav"), None).unwrap(), "2026-08-14");
+        assert!(session_date_for(Path::new("v2-final.wav"), Some("2026-13-40")).is_err());
     }
 }

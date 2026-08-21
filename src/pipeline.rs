@@ -293,10 +293,13 @@ async fn update_campaign_log(
         crate::campaign_log::CampaignLog::default()
     };
 
-    let date = time::OffsetDateTime::now_local()
-        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
-        .date()
-        .to_string();
+    let existing_date = log.blocks.iter()
+        .find(|block| block.id == session_stem)
+        .map(|block| block.date.as_str());
+    let summary_mtime = std::fs::metadata(notes_dir.join(session_stem).join("summary.md"))
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or_else(|_| std::time::SystemTime::now());
+    let date = campaign_session_date(campaign, session_stem, existing_date, summary_mtime);
 
     let backend = llm::build(g)?;
     let pb = crate::ui::spinner("campaign log: writing session entry");
@@ -316,6 +319,18 @@ async fn update_campaign_log(
     Ok(())
 }
 
+fn campaign_session_date(
+    campaign: &CampaignConfig,
+    stem: &str,
+    existing_date: Option<&str>,
+    fallback: std::time::SystemTime,
+) -> String {
+    crate::meta::load(&campaign.transcripts_dir(), stem)
+        .and_then(|meta| meta.session_date)
+        .or_else(|| existing_date.map(ToOwned::to_owned))
+        .unwrap_or_else(|| time::OffsetDateTime::from(fallback).date().to_string())
+}
+
 /// Rebuild the campaign log from scratch using every `notes/<stem>/summary.md`,
 /// keyed by session stem so re-run duplicates collapse into one entry.
 pub async fn rebuild_campaign_log(
@@ -325,6 +340,7 @@ pub async fn rebuild_campaign_log(
     chat_opts: &ChatOptions,
 ) -> Result<()> {
     let notes_dir = campaign.notes_dir();
+    let existing_log = crate::campaign_log::load_json(&notes_dir);
 
     // Collect summaries oldest-first so numbering/threads accumulate correctly.
     let mut sessions: Vec<(String, String, String)> = Vec::new(); // (stem, date, summary)
@@ -346,7 +362,10 @@ pub async fn rebuild_campaign_log(
         for (dir, mtime) in dirs {
             let stem = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
             let summary = std::fs::read_to_string(dir.join("summary.md")).unwrap_or_default();
-            let date = time::OffsetDateTime::from(mtime).date().to_string();
+            let existing_date = existing_log.as_ref()
+                .and_then(|log| log.blocks.iter().find(|block| block.id == stem))
+                .map(|block| block.date.as_str());
+            let date = campaign_session_date(campaign, &stem, existing_date, mtime);
             sessions.push((stem, date, summary));
         }
     }

@@ -46,6 +46,18 @@ fn init_schema(conn: &Connection) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session);",
     )?;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version < 2 {
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
+                session, kind, path UNINDEXED, content, tokenize = 'porter unicode61'
+             );
+             DELETE FROM artifacts_fts;
+             INSERT INTO artifacts_fts(rowid, session, kind, path, content)
+             SELECT id, session, kind, path, content FROM artifacts;
+             PRAGMA user_version = 2;",
+        )?;
+    }
     Ok(())
 }
 
@@ -84,6 +96,16 @@ fn record_into(conn: &Connection, stem: &str, notes_dir: &Path) -> Result<()> {
                 updated = excluded.updated",
             rusqlite::params![stem, kind, path.to_string_lossy(), content, now_secs()],
         )?;
+        let row_id: i64 = conn.query_row(
+            "SELECT id FROM artifacts WHERE session = ?1 AND kind = ?2",
+            rusqlite::params![stem, kind],
+            |row| row.get(0),
+        )?;
+        conn.execute("DELETE FROM artifacts_fts WHERE rowid = ?1", [row_id])?;
+        conn.execute(
+            "INSERT INTO artifacts_fts(rowid, session, kind, path, content) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![row_id, stem, kind, path.to_string_lossy(), content],
+        )?;
     }
     Ok(())
 }
@@ -99,6 +121,50 @@ pub fn search(campaign: &CampaignConfig, query: &str) -> Result<Vec<SearchHit>> 
 }
 
 fn search_conn(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
+    if query.contains(['\\', '%', '_']) {
+        return search_like(conn, query);
+    }
+    match search_fts(conn, query) {
+        Ok(hits) => Ok(hits),
+        Err(error) => {
+            crate::ui::warn(&format!("FTS query unavailable ({error}); using literal search"));
+            search_like(conn, query)
+        }
+    }
+}
+
+fn fts_query(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| term.replace('"', "\"\""))
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{term}\"*"))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+fn search_fts(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
+    let Some(query) = fts_query(query) else { return Ok(Vec::new()) };
+    let mut stmt = conn.prepare(
+        "SELECT session, kind, path,
+                snippet(artifacts_fts, 3, '«', '»', ' … ', 12) AS snippet
+         FROM artifacts_fts
+         WHERE artifacts_fts MATCH ?1
+         ORDER BY bm25(artifacts_fts)
+         LIMIT 40",
+    )?;
+    let rows = stmt.query_map([query], |row| {
+        Ok(SearchHit {
+            session: row.get(0)?,
+            kind: row.get(1)?,
+            path: row.get(2)?,
+            snippet: row.get(3)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn search_like(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
     let like = format!(
         "%{}%",
         query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
@@ -163,7 +229,11 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session, "session1");
         assert_eq!(hits[0].kind, "summary.md");
-        assert!(hits[0].snippet.to_lowercase().contains("cursed amulet"));
+        assert!(hits[0]
+            .snippet
+            .replace(['«', '»'], "")
+            .to_lowercase()
+            .contains("cursed amulet"));
 
         // No match.
         assert!(search_conn(&conn, "dragon").unwrap().is_empty());

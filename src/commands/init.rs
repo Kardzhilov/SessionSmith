@@ -63,6 +63,8 @@ pub async fn run(args: InitArgs) -> Result<()> {
 
     let cfg = CampaignConfig {
         campaign: Campaign { name: name.clone(), gm, setting, notes: notes_seed },
+        backend: Default::default(),
+        asr: Default::default(),
         players,
         transcription: TranscriptionConfig::default(),
         system: SystemRef { preset: preset_id, overrides: String::new() },

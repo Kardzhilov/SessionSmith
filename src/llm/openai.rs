@@ -91,14 +91,12 @@ impl LlmBackend for OpenAIBackend {
             max_tokens: opts.max_tokens,
             response_format,
         };
-        let resp = self.client.post(format!("{}/v1/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&body).send().await?;
-        if !resp.status().is_success() {
-            let s = resp.status();
-            let t = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("openai HTTP {s}: {t}"));
-        }
+        let resp = crate::llm::send_with_retry("openai", || {
+            self.client.post(format!("{}/v1/chat/completions", self.base_url))
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .send()
+        }).await?;
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
             let mut stream = resp.bytes_stream().eventsource();

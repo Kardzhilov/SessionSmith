@@ -121,11 +121,16 @@ pub async fn run() -> Result<()> {
         MenuChoice::TranscribeOnly => {
             commands::transcribe::run(TranscribeArgs {
                 files: vec![],
+                combine: false,
+                name: None,
                 asr_model: None,
                 force: false,
                 language: "auto".into(),
+                date: None,
                 diarize: false,
                 vad: false,
+                speakers: Vec::new(),
+                remap: None,
             })
             .await
         }
@@ -139,6 +144,7 @@ pub async fn run() -> Result<()> {
                 resume: false,
                 force: false,
                 no_log: false,
+                candidate: false,
             })
             .await
         }
@@ -158,7 +164,7 @@ pub async fn run() -> Result<()> {
             let query = Text::new("Search notes for:").prompt();
             match query {
                 Ok(q) if !q.trim().is_empty() => {
-                    commands::search::run(SearchArgs { query: vec![q] }).await
+                    commands::search::run(SearchArgs { query: vec![q], all: false }).await
                 }
                 _ => Ok(()),
             }

@@ -47,6 +47,9 @@ pub struct UiConfig {
     /// Last audio-player volume (0–100). Starts at 50 and persists across runs.
     #[serde(default = "default_volume")]
     pub player_volume: u8,
+    /// Show a desktop notification after a TUI job that ran for at least a minute.
+    #[serde(default)]
+    pub notify: bool,
 }
 
 fn default_theme() -> String {
@@ -64,6 +67,7 @@ impl Default for UiConfig {
             legacy_menu: false,
             campaign_order: Vec::new(),
             player_volume: default_volume(),
+            notify: false,
         }
     }
 }
@@ -332,6 +336,12 @@ fn expand_env(input: &str) -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CampaignConfig {
     pub campaign: Campaign,
+    /// Per-campaign backend settings. Specified fields override global config.
+    #[serde(default)]
+    pub backend: CampaignBackendConfig,
+    /// Per-campaign ASR settings. Specified fields override global config.
+    #[serde(default)]
+    pub asr: CampaignAsrConfig,
     #[serde(default)]
     pub players: Vec<Player>,
     #[serde(default)]
@@ -342,6 +352,63 @@ pub struct CampaignConfig {
     pub outputs: OutputsConfig,
     #[serde(default)]
     pub prompts: PromptOverrides,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CampaignBackendConfig {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CampaignAsrConfig {
+    #[serde(default)]
+    pub binary: Option<PathBuf>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub model_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub threads: Option<u32>,
+    #[serde(default)]
+    pub diarize: Option<bool>,
+    #[serde(default)]
+    pub hf_token: Option<String>,
+    #[serde(default)]
+    pub vad: Option<bool>,
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default)]
+    pub engine: Option<String>,
+}
+
+/// Merge global defaults with per-campaign overrides. Command-line flags are
+/// applied by callers afterwards and therefore remain highest precedence.
+pub fn effective(global: &GlobalConfig, campaign: &CampaignConfig) -> GlobalConfig {
+    let mut resolved = global.clone();
+    let backend = &campaign.backend;
+    if let Some(value) = &backend.kind { resolved.backend.kind = value.clone(); }
+    if let Some(value) = &backend.base_url { resolved.backend.base_url = Some(value.clone()); }
+    if let Some(value) = &backend.api_key { resolved.backend.api_key = Some(value.clone()); }
+    if let Some(value) = &backend.model { resolved.backend.model = Some(value.clone()); }
+
+    let asr = &campaign.asr;
+    if let Some(value) = &asr.binary { resolved.asr.binary = Some(value.clone()); }
+    if let Some(value) = &asr.model { resolved.asr.model = Some(value.clone()); }
+    if let Some(value) = &asr.model_dir { resolved.asr.model_dir = Some(value.clone()); }
+    if let Some(value) = asr.threads { resolved.asr.threads = Some(value); }
+    if let Some(value) = asr.diarize { resolved.asr.diarize = value; }
+    if let Some(value) = &asr.hf_token { resolved.asr.hf_token = Some(value.clone()); }
+    if let Some(value) = asr.vad { resolved.asr.vad = value; }
+    if let Some(value) = &asr.device { resolved.asr.device = Some(value.clone()); }
+    if let Some(value) = &asr.engine { resolved.asr.engine = Some(value.clone()); }
+    resolved
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -365,13 +432,35 @@ pub struct Player {
     pub class: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionConfig {
     /// Literal, case-sensitive corrections applied longest-first to transcript
     /// TXT and SRT output. Useful for fictional names unsupported by an ASR
     /// engine's vocabulary prompting interface.
     #[serde(default)]
     pub replacements: BTreeMap<String, String>,
+    /// Extra proper nouns and terms used to bias supported ASR engines.
+    #[serde(default)]
+    pub vocabulary: Vec<String>,
+    /// Whether to build an initial ASR prompt from campaign vocabulary.
+    #[serde(default = "default_vocab_prompt")]
+    pub vocab_prompt: bool,
+    /// Default names for diarization labels, confirmed or overridden per session.
+    #[serde(default)]
+    pub speakers: BTreeMap<String, String>,
+}
+
+fn default_vocab_prompt() -> bool { true }
+
+impl Default for TranscriptionConfig {
+    fn default() -> Self {
+        Self {
+            replacements: BTreeMap::new(),
+            vocabulary: Vec::new(),
+            vocab_prompt: default_vocab_prompt(),
+            speakers: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +624,8 @@ mod tests {
                 setting: "Forgotten Realms".into(),
                 notes: String::new(),
             },
+            backend: CampaignBackendConfig::default(),
+            asr: CampaignAsrConfig::default(),
             players: vec![Player {
                 player: "Bob".into(),
                 character: "Drokel".into(),
@@ -551,6 +642,35 @@ mod tests {
         assert_eq!(back.campaign.name, "Test");
         assert_eq!(back.players[0].character, "Drokel");
         assert_eq!(back.system.preset, "dnd5e");
+    }
+
+    #[test]
+    fn campaign_overrides_are_fieldwise() {
+        let mut global = GlobalConfig::default();
+        global.backend.kind = "ollama".into();
+        global.backend.model = Some("global-model".into());
+        global.asr.diarize = false;
+
+        let campaign = CampaignConfig {
+            campaign: Campaign::default(),
+            backend: CampaignBackendConfig {
+                model: Some("campaign-model".into()),
+                ..Default::default()
+            },
+            asr: CampaignAsrConfig {
+                diarize: Some(true),
+                ..Default::default()
+            },
+            players: Vec::new(),
+            transcription: TranscriptionConfig::default(),
+            system: SystemRef::default(),
+            outputs: OutputsConfig::default(),
+            prompts: PromptOverrides::default(),
+        };
+        let merged = effective(&global, &campaign);
+        assert_eq!(merged.backend.kind, "ollama");
+        assert_eq!(merged.backend.model.as_deref(), Some("campaign-model"));
+        assert!(merged.asr.diarize);
     }
 
     #[test]

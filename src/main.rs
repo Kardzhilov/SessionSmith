@@ -19,6 +19,10 @@ async fn main() -> Result<()> {
     // Install Ctrl-C handler: kills any running ASR child process first so
     // VRAM is freed immediately, then exits.
     ctrlc::set_handler(|| {
+        if sessionsmith::commands::run::request_watch_stop() {
+            eprintln!("stopping watch after the current recording; press Ctrl-C again to exit immediately");
+            return;
+        }
         eprintln!();
         sessionsmith::transcribe::kill_current_asr();
         std::process::exit(130);
@@ -44,6 +48,7 @@ async fn main() -> Result<()> {
         Some(Command::Log(args)) => commands::log_cmd::run(args).await,
         Some(Command::Search(args)) => commands::search::run(args).await,
         Some(Command::Record(args)) => commands::record::run(args).await,
+        Some(Command::Export(args)) => commands::export::run(args).await,
         None => {
             // Full-screen TUI by default; `--no-tui` (or `[ui] legacy_menu`)
             // falls back to the line-based menu.

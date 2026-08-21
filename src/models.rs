@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, CONTENT_LENGTH, ETAG, LAST_MODIFIED};
+use reqwest::header::{HeaderMap, CONTENT_LENGTH, ETAG, LAST_MODIFIED, RANGE};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,18 +53,25 @@ fn sidecar_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}.ssmeta.json"))
 }
 
-fn read_hf_meta(path: &Path) -> Option<HfFileMeta> {
-    let text = std::fs::read_to_string(sidecar_path(path)).ok()?;
+fn read_hf_meta_file(sidecar: &Path) -> Option<HfFileMeta> {
+    let text = std::fs::read_to_string(sidecar).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn write_hf_meta(path: &Path, meta: &HfFileMeta) -> Result<()> {
-    let sidecar = sidecar_path(path);
+fn read_hf_meta(path: &Path) -> Option<HfFileMeta> {
+    read_hf_meta_file(&sidecar_path(path))
+}
+
+fn write_hf_meta_file(sidecar: &Path, meta: &HfFileMeta) -> Result<()> {
     let tmp = sidecar.with_extension("json.part");
     let text = serde_json::to_string_pretty(meta)?;
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, &sidecar)?;
     Ok(())
+}
+
+fn write_hf_meta(path: &Path, meta: &HfFileMeta) -> Result<()> {
+    write_hf_meta_file(&sidecar_path(path), meta)
 }
 
 fn header_string(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Option<String> {
@@ -177,26 +184,68 @@ async fn download_hf_file(
         }
     }
 
-    let resp = client.get(url).send().await
+    let part_meta_path = sidecar_path(tmp);
+    let mut offset = existing_len(tmp).unwrap_or(0);
+    if offset > 0 {
+        let partial_meta = read_hf_meta_file(&part_meta_path);
+        let etag_changed = matches!(
+            (partial_meta.as_ref().and_then(|meta| meta.etag.as_deref()), remote.as_ref().and_then(|meta| meta.etag.as_deref())),
+            (Some(previous), Some(current)) if previous != current
+        );
+        if partial_meta.is_none() || etag_changed {
+            crate::ui::warn(&format!("discarding stale partial download for {label}"));
+            std::fs::remove_file(tmp).ok();
+            std::fs::remove_file(&part_meta_path).ok();
+            offset = 0;
+        }
+    }
+    if offset == 0 {
+        if let Some(remote) = &remote {
+            write_hf_meta_file(&part_meta_path, remote)?;
+        }
+    }
+    let mut request = client.get(url);
+    if offset > 0 {
+        request = request.header(RANGE, format!("bytes={offset}-"));
+        crate::ui::info(&format!("resuming {label} at {offset} bytes"));
+    }
+    let mut resp = request.send().await
         .with_context(|| format!("GET {url}"))?;
+    if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        std::fs::remove_file(tmp).ok();
+        std::fs::remove_file(&part_meta_path).ok();
+        offset = 0;
+        if let Some(remote) = &remote {
+            write_hf_meta_file(&part_meta_path, remote)?;
+        }
+        resp = client.get(url).send().await.with_context(|| format!("GET {url}"))?;
+    }
     if !resp.status().is_success() {
         bail!("HTTP {} fetching {url}", resp.status());
     }
+    let appending = offset > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    if !appending {
+        offset = 0;
+    }
     let headers = resp.headers().clone();
-    let total = resp.content_length().unwrap_or(0);
+    let total = remote.as_ref().and_then(|meta| meta.content_length)
+        .or_else(|| resp.content_length().map(|length| length + offset))
+        .unwrap_or(0);
     let pb = crate::ui::progress_bar(total, &format!("downloading {label}"));
+    pb.set_position(offset);
     let mut stream = resp.bytes_stream();
 
-    use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::File::create(tmp).await?;
-    let mut hasher = Sha256::new();
-    let mut received: u64 = 0;
-    let mut last_emit: u64 = 0;
+    let mut file = if appending {
+        tokio::fs::OpenOptions::new().append(true).open(tmp).await?
+    } else {
+        tokio::fs::File::create(tmp).await?
+    };
+    let mut received = offset;
+    let mut last_emit = offset;
     let progress_label = format!("downloading {label}");
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        hasher.update(&chunk);
         file.write_all(&chunk).await?;
         received += chunk.len() as u64;
         pb.set_position(received);
@@ -209,14 +258,23 @@ async fn download_hf_file(
     drop(file);
     pb.finish_and_clear();
 
+    if total > 0 && received != total {
+        std::fs::remove_file(tmp).ok();
+        std::fs::remove_file(&part_meta_path).ok();
+        bail!("download for {label} ended at {received} bytes, expected {total}");
+    }
+
     if !sha256.is_empty() {
-        let got = hex::encode(hasher.finalize());
+        use sha2::{Digest, Sha256};
+        let got = hex::encode(Sha256::digest(std::fs::read(tmp)?));
         if got != sha256 {
             let _ = std::fs::remove_file(tmp);
+            let _ = std::fs::remove_file(&part_meta_path);
             bail!("checksum mismatch for {label} (got {got})");
         }
     }
     std::fs::rename(tmp, path)?;
+    std::fs::remove_file(&part_meta_path).ok();
 
     let mut meta = remote.unwrap_or_else(|| hf_meta_from_headers(url, &headers, Some(received)));
     meta.checked_at = crate::meta::now_secs();

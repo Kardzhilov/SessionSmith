@@ -35,6 +35,22 @@ SessionSmith processes audio through a two-phase pipeline:
 
 ## Phase 1: Transcription
 
+### Campaign vocabulary prompting
+
+Supported Whisper engines receive a short `Glossary:` prompt built from player
+and character names, replacement values, preset terminology, and optional
+campaign terms:
+
+```toml
+[transcription]
+vocabulary = ["Barovia", "Blackstaff"]
+vocab_prompt = true # default; set false to disable prompt biasing
+```
+
+The prompt is capped at roughly 180 tokens and only whole terms are included.
+Local Whisper, `whisper-cli`, and faster-whisper support it; engines without
+an initial-prompt API report that they skipped it.
+
 ### Engine selection
 
 SessionSmith first checks whether `[asr] model` is a modern bridge model such as

@@ -1,6 +1,7 @@
 //! Subcommand handlers.
 
 pub mod doctor;
+pub mod export;
 pub mod home;
 pub mod init;
 pub mod log_cmd;

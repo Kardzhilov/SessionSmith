@@ -406,6 +406,8 @@ mod tests {
     fn camp() -> CampaignConfig {
         CampaignConfig {
             campaign: Campaign { name: "Test".into(), gm: "Mike".into(), setting: "Damasus".into(), notes: String::new() },
+            backend: Default::default(),
+            asr: Default::default(),
             players: vec![Player { player: "Bob".into(), character: "Drokel".into(), ancestry: "Dwarf".into(), class: "Fighter".into() }],
             transcription: crate::config::TranscriptionConfig::default(),
             system: SystemRef { preset: "dnd5e".into(), overrides: "We use milestone XP.".into() },

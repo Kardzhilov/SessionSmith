@@ -1,6 +1,6 @@
 //! Command-line interface definitions.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -53,6 +53,8 @@ pub enum Command {
     Search(SearchArgs),
     /// Record live audio from a capture device into `audio/`.
     Record(RecordArgs),
+    /// Export session artifacts as offline HTML or an Obsidian vault tree.
+    Export(ExportArgs),
 }
 
 #[derive(Debug, Default, Args)]
@@ -77,6 +79,12 @@ pub struct DoctorArgs {
 pub struct TranscribeArgs {
     /// Audio file(s) to transcribe. Omit for interactive picker.
     pub files: Vec<PathBuf>,
+    /// Combine all supplied files into one session in argument order.
+    #[arg(long, requires = "name")]
+    pub combine: bool,
+    /// Output session name used with `--combine`.
+    #[arg(long, requires = "combine")]
+    pub name: Option<String>,
     /// Override ASR model (e.g. `large-v3`, `medium`, `base`).
     #[arg(long)]
     pub asr_model: Option<String>,
@@ -86,12 +94,21 @@ pub struct TranscribeArgs {
     /// Language hint (e.g. `en`, `auto`).
     #[arg(long, default_value = "auto")]
     pub language: String,
+    /// Session date in ISO form (`YYYY-MM-DD`), overriding filename detection.
+    #[arg(long)]
+    pub date: Option<String>,
     /// Enable speaker diarization for this run (whisperX). Off by default.
     #[arg(long)]
     pub diarize: bool,
     /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
     #[arg(long)]
     pub vad: bool,
+    /// Map a diarization label to a name, e.g. `SPEAKER_00=Alice`. Repeatable.
+    #[arg(long = "speaker", value_name = "LABEL=NAME")]
+    pub speakers: Vec<String>,
+    /// Reapply `--speaker` mappings to an existing diarized transcript stem.
+    #[arg(long, value_name = "STEM", requires = "speakers")]
+    pub remap: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -117,12 +134,21 @@ pub struct NotesArgs {
     /// Skip updating the rolling campaign log.
     #[arg(long)]
     pub no_log: bool,
+    /// Generate side-by-side `.candidate` artifacts without updating the campaign log.
+    #[arg(long)]
+    pub candidate: bool,
 }
 
-#[derive(Debug, Default, Args)]
+#[derive(Debug, Default, Clone, Args)]
 pub struct RunArgs {
     /// Audio file(s). Omit for interactive picker over `audio/`.
     pub files: Vec<PathBuf>,
+    /// Combine all supplied files into one session in argument order.
+    #[arg(long, requires = "name", conflicts_with = "all")]
+    pub combine: bool,
+    /// Output session name used with `--combine`.
+    #[arg(long, requires = "combine")]
+    pub name: Option<String>,
     /// Backend override.
     #[arg(long)]
     pub backend: Option<String>,
@@ -132,6 +158,12 @@ pub struct RunArgs {
     /// ASR model override.
     #[arg(long)]
     pub asr_model: Option<String>,
+    /// Language hint for ASR (e.g. `en`, `de`, `auto`).
+    #[arg(long, default_value = "auto")]
+    pub language: String,
+    /// Session date in ISO form (`YYYY-MM-DD`), overriding filename detection.
+    #[arg(long)]
+    pub date: Option<String>,
     /// Comma-separated artifacts (see `notes --help`).
     #[arg(long)]
     pub artifacts: Option<String>,
@@ -144,15 +176,27 @@ pub struct RunArgs {
     /// Skip campaign-log update.
     #[arg(long)]
     pub no_log: bool,
+    /// Generate side-by-side `.candidate` artifacts without updating the campaign log.
+    #[arg(long)]
+    pub candidate: bool,
     /// Non-interactive: process every audio file newest-first without prompting.
     #[arg(long)]
     pub all: bool,
+    /// Watch the audio directory and process newly stable recordings.
+    #[arg(long, conflicts_with_all = ["all", "combine"])]
+    pub watch: bool,
+    /// Seconds between watch scans.
+    #[arg(long, default_value_t = 30, requires = "watch")]
+    pub watch_interval: u64,
     /// Enable speaker diarization for this run (whisperX). Off by default.
     #[arg(long)]
     pub diarize: bool,
     /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
     #[arg(long)]
     pub vad: bool,
+    /// Map a diarization label to a name, e.g. `SPEAKER_00=Alice`. Repeatable.
+    #[arg(long = "speaker", value_name = "LABEL=NAME")]
+    pub speakers: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -211,6 +255,34 @@ pub struct SearchArgs {
     /// Text to search for across all indexed session notes.
     #[arg(required = true, num_args = 1..)]
     pub query: Vec<String>,
+    /// Search every campaign TOML under `campaigns/`.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportFormat {
+    Html,
+    Obsidian,
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Session stem to export.
+    #[arg(required_unless_present = "all")]
+    pub stem: Option<String>,
+    /// Export every session in the current campaign.
+    #[arg(long, conflicts_with = "stem")]
+    pub all: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ExportFormat::Html)]
+    pub format: ExportFormat,
+    /// Destination directory (default: exports/<campaign>/).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Exclude GM-only bullets and DM notes.
+    #[arg(long)]
+    pub player_safe: bool,
 }
 
 #[derive(Debug, Default, Args)]

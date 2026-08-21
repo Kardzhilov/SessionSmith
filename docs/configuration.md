@@ -43,6 +43,9 @@ index           = true                 # maintain SQLite search index
 [paths]
 audio_dir  = "audio"                    # where input recordings are read from
 output_dir = "output"                   # where transcripts & notes are written
+
+[ui]
+notify = false                            # desktop notification after long TUI jobs
 ```
 
 ### `[backend]` section
@@ -133,6 +136,12 @@ metadata headers and skip the download when the local file is already current.
 | `structured` | bool | `false` | Also emit a machine-readable `dm-notes.json` (typed NPCs/loot/quests) using the backend's structured-output mode. |
 | `index` | bool | `true` | Maintain a per-campaign SQLite index (`output/<slug>/index.sqlite`) powering `sessionsmith search`. |
 
+### `[ui]` section
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `notify` | bool | `false` | For TUI jobs lasting at least one minute, emit the terminal bell and attempt a desktop notification through `notify-send` (Linux) or `osascript` (macOS). Missing notifier tools are ignored. |
+
 ---
 
 ## Campaign config
@@ -163,6 +172,12 @@ class     = "Rogue"
 "the Mosses" = "Damasus"
 "the Masses" = "Damasus"
 
+[backend]
+model = "qwen2.5:32b"                   # optional campaign override
+
+[asr]
+model = "medium"                         # optional campaign override
+
 [system]
 preset    = "dnd5e"
 overrides = "We track inspiration as a shared pool of 3 tokens."
@@ -183,6 +198,12 @@ default = ["bullets", "dm-notes", "recap", "summary", "story", "quotes"]
 | `gm` | no | GM name (injected into prompts for context) |
 | `setting` | no | World/setting description |
 | `notes` | no | Free-form notes injected into every prompt |
+
+### Campaign `[backend]` and `[asr]` overrides
+
+Campaign files may contain optional `[backend]` and `[asr]` sections using the
+same keys as the global sections. Any keys supplied there override the global
+configuration only for that campaign; command-line flags still take precedence.
 
 ### `[[players]]` section (repeatable)
 

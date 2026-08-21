@@ -188,6 +188,8 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
         force: req.force_transcribe,
         replacements: req.campaign.transcription.replacements.clone(),
         source_files: Vec::new(),
+        initial_prompt: transcribe::vocabulary_prompt(&req.campaign, &req.preset),
+        session_date: None,
         diarize: req.g.asr.diarize,
         vad: req.g.asr.vad,
     };
@@ -225,6 +227,14 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
             &session_opts,
         )
         .await?;
+        if !req.campaign.transcription.speakers.is_empty() {
+            let stem = out.txt.file_stem().and_then(|value| value.to_str()).unwrap_or(&sess.name);
+            crate::speakers::apply_to_session(
+                &req.campaign.transcripts_dir(),
+                stem,
+                &req.campaign.transcription.speakers,
+            )?;
+        }
 
         if with_notes {
             let session_obj = Session::new(&out.txt, &req.campaign.notes_dir())?;

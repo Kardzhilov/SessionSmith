@@ -38,6 +38,8 @@ async fn main() -> anyhow::Result<()> {
         force: true,
         replacements: std::collections::BTreeMap::new(),
         source_files: vec![audio.clone()],
+        initial_prompt: None,
+        session_date: None,
         diarize: false,
         vad: false,
     };

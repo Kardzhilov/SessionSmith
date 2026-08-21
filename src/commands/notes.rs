@@ -17,7 +17,7 @@ pub async fn run(args: NotesArgs) -> Result<()> {
     let campaign = commands::load_campaign_or_die(&camp_path)?;
     let preset = presets::load(&campaign.system.preset)?;
 
-    let mut g = GlobalConfig::load_or_default()?;
+    let mut g = crate::config::effective(&GlobalConfig::load_or_default()?, &campaign);
     if let Some(b) = args.backend { g.backend.kind = b; }
     if let Some(m) = &args.model { g.backend.model = Some(m.clone()); }
 
@@ -35,10 +35,10 @@ pub async fn run(args: NotesArgs) -> Result<()> {
     let opts = PipelineOpts {
         artifacts,
         resume: args.resume,
-        force: args.force,
-        update_log: !args.no_log,
+        force: args.force || args.candidate,
+        update_log: !args.no_log && !args.candidate,
         model_override: args.model,
-        candidate: false,
+        candidate: args.candidate,
     };
     pipeline::run_notes(&session, &g, &campaign, &preset, &opts).await?;
     ui::ok(&format!("artifacts in {}", session.notes_dir.display()));

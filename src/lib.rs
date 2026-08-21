@@ -19,6 +19,7 @@ pub mod presets;
 pub mod prompts;
 pub mod pybridge;
 pub mod session;
+pub mod speakers;
 pub mod transcribe;
 pub mod transcribe_cpp;
 pub mod tui;

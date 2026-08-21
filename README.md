@@ -112,6 +112,14 @@ drop in `~/.config/sessionsmith/themes/*.toml`.
 Prefer the classic line‑based prompts? Run `sessionsmith --no-tui`
 (or set `[ui] legacy_menu = true`).
 
+### Candidate notes
+
+Use `sessionsmith notes --candidate <transcript>` or
+`sessionsmith run --candidate <audio>` to generate side-by-side
+`*.candidate.md` artifacts without changing the campaign log. In the TUI, use
+`c` to compare the candidate with the current artifact and `a` to keep the
+version on screen.
+
 ---
 
 ## 🚀 Getting started

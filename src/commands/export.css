@@ -1,0 +1,10 @@
+:root { color-scheme: light; font-family: Georgia, serif; color: #182126; background: #f6f1e7; }
+body { margin: 0; line-height: 1.6; }
+main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+h1, h2 { font-family: "Trebuchet MS", sans-serif; color: #6a2d1a; }
+h1 { border-bottom: 3px solid #c28c54; padding-bottom: .4rem; }
+section { border-top: 1px solid #d8c9af; margin-top: 2rem; padding-top: 1rem; }
+.campaign { color: #6e665b; font: 700 .8rem "Trebuchet MS", sans-serif; text-transform: uppercase; letter-spacing: .08em; }
+a { color: #8a3318; }
+code, pre { background: #ebe3d4; }
+pre { overflow-x: auto; padding: 1rem; }

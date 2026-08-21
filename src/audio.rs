@@ -3,6 +3,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
@@ -89,11 +90,35 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
 }
 
 pub fn enrich_durations(files: &mut [AudioFile]) {
-    // Sequential to avoid spawning many ffprobe processes; usually fast.
-    for f in files.iter_mut() {
-        if f.duration_secs.is_none() {
-            f.duration_secs = probe_duration(&f.path);
+    let pending: Vec<_> = files.iter().enumerate()
+        .filter(|(_, file)| file.duration_secs.is_none())
+        .map(|(index, file)| (index, file.path.clone()))
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(4)
+        .min(pending.len());
+    let next = AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let pending = &pending;
+            let next = &next;
+            scope.spawn(move || loop {
+                let job = next.fetch_add(1, Ordering::Relaxed);
+                let Some((index, path)) = pending.get(job) else { break };
+                let _ = tx.send((*index, probe_duration(path)));
+            });
         }
+    });
+    drop(tx);
+    for (index, duration) in rx {
+        files[index].duration_secs = duration;
     }
 }
 

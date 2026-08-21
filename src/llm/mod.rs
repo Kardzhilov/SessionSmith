@@ -7,6 +7,7 @@ pub mod anthropic;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use std::future::Future;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -70,6 +71,68 @@ pub fn build(g: &GlobalConfig) -> Result<Box<dyn LlmBackend>> {
         "openai" => Ok(Box::new(openai::OpenAIBackend::from_config(g)?)),
         "anthropic" => Ok(Box::new(anthropic::AnthropicBackend::from_config(g)?)),
         other => Err(anyhow!("unknown backend '{other}'")),
+    }
+}
+
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 529)
+}
+
+/// Retry request initiation only. Once a response is returned, each backend's
+/// stream parser owns it and any later failure is surfaced without replaying
+/// partially emitted content.
+pub async fn send_with_retry<F, Fut>(backend: &str, mut send: F) -> Result<reqwest::Response>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<reqwest::Response, reqwest::Error>>,
+{
+    const RETRY_DELAYS: [Duration; 3] = [
+        Duration::from_secs(1),
+        Duration::from_secs(4),
+        Duration::from_secs(10),
+    ];
+    for (attempt, fallback_delay) in RETRY_DELAYS.into_iter().enumerate() {
+        match send().await {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let status = response.status();
+                if !retryable_status(status) {
+                    let text = response.text().await.unwrap_or_default();
+                    return Err(anyhow!("{backend} HTTP {status}: {text}"));
+                }
+                let delay = response.headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or(fallback_delay);
+                crate::ui::warn(&format!(
+                    "{backend}: attempt {}/4 failed with HTTP {status}; retrying in {}s",
+                    attempt + 1,
+                    delay.as_secs(),
+                ));
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) if error.is_connect() || error.is_timeout() => {
+                crate::ui::warn(&format!(
+                    "{backend}: attempt {}/4 failed ({error}); retrying in {}s",
+                    attempt + 1,
+                    fallback_delay.as_secs(),
+                ));
+                tokio::time::sleep(fallback_delay).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    match send().await {
+        Ok(response) if response.status().is_success() => Ok(response),
+        Ok(response) => {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            Err(anyhow!("{backend} HTTP {status} after retries: {text}"))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
