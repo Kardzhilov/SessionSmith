@@ -32,25 +32,38 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
 
     ui::header("SessionSmith · doctor");
 
-    ui::panel("Hardware", &[
-        format!("OS         : {}", hw.os),
-        format!("CPU cores  : {}", hw.cpu_cores),
-        format!("RAM        : {} GB", hw.ram_gb),
-        match &hw.gpu {
-            Some(g) => format!("GPU        : {} {} ({} GB VRAM)", g.vendor, g.name, g.vram_gb),
-            None => "GPU        : none detected".into(),
-        },
-    ]);
+    ui::panel(
+        "Hardware",
+        &[
+            format!("OS         : {}", hw.os),
+            format!("CPU cores  : {}", hw.cpu_cores),
+            format!("RAM        : {} GB", hw.ram_gb),
+            match &hw.gpu {
+                Some(g) => format!(
+                    "GPU        : {} {} ({} GB VRAM)",
+                    g.vendor, g.name, g.vram_gb
+                ),
+                None => "GPU        : none detected".into(),
+            },
+        ],
+    );
 
-    ui::panel("Recommendation", &[
-        format!("Whisper    : {}", rec.whisper_model.bold()),
-        format!("LLM        : {}", rec.llm_model.bold()),
-        format!("Reason     : {}", rec.reason),
-    ]);
+    ui::panel(
+        "Recommendation",
+        &[
+            format!("Whisper    : {}", rec.whisper_model.bold()),
+            format!("LLM        : {}", rec.llm_model.bold()),
+            format!("Reason     : {}", rec.reason),
+        ],
+    );
 
     // Dependency checks
     let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
-    let asr_model = g.asr.model.clone().unwrap_or_else(|| rec.whisper_model.to_string());
+    let asr_model = g
+        .asr
+        .model
+        .clone()
+        .unwrap_or_else(|| rec.whisper_model.to_string());
 
     let mut checks = vec![
         deps::check_ffmpeg(),
@@ -63,8 +76,11 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
 
     let mut table = ui::new_table(&["Dependency", "Status", "Detail"]);
     for c in &checks {
-        let status = if c.ok { Cell::new("✓ ok").fg(comfy_table::Color::Green) }
-                     else { Cell::new("✗ missing").fg(comfy_table::Color::Red) };
+        let status = if c.ok {
+            Cell::new("✓ ok").fg(comfy_table::Color::Green)
+        } else {
+            Cell::new("✗ missing").fg(comfy_table::Color::Red)
+        };
         table.add_row(vec![Cell::new(&c.name), status, Cell::new(&c.detail)]);
     }
     println!("{table}");

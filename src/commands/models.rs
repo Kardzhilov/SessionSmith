@@ -80,11 +80,13 @@ pub async fn run(args: ModelsArgs) -> Result<()> {
                 match spec.engine {
                     crate::asr::AsrEngine::WhisperCpp => {
                         let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
-                        models::download_whisper_with_verification(&name, &cache, !no_verify).await?;
+                        models::download_whisper_with_verification(&name, &cache, !no_verify)
+                            .await?;
                     }
                     crate::asr::AsrEngine::TranscribeCpp => {
                         let cache = models::gguf_asr_cache_dir()?;
-                        models::download_gguf_asr_with_verification(&name, &cache, !no_verify).await?;
+                        models::download_gguf_asr_with_verification(&name, &cache, !no_verify)
+                            .await?;
                         let device = g.asr.device.clone();
                         tokio::task::spawn_blocking(move || {
                             crate::transcribe_cpp::ensure_runtime_for(device.as_deref())
@@ -137,16 +139,27 @@ pub async fn run(args: ModelsArgs) -> Result<()> {
 async fn print_list(g: &GlobalConfig) -> Result<()> {
     let hw = hardware::detect();
     let rec = hardware::recommend(&hw);
-    let configured_asr = g.asr.model.clone().unwrap_or_else(|| rec.whisper_model.to_string());
+    let configured_asr = g
+        .asr
+        .model
+        .clone()
+        .unwrap_or_else(|| rec.whisper_model.to_string());
     let configured_llm = g.backend.model.clone().unwrap_or_default();
 
-    ui::header("Models");
+    ui::header(&format!(
+        "Models (Ollama catalog as of {})",
+        models::OLLAMA_CATALOG_UPDATED
+    ));
 
     // ── whisperx / faster-whisper (HuggingFace cache) ─────────────────
     {
         let mut t = ui::new_table(&["whisperx model", "status", "size"]);
         for &name in WHISPERX_MODELS {
-            let marker = if name == configured_asr { " ← configured" } else { "" };
+            let marker = if name == configured_asr {
+                " ← configured"
+            } else {
+                ""
+            };
             match whisperx_cache_bytes(name) {
                 Some(bytes) => {
                     t.add_row(vec![
@@ -175,7 +188,11 @@ async fn print_list(g: &GlobalConfig) -> Result<()> {
             .iter()
             .filter(|m| m.engine != crate::asr::AsrEngine::WhisperCpp)
         {
-            let marker = if model.id == configured_asr { " ← configured" } else { "" };
+            let marker = if model.id == configured_asr {
+                " ← configured"
+            } else {
+                ""
+            };
             let local_gguf_ready = model.engine == crate::asr::AsrEngine::TranscribeCpp
                 && models::gguf_asr_cache_dir()
                     .ok()
@@ -183,7 +200,11 @@ async fn print_list(g: &GlobalConfig) -> Result<()> {
                     .map(|path| path.exists())
                     .unwrap_or(false);
             let status = if model.engine == crate::asr::AsrEngine::TranscribeCpp {
-                if local_gguf_ready { "✓  prepared" } else { "—  not prepared" }
+                if local_gguf_ready {
+                    "✓  prepared"
+                } else {
+                    "—  not prepared"
+                }
             } else if crate::asr::is_prepared(model.id) {
                 "✓  prepared"
             } else {
@@ -212,7 +233,10 @@ async fn print_list(g: &GlobalConfig) -> Result<()> {
             let (status, size_str) = if path.exists() {
                 any_installed = true;
                 let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
-                ("✓  installed".to_string(), format!("{:.1} GB", bytes as f64 / 1e9))
+                (
+                    "✓  installed".to_string(),
+                    format!("{:.1} GB", bytes as f64 / 1e9),
+                )
             } else {
                 ("—  not downloaded".to_string(), String::new())
             };
@@ -420,12 +444,7 @@ async fn set_llm_backend() -> Result<()> {
         _ => "http://localhost:11434",
     };
     let url = Text::new("Base URL:")
-        .with_default(
-            g.backend
-                .base_url
-                .as_deref()
-                .unwrap_or(default_url),
-        )
+        .with_default(g.backend.base_url.as_deref().unwrap_or(default_url))
         .prompt()?;
     g.backend.base_url = Some(url);
 
@@ -465,7 +484,9 @@ async fn download_whisperx_model() -> Result<()> {
          print('Done.')"
     );
 
-    ui::info(&format!("Downloading faster-whisper-{chosen} (may take several minutes)..."));
+    ui::info(&format!(
+        "Downloading faster-whisper-{chosen} (may take several minutes)..."
+    ));
 
     let status = std::process::Command::new(&python)
         .args(["-c", &script])
@@ -528,4 +549,3 @@ async fn pull_ollama_model() -> Result<()> {
     }
     Ok(())
 }
-

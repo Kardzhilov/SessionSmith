@@ -75,7 +75,11 @@ pub fn render_lines(lines: &[String], th: &Theme) -> Vec<Line<'static>> {
                 Span::raw(" ".repeat(indent)),
                 Span::styled("▏ ", Style::default().fg(th.muted)),
             ];
-            spans.extend(inline(rest, th, Style::default().fg(th.muted).add_modifier(Modifier::ITALIC)));
+            spans.extend(inline(
+                rest,
+                th,
+                Style::default().fg(th.muted).add_modifier(Modifier::ITALIC),
+            ));
             out.push(Line::from(spans));
             continue;
         }
@@ -126,7 +130,9 @@ fn strip_ordered(s: &str) -> Option<(String, &str)> {
         return None;
     }
     let rest = &s[digits.len()..];
-    let rest = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))?;
+    let rest = rest
+        .strip_prefix(". ")
+        .or_else(|| rest.strip_prefix(") "))?;
     Some((digits, rest))
 }
 
@@ -165,10 +171,7 @@ fn inline(text: &str, th: &Theme, base: Style) -> Vec<Span<'static>> {
             }
         }
         // Italic: * ... * or _ ... _
-        if (chars[i] == '*' || chars[i] == '_')
-            && i + 1 < chars.len()
-            && chars[i + 1] != chars[i]
-        {
+        if (chars[i] == '*' || chars[i] == '_') && i + 1 < chars.len() && chars[i + 1] != chars[i] {
             let marker = chars[i].to_string();
             if let Some(end) = find_close(&chars, i + 1, &marker) {
                 flush(&mut buf, &mut spans);

@@ -23,9 +23,7 @@ use std::time::Duration;
 use anyhow::Result;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
-    },
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -80,7 +78,10 @@ fn run_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
             let scroll = app.viewer_scroll;
             app.refresh_viewer();
             app.viewer_scroll = scroll.min(
-                app.viewer_lines.len().saturating_sub(1).min(u16::MAX as usize) as u16,
+                app.viewer_lines
+                    .len()
+                    .saturating_sub(1)
+                    .min(u16::MAX as usize) as u16,
             );
         }
         if let Some((title, command)) = app.pending_shell.take() {
@@ -139,12 +140,22 @@ fn open_in_editor(terminal: &mut Term, path: &Path) {
         .unwrap_or_else(|_| "vi".into());
 
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .ok();
 
     let _ = std::process::Command::new(&editor).arg(path).status();
 
     enable_raw_mode().ok();
-    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )
+    .ok();
     terminal.clear().ok();
 }
 
@@ -155,7 +166,12 @@ fn run_shell_suspended(terminal: &mut Term, title: &str, command: &str) {
     use std::io::Write;
 
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .ok();
 
     println!("\n=== {title} ===");
     println!("SessionSmith will run this command in your terminal:\n");
@@ -181,15 +197,24 @@ fn run_shell_suspended(terminal: &mut Term, title: &str, command: &str) {
     let _ = io::stdin().read_line(&mut line);
 
     enable_raw_mode().ok();
-    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )
+    .ok();
     terminal.clear().ok();
 }
 
 fn run_shell_command(command: &str) -> io::Result<std::process::ExitStatus> {
     #[cfg(windows)]
-    return std::process::Command::new("cmd").args(["/C", command]).status();
+    return std::process::Command::new("cmd")
+        .args(["/C", command])
+        .status();
     #[cfg(not(windows))]
-    std::process::Command::new("sh").args(["-c", command]).status()
+    std::process::Command::new("sh")
+        .args(["-c", command])
+        .status()
 }
 
 /// Copy `text` to the system clipboard via the OSC 52 terminal escape, which
@@ -407,4 +432,3 @@ mod tests {
         let _ = render_to_buffer(&mut app, 80, 24);
     }
 }
-

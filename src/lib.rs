@@ -2,8 +2,8 @@
 //!
 //! Library entrypoint exposes the modules used by the binary and tests.
 
-pub mod audio;
 pub mod asr;
+pub mod audio;
 pub mod campaign_log;
 pub mod cli;
 pub mod commands;

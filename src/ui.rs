@@ -18,14 +18,22 @@ use tokio::sync::mpsc::UnboundedSender;
 #[derive(Clone, Debug)]
 pub enum UiEvent {
     Header(String),
-    Step { n: usize, total: usize, msg: String },
+    Step {
+        n: usize,
+        total: usize,
+        msg: String,
+    },
     Ok(String),
     Warn(String),
     Error(String),
     Info(String),
     /// A determinate/indeterminate progress update. `total == 0` means the
     /// length is unknown (render as an animated/indeterminate indicator).
-    Progress { label: String, pos: u64, total: u64 },
+    Progress {
+        label: String,
+        pos: u64,
+        total: u64,
+    },
     /// A background job finished: `Ok(summary)` or `Err(message)`.
     JobDone(std::result::Result<String, String>),
     /// A high-level pipeline phase started (e.g. `Transcribe`, `Outline`,
@@ -61,7 +69,11 @@ fn emit(ev: UiEvent) -> bool {
 /// Emit a progress update to the TUI (no-op outside the TUI). `total == 0`
 /// marks the length as unknown.
 pub fn progress(label: &str, pos: u64, total: u64) {
-    emit(UiEvent::Progress { label: label.to_string(), pos, total });
+    emit(UiEvent::Progress {
+        label: label.to_string(),
+        pos,
+        total,
+    });
 }
 
 /// Announce a high-level pipeline phase. Drives the TUI stage timeline; a no-op
@@ -75,15 +87,36 @@ pub fn phase(name: &str) {
 
 /// Print a bordered panel with a title and body lines.
 pub fn panel(title: &str, lines: &[String]) {
-    let width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0).max(title.len() + 4);
+    let width = lines
+        .iter()
+        .map(|l| visible_width(l))
+        .max()
+        .unwrap_or(0)
+        .max(title.len() + 4);
     let bar = "─".repeat(width + 2);
-    println!("{} {} {}", "╭".bright_black(), title.bold().cyan(), format!("{}╮", "─".repeat(width.saturating_sub(title.len()))).bright_black());
+    println!(
+        "{} {} {}",
+        "╭".bright_black(),
+        title.bold().cyan(),
+        format!("{}╮", "─".repeat(width.saturating_sub(title.len()))).bright_black()
+    );
     let _ = bar; // future use
     for line in lines {
         let pad = " ".repeat(width.saturating_sub(visible_width(line)));
-        println!("{} {}{} {}", "│".bright_black(), line, pad, "│".bright_black());
+        println!(
+            "{} {}{} {}",
+            "│".bright_black(),
+            line,
+            pad,
+            "│".bright_black()
+        );
     }
-    println!("{}{}{}", "╰".bright_black(), "─".repeat(width + 2).bright_black(), "╯".bright_black());
+    println!(
+        "{}{}{}",
+        "╰".bright_black(),
+        "─".repeat(width + 2).bright_black(),
+        "╯".bright_black()
+    );
 }
 
 fn visible_width(s: &str) -> usize {
@@ -91,9 +124,14 @@ fn visible_width(s: &str) -> usize {
     let mut count = 0;
     let mut in_esc = false;
     for c in s.chars() {
-        if c == '\x1b' { in_esc = true; continue; }
+        if c == '\x1b' {
+            in_esc = true;
+            continue;
+        }
         if in_esc {
-            if c.is_alphabetic() { in_esc = false; }
+            if c.is_alphabetic() {
+                in_esc = false;
+            }
             continue;
         }
         count += 1;
@@ -137,14 +175,14 @@ pub fn info(msg: &str) {
 }
 
 pub fn step(n: usize, total: usize, msg: &str) {
-    if emit(UiEvent::Step { n, total, msg: msg.to_string() }) {
+    if emit(UiEvent::Step {
+        n,
+        total,
+        msg: msg.to_string(),
+    }) {
         return;
     }
-    println!(
-        "{} {}",
-        format!("[{n}/{total}]").bright_black(),
-        msg.bold()
-    );
+    println!("{} {}", format!("[{n}/{total}]").bright_black(), msg.bold());
 }
 
 pub fn spinner(msg: &str) -> ProgressBar {

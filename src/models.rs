@@ -91,7 +91,7 @@ fn write_hf_meta_file(sidecar: &Path, meta: &HfFileMeta) -> Result<()> {
     let tmp = sidecar.with_extension("json.part");
     let text = serde_json::to_string_pretty(meta)?;
     std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &sidecar)?;
+    std::fs::rename(&tmp, sidecar)?;
     Ok(())
 }
 
@@ -508,6 +508,9 @@ pub fn ollama_pull(name: &str) -> Result<()> {
 // deliberately excluded. Pull ids are used verbatim with `ollama pull`.
 // ---------------------------------------------------------------------------
 
+/// Month when the curated Ollama catalog was last reviewed.
+pub const OLLAMA_CATALOG_UPDATED: &str = "2026-08";
+
 pub struct OllamaOption {
     /// Short label shown when the model is expanded (e.g. `"9b"`).
     pub label: &'static str,
@@ -802,6 +805,7 @@ pub async fn ollama_local_models(base_url: &str) -> Vec<(String, u64)> {
     out
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

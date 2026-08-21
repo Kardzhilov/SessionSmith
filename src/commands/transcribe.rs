@@ -13,9 +13,9 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
     ui::header("SessionSmith · transcribe");
     deps::ensure_dirs()?;
     let camp_path = crate::commands::resolve_campaign(None)?;
-    let campaign  = crate::commands::load_campaign_or_die(&camp_path)?;
+    let campaign = crate::commands::load_campaign_or_die(&camp_path)?;
     let g = crate::config::effective(&GlobalConfig::load_or_default()?, &campaign);
-    let tx_dir    = campaign.transcripts_dir();
+    let tx_dir = campaign.transcripts_dir();
     let mut speaker_map = campaign.transcription.speakers.clone();
     for value in &args.speakers {
         let (label, name) = crate::speakers::parse_mapping(value)?;
@@ -24,7 +24,11 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
     if let Some(stem) = &args.remap {
         if args.speakers.is_empty() && std::io::stdin().is_terminal() {
             let raw = tx_dir.join(format!("{stem}.diarized.txt"));
-            let source = if raw.exists() { raw } else { tx_dir.join(format!("{stem}.txt")) };
+            let source = if raw.exists() {
+                raw
+            } else {
+                tx_dir.join(format!("{stem}.txt"))
+            };
             let text = std::fs::read_to_string(&source)?;
             speaker_map = crate::speakers::confirm_interactively(
                 &text,
@@ -37,9 +41,14 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         return Ok(());
     }
 
-    let model = args.asr_model
+    let model = args
+        .asr_model
         .or_else(|| g.asr.model.clone())
-        .unwrap_or_else(|| hardware::recommend(&hardware::detect()).whisper_model.to_string());
+        .unwrap_or_else(|| {
+            hardware::recommend(&hardware::detect())
+                .whisper_model
+                .to_string()
+        });
     let tx_opts = TranscribeOpts {
         model,
         language: args.language,
@@ -61,16 +70,24 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         }
         vec![SessionInput {
             files: args.files.clone(),
-            name: args.name.clone().expect("clap requires --name with --combine"),
+            name: args
+                .name
+                .clone()
+                .expect("clap requires --name with --combine"),
         }]
     } else if args.files.is_empty() {
         pick_and_build_sessions(&g, &tx_dir).await?
     } else {
-        args.files.iter().map(|f| SessionInput {
-            files: vec![f.clone()],
-            name: f.file_stem().map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "session".to_string()),
-        }).collect()
+        args.files
+            .iter()
+            .map(|f| SessionInput {
+                files: vec![f.clone()],
+                name: f
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "session".to_string()),
+            })
+            .collect()
     };
 
     let merge_dir = crate::config::audio_dir().join("merged");
@@ -80,16 +97,21 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         let mut session_opts = tx_opts.clone();
         session_opts.source_files = sess.files.clone();
         let out = transcribe::transcribe(&audio_path, &tx_dir, &g, &session_opts).await?;
-        let stem = out.txt.file_stem().and_then(|value| value.to_str()).unwrap_or(&sess.name);
-        let confirmed_map = if tx_opts.diarize && args.speakers.is_empty() && std::io::stdin().is_terminal() {
-            crate::speakers::confirm_interactively(
-                &std::fs::read_to_string(&out.txt)?,
-                &speaker_map,
-                &roster_names(&campaign),
-            )?
-        } else {
-            speaker_map.clone()
-        };
+        let stem = out
+            .txt
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&sess.name);
+        let confirmed_map =
+            if tx_opts.diarize && args.speakers.is_empty() && std::io::stdin().is_terminal() {
+                crate::speakers::confirm_interactively(
+                    &std::fs::read_to_string(&out.txt)?,
+                    &speaker_map,
+                    &roster_names(&campaign),
+                )?
+            } else {
+                speaker_map.clone()
+            };
         if !confirmed_map.is_empty() {
             crate::speakers::apply_to_session(&tx_dir, stem, &confirmed_map)?;
         }
@@ -110,7 +132,10 @@ fn roster_names(campaign: &crate::config::CampaignConfig) -> Vec<String> {
 }
 
 /// Show the audio picker and session builder interactively.
-pub async fn pick_and_build_sessions(g: &GlobalConfig, transcripts_dir: &Path) -> Result<Vec<SessionInput>> {
+pub async fn pick_and_build_sessions(
+    g: &GlobalConfig,
+    transcripts_dir: &Path,
+) -> Result<Vec<SessionInput>> {
     let mut files = audio::scan(&crate::config::audio_dir(), transcripts_dir)?;
     if files.is_empty() {
         anyhow::bail!(
@@ -134,12 +159,19 @@ pub async fn pick_and_build_sessions(g: &GlobalConfig, transcripts_dir: &Path) -
     }
     println!("{table}");
 
-    let labels: Vec<String> = files.iter().enumerate().map(|(i, f)| {
-        format!("{}. {} ({}, {})",
-            i + 1, f.path.display(),
-            audio::human_age(f.mtime),
-            audio::human_duration(f.duration_secs))
-    }).collect();
+    let labels: Vec<String> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            format!(
+                "{}. {} ({}, {})",
+                i + 1,
+                f.path.display(),
+                audio::human_age(f.mtime),
+                audio::human_duration(f.duration_secs)
+            )
+        })
+        .collect();
 
     let chosen = inquire::MultiSelect::new(
         "Select file(s) (space = toggle, enter = confirm):",
@@ -148,8 +180,14 @@ pub async fn pick_and_build_sessions(g: &GlobalConfig, transcripts_dir: &Path) -
     .with_default(&[0])
     .prompt()?;
 
-    let selected: Vec<audio::AudioFile> = chosen.into_iter()
-        .filter_map(|c| labels.iter().position(|l| *l == c).map(|i| files[i].clone()))
+    let selected: Vec<audio::AudioFile> = chosen
+        .into_iter()
+        .filter_map(|c| {
+            labels
+                .iter()
+                .position(|l| *l == c)
+                .map(|i| files[i].clone())
+        })
         .collect();
 
     session::build_sessions(selected, g).await

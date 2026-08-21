@@ -95,7 +95,11 @@ fn draw_player_bar(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
     let label: String = p.label.chars().take(22).collect();
     let time = if dur > 0.0 {
         let pct = ((pos / dur).clamp(0.0, 1.0) * 100.0).round() as u16;
-        format!("{} / {}  {pct}%", super::player::fmt_time(pos), super::player::fmt_time(dur))
+        format!(
+            "{} / {}  {pct}%",
+            super::player::fmt_time(pos),
+            super::player::fmt_time(dur)
+        )
     } else {
         format!("{} / --:--", super::player::fmt_time(pos))
     };
@@ -109,14 +113,22 @@ fn draw_player_bar(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
 
     // Progress track with a distinct ● knob at the current position. When the
     // duration is unknown the knob sweeps back and forth so there's still motion.
-    let played_style = if p.paused { th.muted_style() } else { th.success_style() };
+    let played_style = if p.paused {
+        th.muted_style()
+    } else {
+        th.success_style()
+    };
     let knob_style = th.accent_style().add_modifier(Modifier::BOLD);
     let knob = if dur > 0.0 {
         ((pos / dur).clamp(0.0, 1.0) * last as f64).round() as usize
     } else {
         let cycle = last.max(1) * 2;
         let t = (app.tick as usize / 2) % cycle;
-        if t <= last { t } else { cycle - t }
+        if t <= last {
+            t
+        } else {
+            cycle - t
+        }
     }
     .min(last);
     let bar_spans = vec![
@@ -149,10 +161,20 @@ fn header_lines(app: &App, th: &Theme, width: u16) -> Vec<Line<'static>> {
         (" SessionSmith ".to_string(), th.accent_style()),
         (format!("· {campaign}  "), th.muted_style()),
         (format!("{}  ", app.backend_summary()), th.muted_style()),
-        (format!("· asr {} ", app.asr_model_label()), th.muted_style()),
         (
-            format!("· diarize {} ", if app.global.asr.diarize { "on" } else { "off" }),
-            if app.global.asr.diarize { th.success_style() } else { th.muted_style() },
+            format!("· asr {} ", app.asr_model_label()),
+            th.muted_style(),
+        ),
+        (
+            format!(
+                "· diarize {} ",
+                if app.global.asr.diarize { "on" } else { "off" }
+            ),
+            if app.global.asr.diarize {
+                th.success_style()
+            } else {
+                th.muted_style()
+            },
         ),
     ];
     if !app.mouse_enabled {
@@ -278,11 +300,13 @@ fn draw_footer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             let t = &hints[i];
             let w = widths[i];
             let clickable = t.cmd.is_some();
-            let hovered = clickable
-                && app.hover_row == row_y
-                && app.hover_col >= x
-                && app.hover_col < x + w;
-            let mut key_style = if clickable { th.accent_style() } else { th.muted_style() };
+            let hovered =
+                clickable && app.hover_row == row_y && app.hover_col >= x && app.hover_col < x + w;
+            let mut key_style = if clickable {
+                th.accent_style()
+            } else {
+                th.muted_style()
+            };
             let mut lbl_style = th.muted_style();
             if hovered {
                 key_style = key_style.add_modifier(Modifier::UNDERLINED | Modifier::REVERSED);
@@ -315,7 +339,12 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let hover = (app.hover_col, app.hover_row);
 
     // Campaigns.
-    let camp_hov = hovered_index(parts[0], hover, app.camp_state.offset(), app.campaigns.len());
+    let camp_hov = hovered_index(
+        parts[0],
+        hover,
+        app.camp_state.offset(),
+        app.campaigns.len(),
+    );
     let camp_items: Vec<ListItem> = app
         .campaigns
         .iter()
@@ -330,7 +359,12 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     frame.render_stateful_widget(camp_list, parts[0], &mut app.camp_state);
 
     // Sessions (row 0 is the synthetic Campaign Log).
-    let sess_hov = hovered_index(parts[1], hover, app.sess_state.offset(), app.sessions.len() + 1);
+    let sess_hov = hovered_index(
+        parts[1],
+        hover,
+        app.sess_state.offset(),
+        app.sessions.len() + 1,
+    );
     let mut sess_items: Vec<ListItem> = Vec::new();
     sess_items.push(
         ListItem::new(Line::from(vec![
@@ -342,7 +376,13 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     for (i, s) in app.sessions.iter().enumerate() {
         let done = s.artifacts.iter().filter(|b| **b).count();
         let total = s.artifacts.len();
-        let mark = if done == total { "✓" } else if done == 0 { "·" } else { "◐" };
+        let mark = if done == total {
+            "✓"
+        } else if done == 0 {
+            "·"
+        } else {
+            "◐"
+        };
         let age = crate::audio::human_age(s.modified);
         sess_items.push(
             ListItem::new(Line::from(vec![
@@ -442,7 +482,10 @@ fn draw_viewer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let mut x = inner.x;
     let tab_row_hover = app.hover_row >= parts[0].y && app.hover_row < parts[0].y + parts[0].height;
     for (i, a) in ALL_ARTIFACTS.iter().enumerate() {
-        let exists = sess_arts.as_ref().and_then(|v| v.get(i).copied()).unwrap_or(false);
+        let exists = sess_arts
+            .as_ref()
+            .and_then(|v| v.get(i).copied())
+            .unwrap_or(false);
         let mark = if exists { " ✓" } else { "" };
         let label = format!(" {}{} ", a.label(), mark);
         let w = label.chars().count() as u16;
@@ -496,7 +539,9 @@ fn draw_viewer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         if app.viewing_candidate {
             title.push_str("  ·  ▶ viewing NEW version — a: keep this (new) · c: compare");
         } else {
-            title.push_str("  ·  ◀ viewing CURRENT version (a new one is ready) — c: compare · a: keep this");
+            title.push_str(
+                "  ·  ◀ viewing CURRENT version (a new one is ready) — c: compare · a: keep this",
+            );
         }
     }
     let highlight = if app.viewing_quotes() {
@@ -508,7 +553,14 @@ fn draw_viewer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
 }
 
 fn draw_log_viewer(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
-    draw_markdown_pane(frame, app, th, area, "Campaign Log · _campaign-log.md", None);
+    draw_markdown_pane(
+        frame,
+        app,
+        th,
+        area,
+        "Campaign Log · _campaign-log.md",
+        None,
+    );
 }
 
 /// Render `app.viewer_lines` as markdown into a bordered, scrollable pane.
@@ -536,8 +588,8 @@ fn draw_markdown_pane(
     app.rects.viewer = area;
     frame.render_widget(para, area);
 
-    let mut sb_state = ScrollbarState::new(app.viewer_lines.len().max(1))
-        .position(app.viewer_scroll as usize);
+    let mut sb_state =
+        ScrollbarState::new(app.viewer_lines.len().max(1)).position(app.viewer_scroll as usize);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight).style(th.muted_style()),
         area,
@@ -649,7 +701,10 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                 frame.render_widget(gauge, bar_area);
             } else {
                 // Indeterminate: a marquee pulse gliding over a dim track.
-                frame.render_widget(pulse_line(&label, bar_area.width as usize, app.tick, th), bar_area);
+                frame.render_widget(
+                    pulse_line(&label, bar_area.width as usize, app.tick, th),
+                    bar_area,
+                );
             }
         }
     }
@@ -723,8 +778,17 @@ fn stage_timeline(app: &App, th: &Theme, width: usize) -> Paragraph<'static> {
         } else {
             ("✓".to_string(), th.success_style())
         };
-        let name_style = if active { th.title_style(false) } else { th.muted_style() };
-        segs.push(Seg { sym, sym_style, name: name.clone(), name_style });
+        let name_style = if active {
+            th.title_style(false)
+        } else {
+            th.muted_style()
+        };
+        segs.push(Seg {
+            sym,
+            sym_style,
+            name: name.clone(),
+            name_style,
+        });
     }
 
     let seg_w = |s: &Seg| 2 + s.name.chars().count(); // "SYM NAME"
@@ -865,7 +929,9 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 // ---- overlays ------------------------------------------------------------
 
 fn draw_palette(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
-    let Overlay::Palette(p) = &app.overlay else { return };
+    let Overlay::Palette(p) = &app.overlay else {
+        return;
+    };
     let rect = centered(area, 60, 60);
     frame.render_widget(Clear, rect);
     let parts = Layout::default()
@@ -882,7 +948,10 @@ fn draw_palette(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     .style(th.base());
     frame.render_widget(input, parts[0]);
 
-    let labels: Vec<&str> = super::app::Action::all().iter().map(|a| a.label()).collect();
+    let labels: Vec<&str> = super::app::Action::all()
+        .iter()
+        .map(|a| a.label())
+        .collect();
     let hov = hovered_index(
         parts[1],
         (app.hover_col, app.hover_row),
@@ -893,7 +962,9 @@ fn draw_palette(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .filtered
         .iter()
         .enumerate()
-        .map(|(row, &i)| ListItem::new(labels[i].to_string()).style(hover_style(th, Some(row) == hov)))
+        .map(|(row, &i)| {
+            ListItem::new(labels[i].to_string()).style(hover_style(th, Some(row) == hov))
+        })
         .collect();
     let list = List::new(items)
         .block(popup_block("Actions  (click to run)", th))
@@ -901,13 +972,16 @@ fn draw_palette(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .highlight_symbol("▸ ");
     let empty = p.filtered.is_empty();
     let cursor = p.cursor;
-    app.overlay_state.select(if empty { None } else { Some(cursor) });
+    app.overlay_state
+        .select(if empty { None } else { Some(cursor) });
     app.rects.overlay_list = parts[1];
     frame.render_stateful_widget(list, parts[1], &mut app.overlay_state);
 }
 
 fn draw_search(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
-    let Overlay::Search(s) = &app.overlay else { return };
+    let Overlay::Search(s) = &app.overlay else {
+        return;
+    };
     let rect = centered(area, 72, 70);
     frame.render_widget(Clear, rect);
     let parts = Layout::default()
@@ -921,7 +995,11 @@ fn draw_search(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         Span::styled("▏", th.accent_style()),
     ]))
     .block(popup_block(
-        if s.all_campaigns { "Search notes · all campaigns (Ctrl-A)" } else { "Search notes · current campaign (Ctrl-A)" },
+        if s.all_campaigns {
+            "Search notes · all campaigns (Ctrl-A)"
+        } else {
+            "Search notes · current campaign (Ctrl-A)"
+        },
         th,
     ))
     .style(th.base());
@@ -940,7 +1018,9 @@ fn draw_search(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .map(|(row, h)| {
             let mut spans = Vec::new();
             if s.all_campaigns {
-                if let Some(name) = s.hit_campaigns.get(row)
+                if let Some(name) = s
+                    .hit_campaigns
+                    .get(row)
                     .and_then(|index| app.campaigns.get(*index))
                     .map(|campaign| campaign.name.as_str())
                 {
@@ -952,27 +1032,33 @@ fn draw_search(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                 Span::styled(format!("[{}] ", h.kind), th.muted_style()),
                 Span::raw(h.snippet.replace('\n', " ")),
             ]);
-            ListItem::new(Line::from(spans))
-            .style(hover_style(th, Some(row) == hov))
+            ListItem::new(Line::from(spans)).style(hover_style(th, Some(row) == hov))
         })
         .collect();
     let empty = items.is_empty();
     let list = List::new(items)
         .block(popup_block(
-            if empty { "No matches" } else { "Results  (click to open)" },
+            if empty {
+                "No matches"
+            } else {
+                "Results  (click to open)"
+            },
             th,
         ))
         .highlight_style(th.selection())
         .highlight_symbol("▸ ");
     let cursor = s.cursor;
     let has = !s.hits.is_empty();
-    app.overlay_state.select(if has { Some(cursor) } else { None });
+    app.overlay_state
+        .select(if has { Some(cursor) } else { None });
     app.rects.overlay_list = parts[1];
     frame.render_stateful_widget(list, parts[1], &mut app.overlay_state);
 }
 
 fn draw_picker(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
-    let Overlay::Picker(p) = &app.overlay else { return };
+    let Overlay::Picker(p) = &app.overlay else {
+        return;
+    };
     let rect = centered(area, 64, 70);
     frame.render_widget(Clear, rect);
     let hov = hovered_index(
@@ -989,7 +1075,14 @@ fn draw_picker(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             let checked = p.checked.get(i).copied().unwrap_or(false);
             let box_ = if checked { "[x] " } else { "[ ] " };
             ListItem::new(Line::from(vec![
-                Span::styled(box_, if checked { th.success_style() } else { th.muted_style() }),
+                Span::styled(
+                    box_,
+                    if checked {
+                        th.success_style()
+                    } else {
+                        th.muted_style()
+                    },
+                ),
                 Span::raw(label.clone()),
             ]))
             .style(hover_style(th, Some(i) == hov))
@@ -1001,34 +1094,69 @@ fn draw_picker(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .highlight_symbol("▸ ");
     let empty = p.items.is_empty();
     let cursor = p.cursor;
-    app.overlay_state.select(if empty { None } else { Some(cursor) });
+    app.overlay_state
+        .select(if empty { None } else { Some(cursor) });
     app.rects.overlay_list = rect;
     frame.render_stateful_widget(list, rect, &mut app.overlay_state);
 }
 
 fn draw_speaker_map(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
-    let Overlay::SpeakerMap(state) = &app.overlay else { return };
+    let Overlay::SpeakerMap(state) = &app.overlay else {
+        return;
+    };
     let rect = centered(area, 70, 62);
     frame.render_widget(Clear, rect);
-    let items: Vec<ListItem> = state.labels.iter().enumerate().map(|(index, label)| {
-        let mapped = state.map.get(label).map(String::as_str).unwrap_or("Skip");
-        let sample = state.samples.get(label).and_then(|samples| samples.first()).cloned().unwrap_or_default();
-        ListItem::new(vec![
-            Line::from(vec![Span::styled(format!("{label}  "), th.accent_style()), Span::styled(mapped.to_string(), th.success_style())]),
-            Line::from(Span::styled(sample, th.muted_style())),
-        ]).style(hover_style(th, Some(index) == hovered_index(rect, (app.hover_col, app.hover_row), app.overlay_state.offset(), state.labels.len())))
-    }).collect();
+    let items: Vec<ListItem> = state
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let mapped = state.map.get(label).map(String::as_str).unwrap_or("Skip");
+            let sample = state
+                .samples
+                .get(label)
+                .and_then(|samples| samples.first())
+                .cloned()
+                .unwrap_or_default();
+            ListItem::new(vec![
+                Line::from(vec![
+                    Span::styled(format!("{label}  "), th.accent_style()),
+                    Span::styled(mapped.to_string(), th.success_style()),
+                ]),
+                Line::from(Span::styled(sample, th.muted_style())),
+            ])
+            .style(hover_style(
+                th,
+                Some(index)
+                    == hovered_index(
+                        rect,
+                        (app.hover_col, app.hover_row),
+                        app.overlay_state.offset(),
+                        state.labels.len(),
+                    ),
+            ))
+        })
+        .collect();
     let list = List::new(items)
-        .block(popup_block("Map speakers  Enter cycle · p preview · w write · Esc cancel", th))
+        .block(popup_block(
+            "Map speakers  Enter cycle · p preview · w write · Esc cancel",
+            th,
+        ))
         .highlight_style(th.selection())
         .highlight_symbol("▸ ");
-    app.overlay_state.select(if state.labels.is_empty() { None } else { Some(state.cursor) });
+    app.overlay_state.select(if state.labels.is_empty() {
+        None
+    } else {
+        Some(state.cursor)
+    });
     app.rects.overlay_list = rect;
     frame.render_stateful_widget(list, rect, &mut app.overlay_state);
 }
 
 fn draw_message(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
-    let Overlay::Message { title, body, error } = &app.overlay else { return };
+    let Overlay::Message { title, body, error } = &app.overlay else {
+        return;
+    };
     let rect = centered(area, 50, 30);
     frame.render_widget(Clear, rect);
     let style = if *error { th.error_style() } else { th.base() };
@@ -1044,7 +1172,9 @@ fn draw_message(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
 }
 
 fn draw_confirm(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
-    let Overlay::Confirm { title, body } = &app.overlay else { return };
+    let Overlay::Confirm { title, body } = &app.overlay else {
+        return;
+    };
     let rect = centered(area, 54, 34);
     frame.render_widget(Clear, rect);
     let mut lines: Vec<Line> = body
@@ -1135,9 +1265,15 @@ fn draw_theme_picker(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let queued = app.job_queue.len();
     let title = if queued > 0 {
-        format!("Models — {queued} queued · ⏎ default · i check · d delete · g CUDA · u Ollama · Esc")
+        format!(
+            "Models (catalog {}) — {queued} queued · ⏎ default · i check · d delete · g CUDA · u Ollama · Esc",
+            crate::models::OLLAMA_CATALOG_UPDATED
+        )
     } else {
-        "Models — ⏎ default · i check · d delete · g CUDA · u Ollama · Esc".to_string()
+        format!(
+            "Models (catalog {}) — ⏎ default · i check · d delete · g CUDA · u Ollama · Esc",
+            crate::models::OLLAMA_CATALOG_UPDATED
+        )
     };
     let focused = matches!(app.pane, Pane::Content);
     let block = section_block(&title, th, focused);
@@ -1257,14 +1393,24 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                     Span::styled(mark.to_string(), mark_style),
                     Span::styled(
                         name,
-                        if selected { th.selection() } else { th.title_style(false) },
+                        if selected {
+                            th.selection()
+                        } else {
+                            th.title_style(false)
+                        },
                     ),
                     released_span(th, &r.released),
-                    Span::styled(format!("  {} variants ▸", r.variant_count), th.muted_style()),
+                    Span::styled(
+                        format!("  {} variants ▸", r.variant_count),
+                        th.muted_style(),
+                    ),
                 ];
                 if r.expanded {
                     if let Some(last) = spans.last_mut() {
-                        *last = Span::styled(format!("  {} variants ▾", r.variant_count), th.muted_style());
+                        *last = Span::styled(
+                            format!("  {} variants ▾", r.variant_count),
+                            th.muted_style(),
+                        );
                     }
                 }
                 lines.push(Line::from(spans));
@@ -1286,7 +1432,10 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                 spans.push(Span::styled("  ", th.muted_style()));
                 x += indent;
             }
-            spans.push(Span::styled(if selected { "▸ " } else { "  " }, th.accent_style()));
+            spans.push(Span::styled(
+                if selected { "▸ " } else { "  " },
+                th.accent_style(),
+            ));
             x += 2;
             spans.push(Span::styled(mark.to_string(), mark_style));
             x += 2;
@@ -1348,7 +1497,11 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
 
             // [install/check] button. Installed rows perform a cheap remote
             // metadata check before downloading anything.
-            let inst_label = if r.installed { "[ check ]" } else { "[ install ]" };
+            let inst_label = if r.installed {
+                "[ check ]"
+            } else {
+                "[ install ]"
+            };
             let iw = inst_label.chars().count() as u16;
             let mut inst_style = th.success_style();
             if hr == y && hc >= x && hc < x + iw {
@@ -1391,7 +1544,10 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
     frame.render_widget(Clear, rect);
     let rows = [
         ("Tab / Shift-Tab", "cycle panes"),
-        ("↑ ↓  /  j k", "move selection · scroll viewer · pick quote (Quotes)"),
+        (
+            "↑ ↓  /  j k",
+            "move selection · scroll viewer · pick quote (Quotes)",
+        ),
         ("← →  /  h l  /  1-6", "switch artifact tab"),
         ("Enter", "open session · switch campaign"),
         ("Shift+↑↓  /  K J", "reorder campaigns (saved)"),
@@ -1402,14 +1558,23 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
         ("s", "select mode (mouse off, drag to select)"),
         ("m", "manage models (install / delete / default)"),
         ("u", "update Ollama (in model manager)"),
-        ("p", "play audio — selected file (Audio) or selected quote (Quotes)"),
-        ("space · , . · - +", "player: pause · seek ∓10s · volume · (S stop)"),
+        (
+            "p",
+            "play audio — selected file (Audio) or selected quote (Quotes)",
+        ),
+        (
+            "space · , . · - +",
+            "player: pause · seek ∓10s · volume · (S stop)",
+        ),
         ("c / a", "compare re-run versions · keep the one shown"),
         ("/", "search notes"),
         (": or Ctrl-P", "command palette"),
         ("T", "cycle theme"),
         ("PgUp / PgDn", "scroll viewer"),
-        ("mouse", "click to select · wheel to scroll · hover to highlight"),
+        (
+            "mouse",
+            "click to select · wheel to scroll · hover to highlight",
+        ),
         ("q / Ctrl-C", "quit"),
         ("Esc", "close overlay"),
     ];
@@ -1441,10 +1606,10 @@ fn hover_style(_th: &Theme, hovered: bool) -> Style {
 /// Render a model's release date, colour-coded by age so stale models stand out.
 fn released_span(th: &Theme, released: &str) -> Span<'static> {
     let style = match released_age_months(released) {
-        None => th.muted_style(),                 // unknown release date
-        Some(m) if m >= 24 => th.warn_style(),    // 2+ years — clearly old
-        Some(m) if m >= 12 => th.muted_style(),   // 1–2 years
-        Some(_) => th.success_style(),            // < 1 year — fresh
+        None => th.muted_style(),               // unknown release date
+        Some(m) if m >= 24 => th.warn_style(),  // 2+ years — clearly old
+        Some(m) if m >= 12 => th.muted_style(), // 1–2 years
+        Some(_) => th.success_style(),          // < 1 year — fresh
     };
     Span::styled(format!("{released:>8} "), style)
 }
@@ -1488,7 +1653,11 @@ fn section_block(title: &str, th: &Theme, focused: bool) -> Block<'static> {
 fn popup_block(title: &str, th: &Theme) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(th.border_focus).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(th.border_focus)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Span::styled(format!(" {title} "), th.accent_style()))
 }
 

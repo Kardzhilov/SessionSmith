@@ -10,7 +10,9 @@ use std::path::PathBuf;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let first = args.next().expect("usage: asr_check <audio|prepare:model> [model]");
+    let first = args
+        .next()
+        .expect("usage: asr_check <audio|prepare:model> [model]");
 
     if let Some(id) = first.strip_prefix("prepare:") {
         let spec = sessionsmith::asr::find(id).expect("unknown ASR model id");

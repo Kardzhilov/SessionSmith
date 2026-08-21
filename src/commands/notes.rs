@@ -18,8 +18,12 @@ pub async fn run(args: NotesArgs) -> Result<()> {
     let preset = presets::load(&campaign.system.preset)?;
 
     let mut g = crate::config::effective(&GlobalConfig::load_or_default()?, &campaign);
-    if let Some(b) = args.backend { g.backend.kind = b; }
-    if let Some(m) = &args.model { g.backend.model = Some(m.clone()); }
+    if let Some(b) = args.backend {
+        g.backend.kind = b;
+    }
+    if let Some(m) = &args.model {
+        g.backend.model = Some(m.clone());
+    }
 
     let transcript = match args.transcript {
         Some(p) => p,
@@ -55,7 +59,9 @@ pub fn pick_transcript_interactively(transcripts_dir: &Path) -> Result<PathBuf> 
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
         .collect();
     files.sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
-    if files.is_empty() { anyhow::bail!("no .txt transcripts in transcripts/"); }
+    if files.is_empty() {
+        anyhow::bail!("no .txt transcripts in transcripts/");
+    }
     let labels: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
     let chosen = Select::new("Pick a transcript:", labels.clone()).prompt()?;
     Ok(files[labels.iter().position(|l| *l == chosen).unwrap()].clone())
@@ -70,7 +76,10 @@ pub fn resolve_artifacts(cli: &Option<String>, defaults: &[String]) -> Result<Ve
         let joined = defaults.join(",");
         return pipeline::parse_artifacts(&joined);
     }
-    let labels: Vec<String> = prompts::ALL_ARTIFACTS.iter().map(|a| a.id().to_string()).collect();
+    let labels: Vec<String> = prompts::ALL_ARTIFACTS
+        .iter()
+        .map(|a| a.id().to_string())
+        .collect();
     let chosen = MultiSelect::new("Pick artifacts to generate:", labels.clone())
         .with_default(&(0..labels.len()).collect::<Vec<_>>())
         .prompt()?;

@@ -11,8 +11,8 @@ use crate::prompts::{Artifact, ALL_ARTIFACTS};
 use crate::session::SessionInput;
 
 use super::app::{
-    Action, App, ConfirmAction, FooterCmd, JobRequestBuilder, Overlay, Pane, PaletteState, PickerKind,
-    PickerState, SearchState,
+    Action, App, ConfirmAction, FooterCmd, JobRequestBuilder, Overlay, PaletteState, Pane,
+    PickerKind, PickerState, SearchState,
 };
 use super::fuzzy;
 use super::jobs::JobKind;
@@ -32,7 +32,10 @@ impl App {
                 return;
             }
             Overlay::Help => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')) {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+                ) {
                     self.overlay = Overlay::None;
                 }
                 return;
@@ -166,7 +169,9 @@ impl App {
     }
 
     fn on_key_palette(&mut self, key: KeyEvent) {
-        let Overlay::Palette(p) = &mut self.overlay else { return };
+        let Overlay::Palette(p) = &mut self.overlay else {
+            return;
+        };
         match key.code {
             KeyCode::Esc => self.overlay = Overlay::None,
             KeyCode::Up if p.cursor > 0 => p.cursor -= 1,
@@ -264,37 +269,64 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Overlay::SpeakerMap(state) = &mut self.overlay {
-                    let Some(label) = state.labels.get(state.cursor).cloned() else { return };
-                    let current = state.map.get(&label).and_then(|name| state.choices.iter().position(|choice| choice == name));
-                    let next = current.map(|index| (index + 1) % state.choices.len()).unwrap_or(0);
+                    let Some(label) = state.labels.get(state.cursor).cloned() else {
+                        return;
+                    };
+                    let current = state
+                        .map
+                        .get(&label)
+                        .and_then(|name| state.choices.iter().position(|choice| choice == name));
+                    let next = current
+                        .map(|index| (index + 1) % state.choices.len())
+                        .unwrap_or(0);
                     let choice = &state.choices[next];
-                    if choice == "Skip" { state.map.remove(&label); } else { state.map.insert(label, choice.clone()); }
+                    if choice == "Skip" {
+                        state.map.remove(&label);
+                    } else {
+                        state.map.insert(label, choice.clone());
+                    }
                 }
             }
             KeyCode::Char('p') => {
                 let preview = if let Overlay::SpeakerMap(state) = &self.overlay {
                     state.labels.get(state.cursor).and_then(|label| {
-                        state.preview_offsets.get(label).zip(state.audio.clone())
+                        state
+                            .preview_offsets
+                            .get(label)
+                            .zip(state.audio.clone())
                             .map(|(offset, audio)| (audio, label.clone(), *offset))
                     })
-                } else { None };
+                } else {
+                    None
+                };
                 if let Some((audio, label, offset)) = preview {
                     self.start_player(&audio, &label, offset);
                 } else {
-                    self.status = "No source audio or diarized SRT cue available for preview".into();
+                    self.status =
+                        "No source audio or diarized SRT cue available for preview".into();
                 }
             }
             KeyCode::Char('w') => {
-                let result = if let (Overlay::SpeakerMap(state), Some(campaign)) = (&self.overlay, &self.campaign) {
-                    crate::speakers::apply_to_session(&campaign.transcripts_dir(), &state.stem, &state.map)
-                } else { Ok(()) };
+                let result = if let (Overlay::SpeakerMap(state), Some(campaign)) =
+                    (&self.overlay, &self.campaign)
+                {
+                    crate::speakers::apply_to_session(
+                        &campaign.transcripts_dir(),
+                        &state.stem,
+                        &state.map,
+                    )
+                } else {
+                    Ok(())
+                };
                 match result {
                     Ok(()) => {
                         self.overlay = Overlay::None;
                         self.load_campaign_data();
                         self.status = "Speaker mapping saved".into();
                     }
-                    Err(error) => self.message("Could not save mapping", &format!("{error:#}"), true),
+                    Err(error) => {
+                        self.message("Could not save mapping", &format!("{error:#}"), true)
+                    }
                 }
             }
             _ => {}
@@ -467,9 +499,15 @@ impl App {
             }
             hits
         } else {
-            self.campaign.as_ref()
-                .map(|campaign| index::search(campaign, query.trim()).unwrap_or_default()
-                    .into_iter().map(|hit| (self.campaign_idx, hit)).collect())
+            self.campaign
+                .as_ref()
+                .map(|campaign| {
+                    index::search(campaign, query.trim())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|hit| (self.campaign_idx, hit))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         if let Overlay::Search(s) = &mut self.overlay {
@@ -484,7 +522,11 @@ impl App {
     fn open_search_hit(&mut self) {
         let (stem, kind, campaign_idx) = if let Overlay::Search(s) = &self.overlay {
             match s.hits.get(s.cursor) {
-            Some(h) => (h.session.clone(), h.kind.clone(), s.hit_campaigns.get(s.cursor).copied()),
+                Some(h) => (
+                    h.session.clone(),
+                    h.kind.clone(),
+                    s.hit_campaigns.get(s.cursor).copied(),
+                ),
                 None => return,
             }
         } else {
@@ -514,7 +556,11 @@ impl App {
 
     fn open_audio_picker(&mut self, kind: PickerKind) {
         if self.audio.is_empty() {
-            self.message("No audio", "No audio files found in the audio/ directory.", true);
+            self.message(
+                "No audio",
+                "No audio files found in the audio/ directory.",
+                true,
+            );
             return;
         }
         let items: Vec<String> = self
@@ -550,15 +596,25 @@ impl App {
 
     fn open_artifact_picker(&mut self) {
         let Some(sess) = self.sessions.get(self.session_idx) else {
-            self.message("No session", "Select a transcript in the Sessions pane first.", true);
+            self.message(
+                "No session",
+                "Select a transcript in the Sessions pane first.",
+                true,
+            );
             return;
         };
         let target = sess.transcript.clone();
         let defaults = self.default_artifacts();
-        let items: Vec<String> = ALL_ARTIFACTS.iter().map(|a| a.label().to_string()).collect();
+        let items: Vec<String> = ALL_ARTIFACTS
+            .iter()
+            .map(|a| a.label().to_string())
+            .collect();
         let checked: Vec<bool> = ALL_ARTIFACTS.iter().map(|a| defaults.contains(a)).collect();
         self.overlay = Overlay::Picker(PickerState {
-            title: format!("Generate notes for {} — space to toggle, ⏎ to run", sess.stem),
+            title: format!(
+                "Generate notes for {} — space to toggle, ⏎ to run",
+                sess.stem
+            ),
             kind: PickerKind::Artifacts,
             items,
             checked,
@@ -599,19 +655,26 @@ impl App {
     /// to the artifacts that already exist for that session.
     fn open_rerun_picker(&mut self, candidate: bool) {
         // Prefer the open session; fall back to the highlighted one.
-        let si = self.open_session.or(if self.log_selected || self.sessions.is_empty() {
-            None
-        } else {
-            Some(self.session_idx)
-        });
+        let si = self
+            .open_session
+            .or(if self.log_selected || self.sessions.is_empty() {
+                None
+            } else {
+                Some(self.session_idx)
+            });
         let Some(si) = si else {
             self.message("No session", "Open or select a session first.", true);
             return;
         };
-        let Some(sess) = self.sessions.get(si) else { return };
+        let Some(sess) = self.sessions.get(si) else {
+            return;
+        };
         let stem = sess.stem.clone();
         let target = sess.transcript.clone();
-        let items: Vec<String> = ALL_ARTIFACTS.iter().map(|a| a.label().to_string()).collect();
+        let items: Vec<String> = ALL_ARTIFACTS
+            .iter()
+            .map(|a| a.label().to_string())
+            .collect();
         // Default to the artifacts that already exist for this session.
         let mut checked: Vec<bool> = ALL_ARTIFACTS
             .iter()
@@ -676,7 +739,9 @@ impl App {
     }
 
     fn confirm_picker(&mut self) {
-        let Overlay::Picker(p) = &self.overlay else { return };
+        let Overlay::Picker(p) = &self.overlay else {
+            return;
+        };
         match p.kind {
             PickerKind::AudioRun | PickerKind::AudioTranscribe => {
                 let sessions: Vec<SessionInput> = self
@@ -690,7 +755,11 @@ impl App {
                     })
                     .collect();
                 if sessions.is_empty() {
-                    self.message("Nothing selected", "Select at least one audio file (space).", true);
+                    self.message(
+                        "Nothing selected",
+                        "Select at least one audio file (space).",
+                        true,
+                    );
                     return;
                 }
                 if p.kind == PickerKind::AudioRun {
@@ -742,7 +811,11 @@ impl App {
                     .collect();
                 let target = p.target.clone();
                 if artifacts.is_empty() {
-                    self.message("Nothing selected", "Select at least one artifact (space).", true);
+                    self.message(
+                        "Nothing selected",
+                        "Select at least one artifact (space).",
+                        true,
+                    );
                     return;
                 }
                 let Some(target) = target else { return };
@@ -765,14 +838,22 @@ impl App {
                     .collect();
                 let target = p.target.clone();
                 if artifacts.is_empty() {
-                    self.message("Nothing selected", "Select at least one artifact (space).", true);
+                    self.message(
+                        "Nothing selected",
+                        "Select at least one artifact (space).",
+                        true,
+                    );
                     return;
                 }
                 let Some(target) = target else { return };
                 self.overlay = Overlay::None;
                 // If the ASR model changed since this session was transcribed
                 // (and audio is available), ask whether to re-transcribe.
-                let stem = target.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                let stem = target
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if let Some((old_model, new_model)) = self.rerun_model_change(&stem) {
                     self.pending_confirm = Some(ConfirmAction::Rerun(target, artifacts, candidate));
                     self.overlay = Overlay::Confirm {
@@ -807,7 +888,11 @@ impl App {
             Pane::Sessions => {
                 // Row 0 is the synthetic Campaign Log; rows 1.. are sessions.
                 let total = self.sessions.len() + 1;
-                let pos = if self.log_selected { 0 } else { self.session_idx + 1 };
+                let pos = if self.log_selected {
+                    0
+                } else {
+                    self.session_idx + 1
+                };
                 let newpos = (pos as i32 + delta).clamp(0, total as i32 - 1) as usize;
                 if newpos == 0 {
                     self.log_selected = true;
@@ -856,7 +941,10 @@ impl App {
                     self.load_campaign_data();
                     self.status = format!(
                         "Switched to {}",
-                        self.campaigns.get(self.campaign_idx).map(|c| c.name.as_str()).unwrap_or("")
+                        self.campaigns
+                            .get(self.campaign_idx)
+                            .map(|c| c.name.as_str())
+                            .unwrap_or("")
                     );
                 }
             }
@@ -906,7 +994,11 @@ impl App {
                     if path.exists() {
                         self.pending_editor = Some(path);
                     } else {
-                        self.message("Not generated", "That artifact has not been generated yet.", true);
+                        self.message(
+                            "Not generated",
+                            "That artifact has not been generated yet.",
+                            true,
+                        );
                     }
                 } else {
                     self.message("No artifact", "Open a session in the viewer first.", true);
@@ -920,7 +1012,10 @@ impl App {
                     self.load_campaign_data();
                     self.status = format!(
                         "Switched to {}",
-                        self.campaigns.get(self.campaign_idx).map(|c| c.name.as_str()).unwrap_or("")
+                        self.campaigns
+                            .get(self.campaign_idx)
+                            .map(|c| c.name.as_str())
+                            .unwrap_or("")
                     );
                 }
             }
@@ -970,7 +1065,8 @@ impl App {
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => self.on_click(ev.column, ev.row),
             MouseEventKind::ScrollDown => {
-                if self.models.is_some() && rect_contains(self.rects.models_pane, ev.column, ev.row) {
+                if self.models.is_some() && rect_contains(self.rects.models_pane, ev.column, ev.row)
+                {
                     self.models_move(1);
                 } else if rect_contains(self.rects.job, ev.column, ev.row) {
                     self.job_scroll_by(3);
@@ -981,7 +1077,8 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
-                if self.models.is_some() && rect_contains(self.rects.models_pane, ev.column, ev.row) {
+                if self.models.is_some() && rect_contains(self.rects.models_pane, ev.column, ev.row)
+                {
                     self.models_move(-1);
                 } else if rect_contains(self.rects.job, ev.column, ev.row) {
                     self.job_scroll_by(-3);
@@ -1014,7 +1111,11 @@ impl App {
             String::new()
         };
         if text.trim().is_empty() {
-            self.message("Nothing to copy", "Open an artifact or run a job first.", true);
+            self.message(
+                "Nothing to copy",
+                "Open an artifact or run a job first.",
+                true,
+            );
             return;
         }
         let n = text.lines().count();
@@ -1035,7 +1136,11 @@ impl App {
 
     /// Scroll (move the cursor of) whichever overlay list is active.
     fn overlay_scroll(&mut self, delta: i32) {
-        let code = if delta > 0 { KeyCode::Down } else { KeyCode::Up };
+        let code = if delta > 0 {
+            KeyCode::Down
+        } else {
+            KeyCode::Up
+        };
         self.on_key(KeyEvent::from(code));
     }
 
@@ -1142,14 +1247,24 @@ impl App {
         }
         if rect_contains(r.campaigns, col, row) {
             self.pane = Pane::Campaigns;
-            if let Some(i) = list_row(r.campaigns, row, self.camp_state.offset(), self.campaigns.len()) {
+            if let Some(i) = list_row(
+                r.campaigns,
+                row,
+                self.camp_state.offset(),
+                self.campaigns.len(),
+            ) {
                 self.campaign_idx = i;
                 self.camp_state.select(Some(i));
                 self.load_campaign_data();
             }
         } else if rect_contains(r.sessions, col, row) {
             self.pane = Pane::Sessions;
-            if let Some(i) = list_row(r.sessions, row, self.sess_state.offset(), self.sessions.len() + 1) {
+            if let Some(i) = list_row(
+                r.sessions,
+                row,
+                self.sess_state.offset(),
+                self.sessions.len() + 1,
+            ) {
                 self.sess_state.select(Some(i));
                 if i == 0 {
                     self.log_selected = true;

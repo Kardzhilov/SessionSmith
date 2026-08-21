@@ -5,6 +5,8 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::hardware::HardwareProfile;
 
@@ -84,12 +86,19 @@ pub struct PathsConfig {
     pub output_dir: PathBuf,
 }
 
-fn default_audio_dir() -> PathBuf { PathBuf::from("audio") }
-fn default_output_dir() -> PathBuf { PathBuf::from("output") }
+fn default_audio_dir() -> PathBuf {
+    PathBuf::from("audio")
+}
+fn default_output_dir() -> PathBuf {
+    PathBuf::from("output")
+}
 
 impl Default for PathsConfig {
     fn default() -> Self {
-        Self { audio_dir: default_audio_dir(), output_dir: default_output_dir() }
+        Self {
+            audio_dir: default_audio_dir(),
+            output_dir: default_output_dir(),
+        }
     }
 }
 
@@ -101,6 +110,9 @@ impl Default for PathsConfig {
 
 static PATHS: once_cell::sync::Lazy<std::sync::RwLock<PathsConfig>> =
     once_cell::sync::Lazy::new(|| std::sync::RwLock::new(PathsConfig::default()));
+
+#[cfg(unix)]
+static PERMISSIVE_SECRET_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
 fn set_global_paths(paths: &PathsConfig) {
     let resolved = PathsConfig {
@@ -114,12 +126,18 @@ fn set_global_paths(paths: &PathsConfig) {
 
 /// The configured audio input directory (default `audio/`).
 pub fn audio_dir() -> PathBuf {
-    PATHS.read().map(|p| p.audio_dir.clone()).unwrap_or_else(|_| default_audio_dir())
+    PATHS
+        .read()
+        .map(|p| p.audio_dir.clone())
+        .unwrap_or_else(|_| default_audio_dir())
 }
 
 /// The configured output root directory (default `output/`).
 pub fn output_dir() -> PathBuf {
-    PATHS.read().map(|p| p.output_dir.clone()).unwrap_or_else(|_| default_output_dir())
+    PATHS
+        .read()
+        .map(|p| p.output_dir.clone())
+        .unwrap_or_else(|_| default_output_dir())
 }
 
 /// Expand a leading `~` to the user's home directory.
@@ -234,9 +252,15 @@ pub struct RuntimeConfig {
     pub auto_free_vram: bool,
 }
 
-fn default_timeout() -> u64 { 1800 }
-fn default_true() -> bool { true }
-fn default_chunk_overlap() -> usize { 1000 }
+fn default_timeout() -> u64 {
+    1800
+}
+fn default_true() -> bool {
+    true
+}
+fn default_chunk_overlap() -> usize {
+    1000
+}
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -265,9 +289,12 @@ impl GlobalConfig {
     pub fn load_or_default() -> Result<Self> {
         let p = Self::path()?;
         let cfg = if p.exists() {
-            let text = std::fs::read_to_string(&p)
-                .with_context(|| format!("reading {}", p.display()))?;
-            toml::from_str(&text).with_context(|| format!("parsing {}", p.display()))?
+            let text =
+                std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
+            let config =
+                toml::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+            warn_if_permissive_secret_file(&p, &config);
+            config
         } else {
             Self::default()
         };
@@ -283,6 +310,7 @@ impl GlobalConfig {
         }
         let text = toml::to_string_pretty(self)?;
         std::fs::write(&p, text).with_context(|| format!("writing {}", p.display()))?;
+        set_private_permissions(&p)?;
         Ok(())
     }
 
@@ -293,7 +321,11 @@ impl GlobalConfig {
 
     /// Resolve the Hugging Face token for diarization, expanding `${VAR}`.
     pub fn resolved_hf_token(&self) -> Option<String> {
-        self.asr.hf_token.as_ref().map(|raw| expand_env(raw)).filter(|s| !s.is_empty())
+        self.asr
+            .hf_token
+            .as_ref()
+            .map(|raw| expand_env(raw))
+            .filter(|s| !s.is_empty())
     }
 
     /// Effective LLM context window: explicit `[runtime] num_ctx` override, else
@@ -307,6 +339,47 @@ impl GlobalConfig {
     }
 }
 
+fn has_inline_secret(value: Option<&String>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty() && !value.trim_start().starts_with("${"))
+}
+
+#[cfg(unix)]
+fn warn_if_permissive_secret_file(path: &Path, config: &GlobalConfig) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !has_inline_secret(config.backend.api_key.as_ref())
+        && !has_inline_secret(config.asr.hf_token.as_ref())
+    {
+        return;
+    }
+    let is_permissive = std::fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o077 != 0)
+        .unwrap_or(false);
+    if is_permissive && !PERMISSIVE_SECRET_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+        crate::ui::warn(&format!(
+            "{} contains inline secrets and is readable by other users; run chmod 600 {}",
+            path.display(),
+            path.display()
+        ));
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_permissive_secret_file(_: &Path, _: &GlobalConfig) {}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restricting permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn expand_env(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -316,7 +389,9 @@ fn expand_env(input: &str) -> String {
             let mut name = String::new();
             while let Some(&n) = chars.peek() {
                 chars.next();
-                if n == '}' { break; }
+                if n == '}' {
+                    break;
+                }
                 name.push(n);
             }
             if let Ok(v) = std::env::var(&name) {
@@ -393,21 +468,47 @@ pub struct CampaignAsrConfig {
 pub fn effective(global: &GlobalConfig, campaign: &CampaignConfig) -> GlobalConfig {
     let mut resolved = global.clone();
     let backend = &campaign.backend;
-    if let Some(value) = &backend.kind { resolved.backend.kind = value.clone(); }
-    if let Some(value) = &backend.base_url { resolved.backend.base_url = Some(value.clone()); }
-    if let Some(value) = &backend.api_key { resolved.backend.api_key = Some(value.clone()); }
-    if let Some(value) = &backend.model { resolved.backend.model = Some(value.clone()); }
+    if let Some(value) = &backend.kind {
+        resolved.backend.kind = value.clone();
+    }
+    if let Some(value) = &backend.base_url {
+        resolved.backend.base_url = Some(value.clone());
+    }
+    if let Some(value) = &backend.api_key {
+        resolved.backend.api_key = Some(value.clone());
+    }
+    if let Some(value) = &backend.model {
+        resolved.backend.model = Some(value.clone());
+    }
 
     let asr = &campaign.asr;
-    if let Some(value) = &asr.binary { resolved.asr.binary = Some(value.clone()); }
-    if let Some(value) = &asr.model { resolved.asr.model = Some(value.clone()); }
-    if let Some(value) = &asr.model_dir { resolved.asr.model_dir = Some(value.clone()); }
-    if let Some(value) = asr.threads { resolved.asr.threads = Some(value); }
-    if let Some(value) = asr.diarize { resolved.asr.diarize = value; }
-    if let Some(value) = &asr.hf_token { resolved.asr.hf_token = Some(value.clone()); }
-    if let Some(value) = asr.vad { resolved.asr.vad = value; }
-    if let Some(value) = &asr.device { resolved.asr.device = Some(value.clone()); }
-    if let Some(value) = &asr.engine { resolved.asr.engine = Some(value.clone()); }
+    if let Some(value) = &asr.binary {
+        resolved.asr.binary = Some(value.clone());
+    }
+    if let Some(value) = &asr.model {
+        resolved.asr.model = Some(value.clone());
+    }
+    if let Some(value) = &asr.model_dir {
+        resolved.asr.model_dir = Some(value.clone());
+    }
+    if let Some(value) = asr.threads {
+        resolved.asr.threads = Some(value);
+    }
+    if let Some(value) = asr.diarize {
+        resolved.asr.diarize = value;
+    }
+    if let Some(value) = &asr.hf_token {
+        resolved.asr.hf_token = Some(value.clone());
+    }
+    if let Some(value) = asr.vad {
+        resolved.asr.vad = value;
+    }
+    if let Some(value) = &asr.device {
+        resolved.asr.device = Some(value.clone());
+    }
+    if let Some(value) = &asr.engine {
+        resolved.asr.engine = Some(value.clone());
+    }
     resolved
 }
 
@@ -450,7 +551,9 @@ pub struct TranscriptionConfig {
     pub speakers: BTreeMap<String, String>,
 }
 
-fn default_vocab_prompt() -> bool { true }
+fn default_vocab_prompt() -> bool {
+    true
+}
 
 impl Default for TranscriptionConfig {
     fn default() -> Self {
@@ -474,7 +577,10 @@ pub struct SystemRef {
 
 impl Default for SystemRef {
     fn default() -> Self {
-        Self { preset: "generic".into(), overrides: String::new() }
+        Self {
+            preset: "generic".into(),
+            overrides: String::new(),
+        }
     }
 }
 
@@ -496,7 +602,11 @@ fn default_artifacts() -> Vec<String> {
 }
 
 impl Default for OutputsConfig {
-    fn default() -> Self { Self { default: default_artifacts() } }
+    fn default() -> Self {
+        Self {
+            default: default_artifacts(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -513,8 +623,6 @@ pub struct PromptOverrides {
     pub story: Option<String>,
     #[serde(default)]
     pub quotes: Option<String>,
-    #[serde(default)]
-    pub campaign_log: Option<String>,
 }
 
 impl CampaignConfig {
@@ -525,28 +633,21 @@ impl CampaignConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading campaign config: {}", path.display()))?;
-        let cfg: Self = toml::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let cfg: Self =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         Ok(cfg)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(path, text)
-            .with_context(|| format!("writing {}", path.display()))?;
+        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
     /// Filesystem-safe slug derived from the campaign name.
     /// e.g. "My Game" → "my-game", "Curse of Strahd" → "curse-of-strahd"
     pub fn slug(&self) -> String {
-        let s: String = self.campaign.name
-            .to_lowercase()
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '-' })
-            .collect();
-        let parts: Vec<&str> = s.split('-').filter(|p| !p.is_empty()).collect();
-        if parts.is_empty() { "campaign".into() } else { parts.join("-") }
+        crate::util::slugify(&self.campaign.name)
     }
 
     /// Root output directory for this campaign: `<output_dir>/<slug>/`
@@ -582,8 +683,15 @@ impl CampaignConfig {
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string())
                     .collect();
-                let detail = if bits.is_empty() { String::new() } else { format!(" ({})", bits.join(" ")) };
-                s.push_str(&format!("  - {} plays {}{}\n", p.player, p.character, detail));
+                let detail = if bits.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", bits.join(" "))
+                };
+                s.push_str(&format!(
+                    "  - {} plays {}{}\n",
+                    p.player, p.character, detail
+                ));
             }
         }
         if !self.campaign.notes.is_empty() {
@@ -615,6 +723,21 @@ impl CampaignConfig {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn private_permissions_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[backend]\nkind = 'ollama'\n").unwrap();
+        set_private_permissions(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     #[test]
     fn round_trip_campaign() {
         let cfg = CampaignConfig {
@@ -633,7 +756,10 @@ mod tests {
                 class: "Fighter".into(),
             }],
             transcription: TranscriptionConfig::default(),
-            system: SystemRef { preset: "dnd5e".into(), overrides: String::new() },
+            system: SystemRef {
+                preset: "dnd5e".into(),
+                overrides: String::new(),
+            },
             outputs: OutputsConfig::default(),
             prompts: PromptOverrides::default(),
         };
@@ -677,7 +803,10 @@ mod tests {
     fn env_expansion() {
         std::env::set_var("SS_TEST_KEY", "secret");
         assert_eq!(expand_env("${SS_TEST_KEY}"), "secret");
-        assert_eq!(expand_env("prefix-${SS_TEST_KEY}-suffix"), "prefix-secret-suffix");
+        assert_eq!(
+            expand_env("prefix-${SS_TEST_KEY}-suffix"),
+            "prefix-secret-suffix"
+        );
         assert_eq!(expand_env("plain"), "plain");
     }
 }

@@ -35,7 +35,11 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
     pub fn border_style(&self, focused: bool) -> Style {
-        Style::default().fg(if focused { self.border_focus } else { self.border })
+        Style::default().fg(if focused {
+            self.border_focus
+        } else {
+            self.border
+        })
     }
     pub fn title_style(&self, focused: bool) -> Style {
         let c = if focused { self.accent } else { self.primary };
@@ -54,7 +58,9 @@ impl Theme {
         Style::default().fg(self.error)
     }
     pub fn accent_style(&self) -> Style {
-        Style::default().fg(self.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
     }
 }
 

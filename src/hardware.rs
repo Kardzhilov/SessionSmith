@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use sysinfo::System;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HardwareProfile {
@@ -28,13 +27,49 @@ pub struct Recommendation {
 }
 
 pub fn detect() -> HardwareProfile {
-    let mut sys = System::new_all();
-    sys.refresh_memory();
-    let ram_gb = sys.total_memory() / 1024 / 1024 / 1024;
+    let ram_gb = total_ram_bytes() / 1024 / 1024 / 1024;
     let cpu_cores = num_cpus();
     let os = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
     let gpu = detect_gpu();
-    HardwareProfile { os, cpu_cores, ram_gb, gpu }
+    HardwareProfile {
+        os,
+        cpu_cores,
+        ram_gb,
+        gpu,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn total_ram_bytes() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|contents| parse_mem_total_kib(&contents))
+        .map(|kib| kib * 1024)
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+fn total_ram_bytes() -> u64 {
+    Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn total_ram_bytes() -> u64 {
+    0
+}
+
+fn parse_mem_total_kib(contents: &str) -> Option<u64> {
+    contents.lines().find_map(|line| {
+        let value = line.strip_prefix("MemTotal:")?.split_whitespace().next()?;
+        value.parse().ok()
+    })
 }
 
 fn num_cpus() -> usize {
@@ -62,28 +97,48 @@ fn detect_gpu() -> Option<Gpu> {
 
 fn detect_nvidia() -> Option<Gpu> {
     let out = Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
-        .output().ok()?;
-    if !out.status.success() { return None; }
+        .args([
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
     let line = String::from_utf8_lossy(&out.stdout);
     let first = line.lines().next()?;
     let mut parts = first.splitn(2, ',').map(|s| s.trim());
     let name = parts.next()?.to_string();
     let mib: u64 = parts.next()?.parse().ok()?;
-    Some(Gpu { vendor: "NVIDIA".into(), name, vram_gb: mib / 1024 })
+    Some(Gpu {
+        vendor: "NVIDIA".into(),
+        name,
+        vram_gb: mib / 1024,
+    })
 }
 
 fn detect_amd() -> Option<Gpu> {
     let out = Command::new("rocm-smi")
         .args(["--showmeminfo", "vram", "--json"])
-        .output().ok()?;
-    if !out.status.success() { return None; }
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
     // Best-effort: just record presence.
-    Some(Gpu { vendor: "AMD".into(), name: "AMD GPU (rocm)".into(), vram_gb: 0 })
+    Some(Gpu {
+        vendor: "AMD".into(),
+        name: "AMD GPU (rocm)".into(),
+        vram_gb: 0,
+    })
 }
 
 fn detect_apple_unified_gb() -> Option<u64> {
-    let out = Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
+    let out = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     let bytes: u64 = s.trim().parse().ok()?;
     Some(bytes / 1024 / 1024 / 1024)
@@ -146,19 +201,35 @@ mod tests {
             cpu_cores: 8,
             ram_gb: ram,
             gpu: if vram > 0 || vendor == "Apple" {
-                Some(Gpu { vendor: vendor.into(), name: "x".into(), vram_gb: vram })
-            } else { None },
+                Some(Gpu {
+                    vendor: vendor.into(),
+                    name: "x".into(),
+                    vram_gb: vram,
+                })
+            } else {
+                None
+            },
         }
     }
 
     #[test]
     fn tiers() {
         assert_eq!(recommend(&hw(24, 64, "NVIDIA")).whisper_model, "large-v3");
-        assert_eq!(recommend(&hw(16, 32, "NVIDIA")).whisper_model, "large-v3-turbo");
+        assert_eq!(
+            recommend(&hw(16, 32, "NVIDIA")).whisper_model,
+            "large-v3-turbo"
+        );
         assert_eq!(recommend(&hw(8, 16, "NVIDIA")).whisper_model, "medium");
         assert_eq!(recommend(&hw(0, 32, "")).whisper_model, "small");
         assert_eq!(recommend(&hw(0, 8, "")).whisper_model, "base");
         // Apple unified
         assert_eq!(recommend(&hw(0, 32, "Apple")).whisper_model, "large-v3");
+    }
+
+    #[test]
+    fn parses_total_memory_from_linux_meminfo() {
+        let meminfo = "MemTotal:       16777216 kB\nMemFree:         1024 kB\n";
+        assert_eq!(parse_mem_total_kib(meminfo), Some(16_777_216));
+        assert_eq!(parse_mem_total_kib("MemFree: 1024 kB\n"), None);
     }
 }

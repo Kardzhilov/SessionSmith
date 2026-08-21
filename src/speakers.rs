@@ -20,9 +20,13 @@ pub fn detect_samples(text: &str) -> Vec<SpeakerSample> {
     let pattern = Regex::new(SPEAKER_PATTERN).expect("valid speaker label regex");
     let mut samples: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for line in text.lines() {
-        let Some(found) = pattern.find(line) else { continue };
+        let Some(found) = pattern.find(line) else {
+            continue;
+        };
         let label = found.as_str().to_string();
-        let sample = line[found.end()..].trim_start_matches([':', '-', ' ']).trim();
+        let sample = line[found.end()..]
+            .trim_start_matches([':', '-', ' '])
+            .trim();
         if !sample.is_empty() {
             samples.entry(label).or_default().push(sample.to_string());
         }
@@ -56,7 +60,9 @@ pub fn preview_offsets(srt: &str) -> BTreeMap<String, f64> {
         let mut lines = cue.lines();
         let _ = lines.next();
         let Some(timing) = lines.next() else { continue };
-        let Some(start) = timing.split(" --> ").next() else { continue };
+        let Some(start) = timing.split(" --> ").next() else {
+            continue;
+        };
         let seconds = parse_srt_time(start.trim()).unwrap_or(0.0);
         let text = lines.collect::<Vec<_>>().join(" ");
         for label in labels(&text) {
@@ -82,7 +88,13 @@ pub fn apply_map(text: &str, map: &BTreeMap<String, String>) -> String {
         .replace_all(text, |captures: &regex::Captures<'_>| {
             map.get(captures.get(0).expect("full regex match").as_str())
                 .cloned()
-                .unwrap_or_else(|| captures.get(0).expect("full regex match").as_str().to_string())
+                .unwrap_or_else(|| {
+                    captures
+                        .get(0)
+                        .expect("full regex match")
+                        .as_str()
+                        .to_string()
+                })
         })
         .into_owned()
 }
@@ -96,24 +108,34 @@ pub fn apply_to_files(txt: &Path, srt: &Path, map: &BTreeMap<String, String>) ->
         if path.exists() {
             let raw = path.with_file_name(format!(
                 "{}.diarized.{}",
-                path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("transcript"),
-                path.extension().and_then(|extension| extension.to_str()).unwrap_or("txt"),
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("transcript"),
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("txt"),
             ));
             if !raw.exists() {
-                std::fs::copy(path, &raw)
-                    .with_context(|| format!("saving raw diarized transcript: {}", raw.display()))?;
+                std::fs::copy(path, &raw).with_context(|| {
+                    format!("saving raw diarized transcript: {}", raw.display())
+                })?;
             }
             let text = std::fs::read_to_string(&raw)
                 .with_context(|| format!("reading raw diarized transcript: {}", raw.display()))?;
-            std::fs::write(path, apply_map(&text, map))
-                .with_context(|| format!("writing speaker-mapped transcript: {}", path.display()))?;
+            std::fs::write(path, apply_map(&text, map)).with_context(|| {
+                format!("writing speaker-mapped transcript: {}", path.display())
+            })?;
         }
     }
     Ok(())
 }
 
 /// Apply a map to a transcript session and record it in the metadata sidecar.
-pub fn apply_to_session(transcripts_dir: &Path, stem: &str, map: &BTreeMap<String, String>) -> Result<()> {
+pub fn apply_to_session(
+    transcripts_dir: &Path,
+    stem: &str,
+    map: &BTreeMap<String, String>,
+) -> Result<()> {
     let txt = transcripts_dir.join(format!("{stem}.txt"));
     let srt = transcripts_dir.join(format!("{stem}.srt"));
     apply_to_files(&txt, &srt, map)?;
@@ -162,7 +184,8 @@ pub fn confirm_interactively(
         }
         choices.push("Type a name...".into());
         choices.push("Skip".into());
-        let starting_cursor = defaults.get(&label)
+        let starting_cursor = defaults
+            .get(&label)
             .and_then(|name| choices.iter().position(|choice| choice == name))
             .unwrap_or(choices.len().saturating_sub(1));
         let selection = Select::new(&format!("{label} is:"), choices)
@@ -193,15 +216,27 @@ mod tests {
     fn detects_longest_samples_and_replaces_only_labels() {
         let raw = "SPEAKER_00: Hi\nSPEAKER_01: The raven is watching the road\nSPEAKER_00: Longer line here\n";
         let samples = detect_samples(raw);
-        assert_eq!(samples[0], SpeakerSample { label: "SPEAKER_00".into(), text: "Longer line here".into() });
+        assert_eq!(
+            samples[0],
+            SpeakerSample {
+                label: "SPEAKER_00".into(),
+                text: "Longer line here".into()
+            }
+        );
         assert_eq!(labels(raw), vec!["SPEAKER_00", "SPEAKER_01"]);
         let map = BTreeMap::from([("SPEAKER_00".into(), "Alice".into())]);
-        assert_eq!(apply_map(raw, &map), "Alice: Hi\nSPEAKER_01: The raven is watching the road\nAlice: Longer line here\n");
+        assert_eq!(
+            apply_map(raw, &map),
+            "Alice: Hi\nSPEAKER_01: The raven is watching the road\nAlice: Longer line here\n"
+        );
     }
 
     #[test]
     fn parses_cli_mappings() {
-        assert_eq!(parse_mapping("SPEAKER_02=Garrick").unwrap(), ("SPEAKER_02".into(), "Garrick".into()));
+        assert_eq!(
+            parse_mapping("SPEAKER_02=Garrick").unwrap(),
+            ("SPEAKER_02".into(), "Garrick".into())
+        );
         assert!(parse_mapping("speaker=Garrick").is_err());
         assert!(parse_mapping("SPEAKER_02").is_err());
     }

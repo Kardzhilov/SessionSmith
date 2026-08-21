@@ -172,11 +172,25 @@ fn spawn_cmd(backend: &str, file: &Path, offset: f64, volume: u8) -> io::Result<
     let vol = volume.min(100);
     let mut cmd = if backend == "mpv" {
         let mut c = Command::new("mpv");
-        c.args(["--no-video", "--really-quiet", &format!("--start={seek}"), &format!("--volume={vol}")]);
+        c.args([
+            "--no-video",
+            "--really-quiet",
+            &format!("--start={seek}"),
+            &format!("--volume={vol}"),
+        ]);
         c
     } else {
         let mut c = Command::new("ffplay");
-        c.args(["-nodisp", "-autoexit", "-loglevel", "quiet", "-ss", &seek, "-volume", &vol.to_string()]);
+        c.args([
+            "-nodisp",
+            "-autoexit",
+            "-loglevel",
+            "quiet",
+            "-ss",
+            &seek,
+            "-volume",
+            &vol.to_string(),
+        ]);
         c
     };
     cmd.arg(file)
@@ -213,15 +227,26 @@ fn probe_duration(file: &Path) -> f64 {
             _ => 0.0,
         }
     };
-    let d = run(&["-v", "error", "-show_entries", "format=duration", "-of", "default=nk=1:nw=1"]);
+    let d = run(&[
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=nk=1:nw=1",
+    ]);
     if d > 0.0 {
         return d;
     }
     let d = run(&[
-        "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=duration",
-        "-of", "default=nk=1:nw=1",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=duration",
+        "-of",
+        "default=nk=1:nw=1",
     ]);
     if d > 0.0 {
         return d;

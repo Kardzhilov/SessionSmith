@@ -3,7 +3,9 @@
 use anyhow::Result;
 use inquire::{Select, Text};
 
-use crate::cli::{DoctorArgs, LogAction, LogArgs, ModelsArgs, NotesArgs, RunArgs, SearchArgs, TranscribeArgs};
+use crate::cli::{
+    DoctorArgs, LogAction, LogArgs, ModelsArgs, NotesArgs, RunArgs, SearchArgs, TranscribeArgs,
+};
 use crate::config::GlobalConfig;
 use crate::hardware;
 use crate::presets;
@@ -40,12 +42,16 @@ pub async fn run() -> Result<()> {
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|_| c.system.preset.clone());
                 let g = GlobalConfig::load_or_default().unwrap_or_default();
-                let asr = g
-                    .asr
+                let asr = g.asr.model.clone().unwrap_or_else(|| {
+                    hardware::recommend(&hardware::detect())
+                        .whisper_model
+                        .to_string()
+                });
+                let model = g
+                    .backend
                     .model
                     .clone()
-                    .unwrap_or_else(|| hardware::recommend(&hardware::detect()).whisper_model.to_string());
-                let model = g.backend.model.clone().unwrap_or_else(|| "(not set)".into());
+                    .unwrap_or_else(|| "(not set)".into());
                 (
                     c.campaign.name.clone(),
                     preset_name,
@@ -164,7 +170,11 @@ pub async fn run() -> Result<()> {
             let query = Text::new("Search notes for:").prompt();
             match query {
                 Ok(q) if !q.trim().is_empty() => {
-                    commands::search::run(SearchArgs { query: vec![q], all: false }).await
+                    commands::search::run(SearchArgs {
+                        query: vec![q],
+                        all: false,
+                    })
+                    .await
                 }
                 _ => Ok(()),
             }

@@ -24,13 +24,34 @@ struct Bundled {
 }
 
 const BUNDLED: &[Bundled] = &[
-    Bundled { id: "generic",     toml: include_str!("../presets/generic.toml") },
-    Bundled { id: "dnd5e",       toml: include_str!("../presets/dnd5e.toml") },
-    Bundled { id: "pf2e",        toml: include_str!("../presets/pf2e.toml") },
-    Bundled { id: "coc",         toml: include_str!("../presets/coc.toml") },
-    Bundled { id: "blades",      toml: include_str!("../presets/blades.toml") },
-    Bundled { id: "daggerheart", toml: include_str!("../presets/daggerheart.toml") },
-    Bundled { id: "wordsmith",   toml: include_str!("../presets/wordsmith.toml") },
+    Bundled {
+        id: "generic",
+        toml: include_str!("../presets/generic.toml"),
+    },
+    Bundled {
+        id: "dnd5e",
+        toml: include_str!("../presets/dnd5e.toml"),
+    },
+    Bundled {
+        id: "pf2e",
+        toml: include_str!("../presets/pf2e.toml"),
+    },
+    Bundled {
+        id: "coc",
+        toml: include_str!("../presets/coc.toml"),
+    },
+    Bundled {
+        id: "blades",
+        toml: include_str!("../presets/blades.toml"),
+    },
+    Bundled {
+        id: "daggerheart",
+        toml: include_str!("../presets/daggerheart.toml"),
+    },
+    Bundled {
+        id: "wordsmith",
+        toml: include_str!("../presets/wordsmith.toml"),
+    },
 ];
 
 pub fn list_ids() -> Vec<&'static str> {
@@ -38,16 +59,20 @@ pub fn list_ids() -> Vec<&'static str> {
 }
 
 pub fn load(id: &str) -> Result<Preset> {
-    let raw = BUNDLED.iter()
-        .find(|b| b.id == id)
-        .ok_or_else(|| anyhow!("unknown system preset '{id}'. Available: {}", list_ids().join(", ")))?;
-    let preset: Preset = toml::from_str(raw.toml)
-        .map_err(|e| anyhow!("parsing bundled preset '{id}': {e}"))?;
+    let raw = BUNDLED.iter().find(|b| b.id == id).ok_or_else(|| {
+        anyhow!(
+            "unknown system preset '{id}'. Available: {}",
+            list_ids().join(", ")
+        )
+    })?;
+    let preset: Preset =
+        toml::from_str(raw.toml).map_err(|e| anyhow!("parsing bundled preset '{id}': {e}"))?;
     Ok(preset)
 }
 
 pub fn raw_toml(id: &str) -> Result<&'static str> {
-    BUNDLED.iter()
+    BUNDLED
+        .iter()
         .find(|b| b.id == id)
         .map(|b| b.toml)
         .ok_or_else(|| anyhow!("unknown preset '{id}'"))

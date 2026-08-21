@@ -689,9 +689,11 @@ pub fn parse_artifacts(spec: &str) -> Result<Vec<Artifact>> {
                     out.push(a);
                 }
             }
-            None => return Err(anyhow!(
+            None => {
+                return Err(anyhow!(
                 "unknown artifact '{p}'. Valid: bullets, dm-notes, recap, summary, story, quotes"
-            )),
+            ))
+            }
         }
     }
     Ok(out)
@@ -866,7 +868,8 @@ fn normalize(s: &str) -> String {
 /// Convert SRT text into `[HH:MM:SS] text` lines (one per cue).
 fn srt_to_timestamped(srt: &str) -> String {
     let mut out = String::new();
-    for block in srt.split("\n\n") {
+    let normalized = srt.replace("\r\n", "\n");
+    for block in normalized.split("\n\n") {
         let lines: Vec<&str> = block.lines().collect();
         // Find the "HH:MM:SS,mmm --> ..." timing line.
         let Some(ti) = lines.iter().position(|l| l.contains("-->")) else {
@@ -1080,6 +1083,15 @@ mod tests {
     }
 
     #[test]
+    fn srt_parses_crlf_multiline_cues_without_a_trailing_newline() {
+        let srt = "1\r\n00:00:01,000 --> 00:00:03,000\r\nFirst line\r\nsecond line\r\n\r\n2\r\n00:00:04,000 --> 00:00:05,000\r\nLast cue";
+        assert_eq!(
+            srt_to_timestamped(srt),
+            "[00:00:01] First line second line\n[00:00:04] Last cue\n"
+        );
+    }
+
+    #[test]
     fn ground_quotes_drops_fabricated_and_pins_timestamp() {
         let ts = "[00:00:05] hello there general kenobi\n\
                   [00:01:10] I have the high ground now\n";
@@ -1107,6 +1119,28 @@ mod tests {
         let raw = "> *\"totally made up nonsense here\"*\n> — Ghost — [00:00:00]\n";
         let out = ground_quotes(raw, ts);
         assert!(out.contains("No verbatim quotes"), "got: {out}");
+    }
+
+    #[test]
+    fn quote_grounder_uses_first_occurrence_and_skips_short_quotes() {
+        let ts = "[00:00:05] the party enters the tavern\n[00:01:10] the party enters the tavern\n";
+        let raw = "> *\"the party enters the tavern\"*\n> — GM — [00:00:00]\n\n> *\"too short\"*\n> — GM — [00:00:00]\n";
+        let out = ground_quotes(raw, ts);
+        assert!(out.contains("[00:00:05]"), "got: {out}");
+        assert!(!out.contains("too short"), "got: {out}");
+    }
+
+    #[test]
+    fn chunking_preserves_utf8_boundaries() {
+        let text = format!("{}\n", "naïve café ".repeat(120));
+        let chunks = chunk_text(&text, 1000, 100);
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.is_char_boundary(chunk.len())));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().all(|character| character != '\u{FFFD}')));
     }
 
     #[test]

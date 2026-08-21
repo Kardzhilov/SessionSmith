@@ -3,7 +3,10 @@ use inquire::{Confirm, Select, Text};
 use std::path::PathBuf;
 
 use crate::cli::InitArgs;
-use crate::config::{Campaign, CampaignConfig, GlobalConfig, OutputsConfig, Player, PromptOverrides, SystemRef, TranscriptionConfig};
+use crate::config::{
+    Campaign, CampaignConfig, GlobalConfig, OutputsConfig, Player, PromptOverrides, SystemRef,
+    TranscriptionConfig,
+};
 use crate::{commands, deps, hardware, models, presets, ui};
 
 pub async fn run(args: InitArgs) -> Result<()> {
@@ -25,8 +28,10 @@ pub async fn run(args: InitArgs) -> Result<()> {
     let preset = presets::load(&preset_id)?;
     ui::ok(&format!("system: {} — {}", preset.name, preset.description));
 
-    let name    = Text::new("Campaign name:").with_default("My Campaign").prompt()?;
-    let gm      = Text::new("GM name:").prompt()?;
+    let name = Text::new("Campaign name:")
+        .with_default("My Campaign")
+        .prompt()?;
+    let gm = Text::new("GM name:").prompt()?;
     let setting = Text::new("Setting (one line):").prompt()?;
 
     let mut players = Vec::new();
@@ -40,11 +45,20 @@ pub async fn run(args: InitArgs) -> Result<()> {
         {
             break;
         }
-        let player    = Text::new("Player name:").prompt()?;
+        let player = Text::new("Player name:").prompt()?;
         let character = Text::new("Character name:").prompt()?;
-        let ancestry  = Text::new("Ancestry / species (optional):").prompt().unwrap_or_default();
-        let class     = Text::new("Class / role (optional):").prompt().unwrap_or_default();
-        players.push(Player { player, character, ancestry, class });
+        let ancestry = Text::new("Ancestry / species (optional):")
+            .prompt()
+            .unwrap_or_default();
+        let class = Text::new("Class / role (optional):")
+            .prompt()
+            .unwrap_or_default();
+        players.push(Player {
+            player,
+            character,
+            ancestry,
+            class,
+        });
     }
 
     let slug = commands::slugify(&name);
@@ -62,12 +76,20 @@ pub async fn run(args: InitArgs) -> Result<()> {
     let notes_seed = std::fs::read_to_string("campaign.txt").unwrap_or_default();
 
     let cfg = CampaignConfig {
-        campaign: Campaign { name: name.clone(), gm, setting, notes: notes_seed },
+        campaign: Campaign {
+            name: name.clone(),
+            gm,
+            setting,
+            notes: notes_seed,
+        },
         backend: Default::default(),
         asr: Default::default(),
         players,
         transcription: TranscriptionConfig::default(),
-        system: SystemRef { preset: preset_id, overrides: String::new() },
+        system: SystemRef {
+            preset: preset_id,
+            overrides: String::new(),
+        },
         outputs: OutputsConfig::default(),
         prompts: PromptOverrides::default(),
     };
@@ -75,7 +97,7 @@ pub async fn run(args: InitArgs) -> Result<()> {
     ui::ok(&format!("wrote {}", campaign_path.display()));
 
     // Detect hardware and fetch model sizes in parallel.
-    let hw  = hardware::detect();
+    let hw = hardware::detect();
     let rec = hardware::recommend(&hw);
 
     let ollama_base = "http://localhost:11434".to_string();
@@ -91,23 +113,37 @@ pub async fn run(args: InitArgs) -> Result<()> {
         .map(models::human_bytes)
         .unwrap_or_else(|| "size unknown".to_string());
 
-    ui::panel("Hardware", &[
-        format!("OS: {}, {} cores, {} GB RAM", hw.os, hw.cpu_cores, hw.ram_gb),
-        hw.gpu.as_ref()
-            .map(|g| format!("GPU: {} {} ({} GB VRAM)", g.vendor, g.name, g.vram_gb))
-            .unwrap_or_else(|| "GPU: none detected".to_string()),
-    ]);
+    ui::panel(
+        "Hardware",
+        &[
+            format!(
+                "OS: {}, {} cores, {} GB RAM",
+                hw.os, hw.cpu_cores, hw.ram_gb
+            ),
+            hw.gpu
+                .as_ref()
+                .map(|g| format!("GPU: {} {} ({} GB VRAM)", g.vendor, g.name, g.vram_gb))
+                .unwrap_or_else(|| "GPU: none detected".to_string()),
+        ],
+    );
 
-    ui::panel("Recommended models", &[
-        format!("Whisper ASR : {}  ({})", rec.whisper_model, whisper_label),
-        format!("LLM         : {}  ({})", rec.llm_model,     llm_label),
-        format!("Reason      : {}", rec.reason),
-    ]);
+    ui::panel(
+        "Recommended models",
+        &[
+            format!("Whisper ASR : {}  ({})", rec.whisper_model, whisper_label),
+            format!("LLM         : {}  ({})", rec.llm_model, llm_label),
+            format!("Reason      : {}", rec.reason),
+        ],
+    );
 
     // Persist recommendations into global config.
     let mut g = GlobalConfig::load_or_default()?;
-    if g.asr.model.is_none()    { g.asr.model    = Some(rec.whisper_model.to_string()); }
-    if g.backend.model.is_none() { g.backend.model = Some(rec.llm_model.to_string()); }
+    if g.asr.model.is_none() {
+        g.asr.model = Some(rec.whisper_model.to_string());
+    }
+    if g.backend.model.is_none() {
+        g.backend.model = Some(rec.llm_model.to_string());
+    }
     g.hardware = Some(hw);
     g.save()?;
     ui::ok(&format!("wrote {}", GlobalConfig::path()?.display()));

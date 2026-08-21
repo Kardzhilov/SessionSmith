@@ -90,7 +90,10 @@ fn runtime_root() -> Result<PathBuf> {
 }
 
 fn cached_binary() -> Result<PathBuf> {
-    Ok(runtime_root()?.join("build").join("bin").join("transcribe-cli"))
+    Ok(runtime_root()?
+        .join("build")
+        .join("bin")
+        .join("transcribe-cli"))
 }
 
 fn which(bin: &str) -> Option<PathBuf> {
@@ -135,13 +138,25 @@ fn build_backend_for(device: Option<&str>) -> Backend {
     match requested_backend(device) {
         Backend::Cpu => Backend::Cpu,
         Backend::Cuda => {
-            if command_ok("nvcc") { Backend::Cuda } else { Backend::Cpu }
+            if command_ok("nvcc") {
+                Backend::Cuda
+            } else {
+                Backend::Cpu
+            }
         }
         Backend::Vulkan => {
-            if vulkan_available() { Backend::Vulkan } else { Backend::Cpu }
+            if vulkan_available() {
+                Backend::Vulkan
+            } else {
+                Backend::Cpu
+            }
         }
         Backend::Metal => {
-            if cfg!(target_os = "macos") { Backend::Metal } else { Backend::Cpu }
+            if cfg!(target_os = "macos") {
+                Backend::Metal
+            } else {
+                Backend::Cpu
+            }
         }
         Backend::Auto => {
             if command_ok("nvcc") && nvidia_gpu_present() {
@@ -244,15 +259,13 @@ pub fn ensure_runtime_for(device: Option<&str>) -> Result<PathBuf> {
 
     crate::ui::info("building transcribe.cpp runtime");
     let mut configure = Command::new("cmake");
-    configure
-        .current_dir(&root)
-        .args([
-            "-B",
-            "build",
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DTRANSCRIBE_CUDA=OFF",
-            "-DTRANSCRIBE_VULKAN=OFF",
-        ]);
+    configure.current_dir(&root).args([
+        "-B",
+        "build",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DTRANSCRIBE_CUDA=OFF",
+        "-DTRANSCRIBE_VULKAN=OFF",
+    ]);
     match desired_backend {
         Backend::Cuda => {
             configure.arg("-DTRANSCRIBE_CUDA=ON");
@@ -268,7 +281,8 @@ pub fn ensure_runtime_for(device: Option<&str>) -> Result<PathBuf> {
         }
         Backend::Auto | Backend::Cpu => {}
     }
-    let configure = configure.status()
+    let configure = configure
+        .status()
         .with_context(|| "cmake not found; install cmake to build transcribe.cpp")?;
     if !configure.success() {
         bail!("cmake configure for transcribe.cpp failed");
@@ -279,7 +293,14 @@ pub fn ensure_runtime_for(device: Option<&str>) -> Result<PathBuf> {
         .unwrap_or_else(|_| "2".to_string());
     let build = Command::new("cmake")
         .current_dir(&root)
-        .args(["--build", "build", "--target", "transcribe-cli", "--parallel", &jobs])
+        .args([
+            "--build",
+            "build",
+            "--target",
+            "transcribe-cli",
+            "--parallel",
+            &jobs,
+        ])
         .status()
         .with_context(|| "building transcribe.cpp")?;
     if !build.success() {
@@ -288,7 +309,10 @@ pub fn ensure_runtime_for(device: Option<&str>) -> Result<PathBuf> {
 
     let bin = cached_binary()?;
     if !bin.exists() {
-        bail!("transcribe.cpp build completed but {} is missing", bin.display());
+        bail!(
+            "transcribe.cpp build completed but {} is missing",
+            bin.display()
+        );
     }
     warn_if_gpu_unavailable(device, desired_backend);
     Ok(bin)
@@ -319,7 +343,11 @@ fn normalize_audio(audio: &Path) -> Result<PathBuf> {
         .filter(|s| !s.is_empty())
         .unwrap_or("audio");
     let mut out = std::env::temp_dir();
-    out.push(format!("ss_transcribe_cpp_{}_{}.wav", stem, std::process::id()));
+    out.push(format!(
+        "ss_transcribe_cpp_{}_{}.wav",
+        stem,
+        std::process::id()
+    ));
     let status = Command::new("ffmpeg")
         .arg("-y")
         .arg("-i")
@@ -331,7 +359,10 @@ fn normalize_audio(audio: &Path) -> Result<PathBuf> {
         .status()
         .with_context(|| "ffmpeg not found; install ffmpeg")?;
     if !status.success() || !out.exists() {
-        bail!("ffmpeg could not convert {} to 16 kHz mono WAV", audio.display());
+        bail!(
+            "ffmpeg could not convert {} to 16 kHz mono WAV",
+            audio.display()
+        );
     }
     Ok(out)
 }
@@ -389,8 +420,14 @@ fn trim_repeated_prefix(previous: &str, current: &str) -> String {
         }
     }
 
-    let previous_normalized: Vec<String> = previous_words.iter().map(|word| normalized_word(word)).collect();
-    let current_normalized: Vec<String> = current_words.iter().map(|word| normalized_word(word)).collect();
+    let previous_normalized: Vec<String> = previous_words
+        .iter()
+        .map(|word| normalized_word(word))
+        .collect();
+    let current_normalized: Vec<String> = current_words
+        .iter()
+        .map(|word| normalized_word(word))
+        .collect();
     let mut best_match: Option<(usize, usize)> = None;
     for previous_count in 5..=max_overlap {
         for current_count in 5..=max_overlap {
@@ -419,7 +456,10 @@ fn has_repetition_loop(text: &str) -> bool {
         .filter(|word| !word.is_empty())
         .collect();
 
-    if words.windows(8).any(|window| window.iter().all(|word| word == &window[0])) {
+    if words
+        .windows(8)
+        .any(|window| window.iter().all(|word| word == &window[0]))
+    {
         return true;
     }
 
@@ -457,7 +497,14 @@ fn fmt_ts(seconds: f64) -> String {
 
 fn audio_duration_seconds(audio: &Path) -> f64 {
     let out = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
         .arg(audio)
         .output();
     out.ok()
@@ -504,7 +551,12 @@ fn run_chunk(
 ) -> Result<String> {
     let mut cmd = Command::new(binary);
     cmd.arg("-q")
-        .args(["-m", model_path.to_str().ok_or_else(|| anyhow!("non-UTF8 model path"))?])
+        .args([
+            "-m",
+            model_path
+                .to_str()
+                .ok_or_else(|| anyhow!("non-UTF8 model path"))?,
+        ])
         .args(["--timestamps", "none"])
         .args(["--backend", backend.cli_name()]);
     if !matches!(language, "auto" | "") {
@@ -531,47 +583,59 @@ fn run_chunk(
     Ok(text)
 }
 
-fn transcribe_span(
-    binary: &Path,
-    model_path: &Path,
-    wav: &Path,
-    language: &str,
+#[derive(Clone, Copy)]
+struct SpanJob<'a> {
+    binary: &'a Path,
+    model_path: &'a Path,
+    wav: &'a Path,
+    language: &'a str,
     backend: Backend,
     start: f64,
     end: f64,
-    label: &str,
-) -> Result<Vec<ChunkTranscript>> {
-    let duration = (end - start).max(0.0);
+    label: &'a str,
+}
+
+fn transcribe_span(job: SpanJob<'_>) -> Result<Vec<ChunkTranscript>> {
+    let duration = (job.end - job.start).max(0.0);
     let overlap = CHUNK_OVERLAP_SECONDS.min(duration / 3.0);
-    let audio_start = (start - overlap).max(0.0);
-    let audio_duration = end - audio_start;
+    let audio_start = (job.start - overlap).max(0.0);
+    let audio_duration = job.end - audio_start;
     let chunk = std::env::temp_dir().join(format!(
         "ss_transcribe_cpp_chunk_{}_{}_{}.wav",
         std::process::id(),
-        (start * 1000.0).round() as u64,
-        (end * 1000.0).round() as u64
+        (job.start * 1000.0).round() as u64,
+        (job.end * 1000.0).round() as u64
     ));
-    make_chunk(wav, &chunk, audio_start, audio_duration)?;
-    let result = run_chunk(binary, model_path, &chunk, language, backend);
+    make_chunk(job.wav, &chunk, audio_start, audio_duration)?;
+    let result = run_chunk(
+        job.binary,
+        job.model_path,
+        &chunk,
+        job.language,
+        job.backend,
+    );
     let _ = std::fs::remove_file(&chunk);
 
     match result {
-        Ok(text) => Ok(vec![ChunkTranscript { text, start, end }]),
+        Ok(text) => Ok(vec![ChunkTranscript {
+            text,
+            start: job.start,
+            end: job.end,
+        }]),
         Err(err) => {
             let detail = format!("{err:#}");
             if duration > MIN_RETRY_CHUNK_SECONDS && should_split_error(&detail) {
-                let mid = start + duration / 2.0;
+                let mid = job.start + duration / 2.0;
                 crate::ui::warn(&format!(
-                    "{label} span {start:.1}-{end:.1}s hit a transcribe.cpp limit; retrying as {:.1}s + {:.1}s chunks",
-                    mid - start,
-                    end - mid
+                    "{} span {:.1}-{:.1}s hit a transcribe.cpp limit; retrying as {:.1}s + {:.1}s chunks",
+                    job.label,
+                    job.start,
+                    job.end,
+                    mid - job.start,
+                    job.end - mid
                 ));
-                let mut left = transcribe_span(
-                    binary, model_path, wav, language, backend, start, mid, label,
-                )?;
-                let right = transcribe_span(
-                    binary, model_path, wav, language, backend, mid, end, label,
-                )?;
+                let mut left = transcribe_span(SpanJob { end: mid, ..job })?;
+                let right = transcribe_span(SpanJob { start: mid, ..job })?;
                 left.extend(right);
                 Ok(left)
             } else {
@@ -598,17 +662,30 @@ pub fn run_asr(
     let mut chunks = load_checkpoint(&checkpoint_file, &model_id, &audio_sha1).unwrap_or_default();
     if !chunks.is_empty() {
         let resumed_at = chunks.iter().map(|chunk| chunk.end).fold(0.0, f64::max);
-        crate::ui::info(&format!("resuming transcribe.cpp at {}", fmt_ts(resumed_at)));
+        crate::ui::info(&format!(
+            "resuming transcribe.cpp at {}",
+            fmt_ts(resumed_at)
+        ));
     }
 
     if duration <= TARGET_CHUNK_SECONDS || duration <= 0.0 {
         if chunks.is_empty() {
             let text = run_chunk(&binary, model_path, &wav, language, backend)?;
-            chunks.push(ChunkTranscript { text, start: 0.0, end: duration });
-            write_checkpoint(&checkpoint_file, &Checkpoint {
-                model: model_id.clone(), audio_sha1_first_mb: audio_sha1.clone(),
-                chunk_s: TARGET_CHUNK_SECONDS, overlap_s: CHUNK_OVERLAP_SECONDS, segments: chunks.clone(),
-            })?;
+            chunks.push(ChunkTranscript {
+                text,
+                start: 0.0,
+                end: duration,
+            });
+            write_checkpoint(
+                &checkpoint_file,
+                &Checkpoint {
+                    model: model_id.clone(),
+                    audio_sha1_first_mb: audio_sha1.clone(),
+                    chunk_s: TARGET_CHUNK_SECONDS,
+                    overlap_s: CHUNK_OVERLAP_SECONDS,
+                    segments: chunks.clone(),
+                },
+            )?;
         }
     } else {
         let total_chunks = (duration / TARGET_CHUNK_SECONDS).ceil() as usize;
@@ -617,19 +694,37 @@ pub fn run_asr(
             duration / 60.0
         ));
         let completed_until = chunks.iter().map(|chunk| chunk.end).fold(0.0, f64::max);
-        let first_pending = ((completed_until / TARGET_CHUNK_SECONDS).floor() as usize).min(total_chunks);
+        let first_pending =
+            ((completed_until / TARGET_CHUNK_SECONDS).floor() as usize).min(total_chunks);
         for idx in first_pending..total_chunks {
-            crate::ui::step(idx + 1, total_chunks, &format!("transcribe.cpp chunk {}/{}", idx + 1, total_chunks));
+            crate::ui::step(
+                idx + 1,
+                total_chunks,
+                &format!("transcribe.cpp chunk {}/{}", idx + 1, total_chunks),
+            );
             let start = idx as f64 * TARGET_CHUNK_SECONDS;
             let end = (start + TARGET_CHUNK_SECONDS).min(duration);
             let label = format!("chunk {}/{}", idx + 1, total_chunks);
-            chunks.extend(transcribe_span(
-                &binary, model_path, &wav, language, backend, start, end, &label,
-            )?);
-            write_checkpoint(&checkpoint_file, &Checkpoint {
-                model: model_id.clone(), audio_sha1_first_mb: audio_sha1.clone(),
-                chunk_s: TARGET_CHUNK_SECONDS, overlap_s: CHUNK_OVERLAP_SECONDS, segments: chunks.clone(),
-            })?;
+            chunks.extend(transcribe_span(SpanJob {
+                binary: &binary,
+                model_path,
+                wav: &wav,
+                language,
+                backend,
+                start,
+                end,
+                label: &label,
+            })?);
+            write_checkpoint(
+                &checkpoint_file,
+                &Checkpoint {
+                    model: model_id.clone(),
+                    audio_sha1_first_mb: audio_sha1.clone(),
+                    chunk_s: TARGET_CHUNK_SECONDS,
+                    overlap_s: CHUNK_OVERLAP_SECONDS,
+                    segments: chunks.clone(),
+                },
+            )?;
         }
     }
     let _ = std::fs::remove_file(&wav);
@@ -680,7 +775,10 @@ mod tests {
     fn trims_exact_overlap_ignoring_case_and_punctuation() {
         let previous = "We walk toward the old stone bridge.";
         let current = "the OLD stone bridge, and cross the river.";
-        assert_eq!(trim_repeated_prefix(previous, current), "and cross the river.");
+        assert_eq!(
+            trim_repeated_prefix(previous, current),
+            "and cross the river."
+        );
     }
 
     #[test]
@@ -694,7 +792,10 @@ mod tests {
     fn trims_approximate_overlap_with_filler_word_differences() {
         let previous = "You do not think about what you give to your players. You're like, shit. Wait, no. The math.";
         let current = "Players, so you're like, shit, right? No, the math, hold up. I also gave them shackles.";
-        assert_eq!(trim_repeated_prefix(previous, current), "hold up. I also gave them shackles.");
+        assert_eq!(
+            trim_repeated_prefix(previous, current),
+            "hold up. I also gave them shackles."
+        );
     }
 
     #[test]
@@ -705,7 +806,9 @@ mod tests {
 
     #[test]
     fn detects_single_word_loop() {
-        assert!(has_repetition_loop("Yeah. Yeah. Yeah. Yeah. Yeah. Yeah. Yeah. Yeah."));
+        assert!(has_repetition_loop(
+            "Yeah. Yeah. Yeah. Yeah. Yeah. Yeah. Yeah. Yeah."
+        ));
     }
 
     #[test]
@@ -719,14 +822,27 @@ mod tests {
     fn checkpoint_requires_matching_model_audio_and_parameters() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("session.progress.json");
-        write_checkpoint(&path, &Checkpoint {
-            model: "model.gguf".into(),
-            audio_sha1_first_mb: "fingerprint".into(),
-            chunk_s: TARGET_CHUNK_SECONDS,
-            overlap_s: CHUNK_OVERLAP_SECONDS,
-            segments: vec![ChunkTranscript { text: "notes".into(), start: 0.0, end: 30.0 }],
-        }).unwrap();
-        assert_eq!(load_checkpoint(&path, "model.gguf", "fingerprint").unwrap().len(), 1);
+        write_checkpoint(
+            &path,
+            &Checkpoint {
+                model: "model.gguf".into(),
+                audio_sha1_first_mb: "fingerprint".into(),
+                chunk_s: TARGET_CHUNK_SECONDS,
+                overlap_s: CHUNK_OVERLAP_SECONDS,
+                segments: vec![ChunkTranscript {
+                    text: "notes".into(),
+                    start: 0.0,
+                    end: 30.0,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_checkpoint(&path, "model.gguf", "fingerprint")
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(load_checkpoint(&path, "other.gguf", "fingerprint").is_none());
         assert!(load_checkpoint(&path, "model.gguf", "other").is_none());
     }

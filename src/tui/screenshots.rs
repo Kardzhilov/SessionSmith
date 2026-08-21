@@ -66,7 +66,12 @@ fn render_all(out_dir: &Path) -> std::io::Result<()> {
     select_campaign(&mut app, "Emberfall");
     app.on_key(KeyEvent::from(KeyCode::Char(':')));
     let buf = super::render_to_buffer(&mut app, w, h);
-    write_svg(&out_dir.join("palette.svg"), &buf, &app, "SessionSmith — command palette")?;
+    write_svg(
+        &out_dir.join("palette.svg"),
+        &buf,
+        &app,
+        "SessionSmith — command palette",
+    )?;
 
     // 3) Theme picker, previewing gruvbox.
     let mut app = App::new(handle.clone());
@@ -76,7 +81,12 @@ fn render_all(out_dir: &Path) -> std::io::Result<()> {
     app.on_key(KeyEvent::from(KeyCode::Down));
     app.on_key(KeyEvent::from(KeyCode::Down)); // → gruvbox
     let buf = super::render_to_buffer(&mut app, w, h);
-    write_svg(&out_dir.join("themes.svg"), &buf, &app, "SessionSmith — themes")?;
+    write_svg(
+        &out_dir.join("themes.svg"),
+        &buf,
+        &app,
+        "SessionSmith — themes",
+    )?;
 
     // 4) Live pipeline / doctor pane.
     let mut app = App::new(handle.clone());
@@ -86,17 +96,34 @@ fn render_all(out_dir: &Path) -> std::io::Result<()> {
     app.job_running = true;
     for (lvl, msg) in [
         (LogLevel::Step, "[1/1] the-drowned-bell"),
-        (LogLevel::Info, "transcribing the-drowned-bell with whisper-large-v3"),
+        (
+            LogLevel::Info,
+            "transcribing the-drowned-bell with whisper-large-v3",
+        ),
         (LogLevel::Info, "ASR device: cuda (float16)"),
-        (LogLevel::Ok, "wrote output/emberfall/transcripts/the-drowned-bell.txt"),
-        (LogLevel::Ok, "wrote output/emberfall/notes/the-drowned-bell/bullets.md"),
-        (LogLevel::Ok, "wrote output/emberfall/notes/the-drowned-bell/recap.md"),
+        (
+            LogLevel::Ok,
+            "wrote output/emberfall/transcripts/the-drowned-bell.txt",
+        ),
+        (
+            LogLevel::Ok,
+            "wrote output/emberfall/notes/the-drowned-bell/bullets.md",
+        ),
+        (
+            LogLevel::Ok,
+            "wrote output/emberfall/notes/the-drowned-bell/recap.md",
+        ),
         (LogLevel::Info, "summary … ~1.2k tokens"),
     ] {
         app.job_log.push((lvl, msg.to_string()));
     }
     let buf = super::render_to_buffer(&mut app, w, h);
-    write_svg(&out_dir.join("pipeline.svg"), &buf, &app, "SessionSmith — live pipeline")?;
+    write_svg(
+        &out_dir.join("pipeline.svg"),
+        &buf,
+        &app,
+        "SessionSmith — live pipeline",
+    )?;
 
     Ok(())
 }
@@ -140,7 +167,11 @@ fn build_dummy_env(root: &Path) -> std::io::Result<()> {
     // Audio drop-zone: two transcribed (✓) and one pending (○).
     let audio = root.join("audio");
     std::fs::create_dir_all(&audio)?;
-    for f in ["ashford-gate.flac", "the-drowned-bell.flac", "the-tidewatch.flac"] {
+    for f in [
+        "ashford-gate.flac",
+        "the-drowned-bell.flac",
+        "the-tidewatch.flac",
+    ] {
         std::fs::write(audio.join(f), b"")?;
     }
     Ok(())

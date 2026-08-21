@@ -1178,18 +1178,20 @@ mod tests {
     }
 
     fn vocabulary_fixture() -> (CampaignConfig, Preset) {
-        let mut campaign = CampaignConfig::default();
-        campaign.players = vec![crate::config::Player {
-            player: "Alice".into(),
-            character: "Strahd".into(),
-            ancestry: String::new(),
-            class: String::new(),
-        }];
-        campaign
-            .transcription
-            .replacements
-            .insert("Strawd".into(), "Strahd".into());
-        campaign.transcription.vocabulary = vec!["Barovia".into(), "barovia".into()];
+        let campaign = CampaignConfig {
+            players: vec![crate::config::Player {
+                player: "Alice".into(),
+                character: "Strahd".into(),
+                ancestry: String::new(),
+                class: String::new(),
+            }],
+            transcription: crate::config::TranscriptionConfig {
+                replacements: BTreeMap::from([("Strawd".into(), "Strahd".into())]),
+                vocabulary: vec!["Barovia".into(), "barovia".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let preset = Preset {
             name: "test".into(),
             description: String::new(),

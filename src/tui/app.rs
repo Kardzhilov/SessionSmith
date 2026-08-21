@@ -1,9 +1,9 @@
 //! TUI application state and behaviour. Rendering lives in [`super::draw`];
 //! background work lives in [`super::jobs`].
 
-use std::path::PathBuf;
-use std::collections::VecDeque;
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use ratatui::layout::Rect;
@@ -172,10 +172,20 @@ pub enum Overlay {
     Picker(PickerState),
     SpeakerMap(SpeakerMapState),
     /// Theme chooser with live preview. `original` is restored on Esc.
-    ThemePicker { cursor: usize, original: usize },
-    Message { title: String, body: String, error: bool },
+    ThemePicker {
+        cursor: usize,
+        original: usize,
+    },
+    Message {
+        title: String,
+        body: String,
+        error: bool,
+    },
     /// A yes/no prompt. On confirm, `App::pending_confirm` drives the action.
-    Confirm { title: String, body: String },
+    Confirm {
+        title: String,
+        body: String,
+    },
 }
 
 pub struct SpeakerMapState {
@@ -497,7 +507,10 @@ impl App {
                     let name = CampaignConfig::load(&p)
                         .map(|c| c.campaign.name)
                         .unwrap_or_else(|_| {
-                            p.file_stem().unwrap_or_default().to_string_lossy().to_string()
+                            p.file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string()
                         });
                     entries.push(CampaignEntry { name, path: p });
                 }
@@ -507,7 +520,10 @@ impl App {
         let root = PathBuf::from("campaign.toml");
         if entries.is_empty() && root.exists() {
             if let Ok(c) = CampaignConfig::load(&root) {
-                entries.push(CampaignEntry { name: c.campaign.name, path: root });
+                entries.push(CampaignEntry {
+                    name: c.campaign.name,
+                    path: root,
+                });
             }
         }
         // Apply the user's saved ordering (by file stem); unlisted campaigns
@@ -523,7 +539,11 @@ impl App {
         if self.campaign_idx >= self.campaigns.len() {
             self.campaign_idx = 0;
         }
-        self.camp_state.select(if self.campaigns.is_empty() { None } else { Some(self.campaign_idx) });
+        self.camp_state.select(if self.campaigns.is_empty() {
+            None
+        } else {
+            Some(self.campaign_idx)
+        });
     }
 
     /// Reload campaigns after the external setup wizard exits and select its
@@ -531,12 +551,18 @@ impl App {
     pub fn reload_campaigns_after_wizard(&mut self) {
         let previous = self.pending_campaign_reload.take().unwrap_or_default();
         self.load_campaigns();
-        if let Some(index) = self.campaigns.iter().position(|entry| !previous.contains(&entry.path)) {
+        if let Some(index) = self
+            .campaigns
+            .iter()
+            .position(|entry| !previous.contains(&entry.path))
+        {
             self.campaign_idx = index;
             self.camp_state.select(Some(index));
         }
         self.load_campaign_data();
-        self.status = self.campaigns.get(self.campaign_idx)
+        self.status = self
+            .campaigns
+            .get(self.campaign_idx)
             .map(|campaign| format!("Campaign ready: {}", campaign.name))
             .unwrap_or_else(|| "Campaign wizard finished".into());
     }
@@ -545,11 +571,20 @@ impl App {
         let executable = match std::env::current_exe() {
             Ok(path) => path,
             Err(error) => {
-                self.message("Cannot start wizard", &format!("could not locate SessionSmith: {error}"), true);
+                self.message(
+                    "Cannot start wizard",
+                    &format!("could not locate SessionSmith: {error}"),
+                    true,
+                );
                 return;
             }
         };
-        self.pending_campaign_reload = Some(self.campaigns.iter().map(|entry| entry.path.clone()).collect());
+        self.pending_campaign_reload = Some(
+            self.campaigns
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect(),
+        );
         self.pending_shell = Some((
             "New campaign".into(),
             format!("{} init", shell_quote(&executable.display().to_string())),
@@ -558,28 +593,51 @@ impl App {
 
     pub(super) fn request_speaker_mapping(&mut self) {
         let Some(session) = self.open_session.and_then(|index| self.sessions.get(index)) else {
-            self.message("No session", "Open a diarized session before mapping speakers.", true);
+            self.message(
+                "No session",
+                "Open a diarized session before mapping speakers.",
+                true,
+            );
             return;
         };
         let Some(campaign) = self.campaign.as_ref() else {
-            self.message("No campaign", "Select a campaign before mapping speakers.", true);
+            self.message(
+                "No campaign",
+                "Select a campaign before mapping speakers.",
+                true,
+            );
             return;
         };
-        let raw_txt = campaign.transcripts_dir().join(format!("{}.diarized.txt", session.stem));
-        let txt = campaign.transcripts_dir().join(format!("{}.txt", session.stem));
+        let raw_txt = campaign
+            .transcripts_dir()
+            .join(format!("{}.diarized.txt", session.stem));
+        let txt = campaign
+            .transcripts_dir()
+            .join(format!("{}.txt", session.stem));
         let source = if raw_txt.exists() { raw_txt } else { txt };
         let Ok(text) = std::fs::read_to_string(&source) else {
-            self.message("No speaker labels", "Could not read this session's transcript.", true);
+            self.message(
+                "No speaker labels",
+                "Could not read this session's transcript.",
+                true,
+            );
             return;
         };
         let labels = crate::speakers::labels(&text);
         if labels.is_empty() {
-            self.message("No speaker labels", "This session has no diarized speaker labels to map.", true);
+            self.message(
+                "No speaker labels",
+                "This session has no diarized speaker labels to map.",
+                true,
+            );
             return;
         }
         let mut samples = BTreeMap::new();
         for sample in crate::speakers::detect_samples(&text) {
-            samples.entry(sample.label).or_insert_with(Vec::new).push(sample.text);
+            samples
+                .entry(sample.label)
+                .or_insert_with(Vec::new)
+                .push(sample.text);
         }
         let mut map = crate::meta::load(&campaign.transcripts_dir(), &session.stem)
             .and_then(|meta| meta.speaker_map)
@@ -592,14 +650,28 @@ impl App {
             }
         }
         choices.push("Skip".into());
-        let raw_srt = campaign.transcripts_dir().join(format!("{}.diarized.srt", session.stem));
-        let srt = if raw_srt.exists() { raw_srt } else { campaign.transcripts_dir().join(format!("{}.srt", session.stem)) };
+        let raw_srt = campaign
+            .transcripts_dir()
+            .join(format!("{}.diarized.srt", session.stem));
+        let srt = if raw_srt.exists() {
+            raw_srt
+        } else {
+            campaign
+                .transcripts_dir()
+                .join(format!("{}.srt", session.stem))
+        };
         let preview_offsets = std::fs::read_to_string(srt)
             .map(|srt| crate::speakers::preview_offsets(&srt))
             .unwrap_or_default();
         self.overlay = Overlay::SpeakerMap(SpeakerMapState {
-            stem: session.stem.clone(), labels, samples, map, choices, cursor: 0,
-            preview_offsets, audio: self.session_source_audio(),
+            stem: session.stem.clone(),
+            labels,
+            samples,
+            map,
+            choices,
+            cursor: 0,
+            preview_offsets,
+            audio: self.session_source_audio(),
         });
     }
 
@@ -620,12 +692,18 @@ impl App {
         self.campaign_idx = to;
         self.camp_state.select(Some(to));
         // Persist the full order by file stem.
-        self.global.ui.campaign_order =
-            self.campaigns.iter().map(|c| campaign_stem(&c.path)).collect();
+        self.global.ui.campaign_order = self
+            .campaigns
+            .iter()
+            .map(|c| campaign_stem(&c.path))
+            .collect();
         self.global.save().ok();
         self.status = format!(
             "Moved '{}' — order saved",
-            self.campaigns.get(to).map(|c| c.name.as_str()).unwrap_or("")
+            self.campaigns
+                .get(to)
+                .map(|c| c.name.as_str())
+                .unwrap_or("")
         );
     }
 
@@ -658,7 +736,8 @@ impl App {
             self.audio = files;
         }
         self.audio_idx = 0;
-        self.audio_state.select(if self.audio.is_empty() { None } else { Some(0) });
+        self.audio_state
+            .select(if self.audio.is_empty() { None } else { Some(0) });
 
         // A session exists if it has a transcript OR a notes/<stem>/ directory,
         // so deleting transcripts doesn't hide sessions whose notes remain.
@@ -695,14 +774,23 @@ impl App {
                     .map(|a| nd.join(a.filename()).exists())
                     .collect();
                 // Newest mtime among the transcript and any artifact.
-                let mut modified = std::fs::metadata(&transcript).and_then(|m| m.modified()).ok();
+                let mut modified = std::fs::metadata(&transcript)
+                    .and_then(|m| m.modified())
+                    .ok();
                 for a in ALL_ARTIFACTS {
-                    if let Ok(m) = std::fs::metadata(nd.join(a.filename())).and_then(|m| m.modified()) {
+                    if let Ok(m) =
+                        std::fs::metadata(nd.join(a.filename())).and_then(|m| m.modified())
+                    {
                         modified = Some(modified.map_or(m, |cur| cur.max(m)));
                     }
                 }
                 let modified = modified.unwrap_or(SystemTime::UNIX_EPOCH);
-                SessionEntry { stem, transcript, modified, artifacts }
+                SessionEntry {
+                    stem,
+                    transcript,
+                    modified,
+                    artifacts,
+                }
             })
             .collect();
         sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
@@ -721,11 +809,11 @@ impl App {
     }
 
     fn asr_model(&self) -> String {
-        self.global
-            .asr
-            .model
-            .clone()
-            .unwrap_or_else(|| crate::hardware::recommend(&crate::hardware::detect()).whisper_model.to_string())
+        self.global.asr.model.clone().unwrap_or_else(|| {
+            crate::hardware::recommend(&crate::hardware::detect())
+                .whisper_model
+                .to_string()
+        })
     }
 
     pub fn asr_model_label(&self) -> String {
@@ -758,7 +846,12 @@ impl App {
     }
 
     pub fn backend_summary(&self) -> String {
-        let model = self.global.backend.model.clone().unwrap_or_else(|| "(not set)".into());
+        let model = self
+            .global
+            .backend
+            .model
+            .clone()
+            .unwrap_or_else(|| "(not set)".into());
         format!("{} / {}", self.global.backend.kind, model)
     }
 
@@ -795,14 +888,20 @@ impl App {
         }
 
         let Some(si) = self.open_session else { return };
-        let Some(sess) = self.sessions.get(si) else { return };
+        let Some(sess) = self.sessions.get(si) else {
+            return;
+        };
         let Some(cfg) = &self.campaign else { return };
         let art = ALL_ARTIFACTS[self.artifact_tab];
         let base = cfg.notes_dir().join(&sess.stem);
         // Show the candidate version when toggled and one exists.
         let path = if self.viewing_candidate {
             let c = base.join(crate::pipeline::artifact_file(art, true));
-            if c.exists() { c } else { base.join(art.filename()) }
+            if c.exists() {
+                c
+            } else {
+                base.join(art.filename())
+            }
         } else {
             base.join(art.filename())
         };
@@ -821,7 +920,10 @@ impl App {
 
     pub(super) fn current_artifact_path(&self) -> Option<PathBuf> {
         if self.viewing_log {
-            return self.campaign.as_ref().map(|c| c.notes_dir().join("_campaign-log.md"));
+            return self
+                .campaign
+                .as_ref()
+                .map(|c| c.notes_dir().join("_campaign-log.md"));
         }
         let si = self.open_session?;
         let sess = self.sessions.get(si)?;
@@ -884,7 +986,11 @@ impl App {
         let ts_line = positions[self.quote_idx].0;
         let top = ts_line.saturating_sub(1);
         self.viewer_scroll = top as u16;
-        self.status = format!("quote {}/{}  ·  p to play", self.quote_idx + 1, positions.len());
+        self.status = format!(
+            "quote {}/{}  ·  p to play",
+            self.quote_idx + 1,
+            positions.len()
+        );
         true
     }
 
@@ -970,7 +1076,11 @@ impl App {
     pub(super) fn player_toggle_pause(&mut self) {
         if let Some(p) = &mut self.player {
             p.toggle_pause();
-            self.status = if p.paused { "⏸ paused".into() } else { "▶ playing".into() };
+            self.status = if p.paused {
+                "⏸ paused".into()
+            } else {
+                "▶ playing".into()
+            };
         }
     }
 
@@ -1000,7 +1110,8 @@ impl App {
             self.player_toggle_pause();
         } else {
             self.status =
-                "Nothing to play here — select an audio file, or open a session's Quotes tab".into();
+                "Nothing to play here — select an audio file, or open a session's Quotes tab"
+                    .into();
         }
     }
 
@@ -1103,9 +1214,9 @@ impl App {
             while let Ok(ev) = rx.try_recv() {
                 match ev {
                     UiEvent::Header(m) => self.job_log.push((LogLevel::Info, m)),
-                    UiEvent::Step { n, total, msg } => {
-                        self.job_log.push((LogLevel::Step, format!("[{n}/{total}] {msg}")))
-                    }
+                    UiEvent::Step { n, total, msg } => self
+                        .job_log
+                        .push((LogLevel::Step, format!("[{n}/{total}] {msg}"))),
                     UiEvent::Ok(m) => self.job_log.push((LogLevel::Ok, m)),
                     UiEvent::Warn(m) => self.job_log.push((LogLevel::Warn, m)),
                     UiEvent::Error(m) => self.job_log.push((LogLevel::Error, m)),
@@ -1148,7 +1259,8 @@ impl App {
             }
             // Refresh data so new transcripts/artifacts appear, while keeping
             // the user's current document open when it still exists.
-            let open_stem = self.open_session
+            let open_stem = self
+                .open_session
                 .and_then(|index| self.sessions.get(index))
                 .map(|session| session.stem.clone());
             let was_log = self.viewing_log;
@@ -1164,17 +1276,27 @@ impl App {
                 self.viewing_log = true;
                 self.refresh_viewer();
                 self.viewer_scroll = scroll.min(
-                    self.viewer_lines.len().saturating_sub(1).min(u16::MAX as usize) as u16,
+                    self.viewer_lines
+                        .len()
+                        .saturating_sub(1)
+                        .min(u16::MAX as usize) as u16,
                 );
             } else if let Some(stem) = open_stem {
-                if let Some(index) = self.sessions.iter().position(|session| session.stem == stem) {
+                if let Some(index) = self
+                    .sessions
+                    .iter()
+                    .position(|session| session.stem == stem)
+                {
                     self.open_session = Some(index);
                     self.session_idx = index;
                     self.log_selected = false;
                     self.sess_state.select(Some(index + 1));
                     self.refresh_viewer();
                     self.viewer_scroll = scroll.min(
-                        self.viewer_lines.len().saturating_sub(1).min(u16::MAX as usize) as u16,
+                        self.viewer_lines
+                            .len()
+                            .saturating_sub(1)
+                            .min(u16::MAX as usize) as u16,
                     );
                 }
             }
@@ -1197,17 +1319,25 @@ impl App {
             return None;
         }
         let (Some(cfg), Some(preset)) = (self.campaign.clone(), self.preset.clone()) else {
-            self.message("No campaign", "No campaign is loaded. Run `sessionsmith init` first.", true);
+            self.message(
+                "No campaign",
+                "No campaign is loaded. Run `sessionsmith init` first.",
+                true,
+            );
             return None;
         };
         Some((cfg, preset))
     }
 
     pub(super) fn start_job(&mut self, mut req_kind: JobRequestBuilder) {
-        let Some((cfg, preset)) = self.require_ready() else { return };
+        let Some((cfg, preset)) = self.require_ready() else {
+            return;
+        };
         let g = crate::config::effective(&self.global, &cfg);
         let asr_model = g.asr.model.clone().unwrap_or_else(|| {
-            crate::hardware::recommend(&crate::hardware::detect()).whisper_model.to_string()
+            crate::hardware::recommend(&crate::hardware::detect())
+                .whisper_model
+                .to_string()
         });
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.job_rx = Some(rx);
@@ -1254,10 +1384,14 @@ impl App {
         candidate: bool,
         retranscribe: bool,
     ) {
-        let Some((cfg, preset)) = self.require_ready() else { return };
+        let Some((cfg, preset)) = self.require_ready() else {
+            return;
+        };
         let g = crate::config::effective(&self.global, &cfg);
         let asr_model = g.asr.model.clone().unwrap_or_else(|| {
-            crate::hardware::recommend(&crate::hardware::detect()).whisper_model.to_string()
+            crate::hardware::recommend(&crate::hardware::detect())
+                .whisper_model
+                .to_string()
         });
         let stem = transcript
             .file_stem()
@@ -1277,7 +1411,10 @@ impl App {
         let (kind, sessions, transcripts, force_transcribe) = match audio {
             Some(a) => (
                 JobKind::Run,
-                vec![SessionInput { files: vec![a], name: stem.clone() }],
+                vec![SessionInput {
+                    files: vec![a],
+                    name: stem.clone(),
+                }],
                 Vec::new(),
                 true,
             ),
@@ -1311,8 +1448,8 @@ impl App {
             sessions,
             transcripts,
             artifacts,
-            force: true,          // regenerate the selected artifacts
-            force_transcribe,     // re-transcribe only when the user chose to
+            force: true,      // regenerate the selected artifacts
+            force_transcribe, // re-transcribe only when the user chose to
             resume: false,
             update_log: !candidate,
             candidate,
@@ -1357,7 +1494,13 @@ impl App {
         let installed = std::collections::HashMap::new();
         let rows = self.build_model_rows(&expanded, &installed);
         let cursor = rows.iter().position(|r| r.selectable()).unwrap_or(0);
-        self.models = Some(ModelsState { rows, cursor, scroll: 0, expanded, installed });
+        self.models = Some(ModelsState {
+            rows,
+            cursor,
+            scroll: 0,
+            expanded,
+            installed,
+        });
         self.pane = Pane::Content;
         self.spawn_model_refresh();
     }
@@ -1560,7 +1703,9 @@ impl App {
 
     /// Set the highlighted model as the default (ASR or LLM) and persist it.
     pub(super) fn set_model_default(&mut self) {
-        let Some((kind, id)) = self.selected_model() else { return };
+        let Some((kind, id)) = self.selected_model() else {
+            return;
+        };
         match kind {
             ModelKind::Whisper => self.global.asr.model = Some(id.clone()),
             ModelKind::Asr => self.global.asr.model = Some(id.clone()),
@@ -1574,7 +1719,11 @@ impl App {
     /// Expand/collapse the highlighted family row.
     pub(super) fn toggle_models_expand(&mut self) {
         let key = match &self.models {
-            Some(s) => s.rows.get(s.cursor).filter(|r| r.family).map(|r| r.expand_key.clone()),
+            Some(s) => s
+                .rows
+                .get(s.cursor)
+                .filter(|r| r.family)
+                .map(|r| r.expand_key.clone()),
             None => None,
         };
         let Some(key) = key else { return };
@@ -1673,7 +1822,9 @@ impl App {
     /// Queue an install/update or delete of the highlighted model. Multiple
     /// actions can be queued; they run one at a time in the Working pane.
     pub(super) fn model_action(&mut self, install: bool) {
-        let Some((kind, id)) = self.selected_model() else { return };
+        let Some((kind, id)) = self.selected_model() else {
+            return;
+        };
         let already_installed = self
             .models
             .as_ref()
@@ -1726,7 +1877,11 @@ impl App {
 }
 
 fn notify_job_done(title: &str, succeeded: bool) {
-    let body = if succeeded { "SessionSmith job completed" } else { "SessionSmith job failed" };
+    let body = if succeeded {
+        "SessionSmith job completed"
+    } else {
+        "SessionSmith job failed"
+    };
     #[cfg(target_os = "linux")]
     {
         let _ = std::process::Command::new("notify-send")
@@ -1835,12 +1990,12 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn cuda_toolkit_command() -> Option<String> {
-        if !cfg!(target_os = "linux") {
-                return None;
-        }
-        let exe = std::env::current_exe().ok()?;
-        let exe = shell_quote(&exe.display().to_string());
-        Some(format!(
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let exe = shell_quote(&exe.display().to_string());
+    Some(format!(
                 "set -e; \
                  if command -v nvcc >/dev/null 2>&1; then \
                      echo 'CUDA toolkit already installed.'; \

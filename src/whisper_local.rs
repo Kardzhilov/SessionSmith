@@ -58,12 +58,16 @@ pub fn transcribe_file(
     let mut cparams = WhisperContextParameters::default();
     cparams.use_gpu(use_gpu);
     let ctx = WhisperContext::new_with_params(
-        model_path.to_str().ok_or_else(|| anyhow!("model path is not valid UTF-8"))?,
+        model_path
+            .to_str()
+            .ok_or_else(|| anyhow!("model path is not valid UTF-8"))?,
         cparams,
     )
     .map_err(|e| anyhow!("loading whisper model {}: {e}", model_path.display()))?;
 
-    let mut state = ctx.create_state().map_err(|e| anyhow!("creating whisper state: {e}"))?;
+    let mut state = ctx
+        .create_state()
+        .map_err(|e| anyhow!("creating whisper state: {e}"))?;
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_n_threads(threads.max(1));
@@ -90,7 +94,11 @@ pub fn transcribe_file(
         let text = state.full_get_segment_text(i).unwrap_or_default();
         let start_cs = state.full_get_segment_t0(i).unwrap_or(0);
         let end_cs = state.full_get_segment_t1(i).unwrap_or(0);
-        out.push(LocalSegment { start_cs, end_cs, text });
+        out.push(LocalSegment {
+            start_cs,
+            end_cs,
+            text,
+        });
     }
     Ok(out)
 }
@@ -105,7 +113,11 @@ fn decode_audio(audio: &Path) -> Result<Vec<f32>> {
         .output()
         .with_context(|| "ffmpeg not found — install ffmpeg")?;
     if !out.status.success() {
-        bail!("ffmpeg could not decode {}: {}", audio.display(), String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "ffmpeg could not decode {}: {}",
+            audio.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     let samples: Vec<f32> = out
         .stdout
@@ -142,7 +154,11 @@ pub fn segments_to_srt(segments: &[LocalSegment]) -> String {
         }
         s.push_str(&idx.to_string());
         s.push('\n');
-        s.push_str(&format!("{} --> {}\n", srt_time(seg.start_cs), srt_time(seg.end_cs)));
+        s.push_str(&format!(
+            "{} --> {}\n",
+            srt_time(seg.start_cs),
+            srt_time(seg.end_cs)
+        ));
         s.push_str(t);
         s.push_str("\n\n");
         idx += 1;
@@ -174,9 +190,21 @@ mod tests {
     #[test]
     fn renders_segments() {
         let segs = vec![
-            LocalSegment { start_cs: 0, end_cs: 100, text: " Hello ".into() },
-            LocalSegment { start_cs: 100, end_cs: 200, text: "".into() },
-            LocalSegment { start_cs: 200, end_cs: 300, text: "world".into() },
+            LocalSegment {
+                start_cs: 0,
+                end_cs: 100,
+                text: " Hello ".into(),
+            },
+            LocalSegment {
+                start_cs: 100,
+                end_cs: 200,
+                text: "".into(),
+            },
+            LocalSegment {
+                start_cs: 200,
+                end_cs: 300,
+                text: "world".into(),
+            },
         ];
         assert_eq!(segments_to_text(&segs), "Hello\nworld\n");
         let srt = segments_to_srt(&segs);

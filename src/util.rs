@@ -2,6 +2,32 @@
 
 use std::path::{Path, PathBuf};
 
+/// Derive a filesystem-safe identifier, falling back when no alphanumeric
+/// characters remain.
+pub fn slugify(value: &str) -> String {
+    let normalized: String = value
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = normalized
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "campaign".into()
+    } else {
+        slug
+    }
+}
+
 /// Find an executable using the process PATH, honoring `PATHEXT` on Windows.
 pub fn find_in_path(program: &str) -> Option<PathBuf> {
     let candidate = Path::new(program);
@@ -61,5 +87,12 @@ mod tests {
     #[test]
     fn missing_binary_is_not_found() {
         assert!(find_in_path("sessionsmith-definitely-not-installed").is_none());
+    }
+
+    #[test]
+    fn slugify_normalizes_names_and_uses_a_fallback() {
+        assert_eq!(slugify("Curse of Strahd"), "curse-of-strahd");
+        assert_eq!(slugify("  My___Game!!  "), "my-game");
+        assert_eq!(slugify("---"), "campaign");
     }
 }

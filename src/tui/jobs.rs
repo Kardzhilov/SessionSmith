@@ -60,9 +60,7 @@ pub fn spawn(handle: &tokio::runtime::Handle, tx: UnboundedSender<UiEvent>, req:
         crate::ui::set_event_sink(Some(tx.clone()));
         let res = run(req).await;
         crate::ui::set_event_sink(None);
-        let _ = tx2.send(UiEvent::JobDone(
-            res.map_err(|e| format!("{e:#}")),
-        ));
+        let _ = tx2.send(UiEvent::JobDone(res.map_err(|e| format!("{e:#}"))));
     });
 }
 
@@ -123,9 +121,13 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
             Ok(format!("deleted '{name}'"))
         }
         ModelJob::PrepareAsr(id) => {
-            let spec = crate::asr::find(&id)
-                .ok_or_else(|| anyhow::anyhow!("unknown ASR model '{id}'"))?;
-            crate::ui::header(&format!("Checking {} · {}", spec.engine.label(), spec.display));
+            let spec =
+                crate::asr::find(&id).ok_or_else(|| anyhow::anyhow!("unknown ASR model '{id}'"))?;
+            crate::ui::header(&format!(
+                "Checking {} · {}",
+                spec.engine.label(),
+                spec.display
+            ));
             if spec.engine == crate::asr::AsrEngine::TranscribeCpp {
                 let cache = models::gguf_asr_cache_dir()?;
                 models::download_gguf_asr(&id, &cache).await?;
@@ -149,8 +151,8 @@ async fn run_model(g: &GlobalConfig, job: ModelJob) -> anyhow::Result<String> {
             Ok(format!("{} ready", spec.display))
         }
         ModelJob::DeleteAsr(id) => {
-            let spec = crate::asr::find(&id)
-                .ok_or_else(|| anyhow::anyhow!("unknown ASR model '{id}'"))?;
+            let spec =
+                crate::asr::find(&id).ok_or_else(|| anyhow::anyhow!("unknown ASR model '{id}'"))?;
             match spec.engine {
                 crate::asr::AsrEngine::TranscribeCpp => {
                     let cache = models::gguf_asr_cache_dir()?;
@@ -228,7 +230,11 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
         )
         .await?;
         if !req.campaign.transcription.speakers.is_empty() {
-            let stem = out.txt.file_stem().and_then(|value| value.to_str()).unwrap_or(&sess.name);
+            let stem = out
+                .txt
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&sess.name);
             crate::speakers::apply_to_session(
                 &req.campaign.transcripts_dir(),
                 stem,
@@ -270,7 +276,13 @@ async fn run_notes_only(req: JobRequest) -> anyhow::Result<String> {
     }
     let total = req.transcripts.len();
     for (i, t) in req.transcripts.iter().enumerate() {
-        crate::ui::step(i + 1, total, &t.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+        crate::ui::step(
+            i + 1,
+            total,
+            &t.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
         if !t.exists() {
             crate::ui::warn(&format!("transcript not found: {}", t.display()));
             continue;
@@ -314,7 +326,11 @@ async fn run_doctor(req: JobRequest) -> anyhow::Result<String> {
     ));
 
     let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
-    let asr_model = g.asr.model.clone().unwrap_or_else(|| rec.whisper_model.to_string());
+    let asr_model = g
+        .asr
+        .model
+        .clone()
+        .unwrap_or_else(|| rec.whisper_model.to_string());
     let mut checks = vec![
         deps::check_ffmpeg(),
         deps::check_ffprobe(),

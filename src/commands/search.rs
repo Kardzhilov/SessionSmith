@@ -16,17 +16,27 @@ pub async fn run(args: SearchArgs) -> Result<()> {
             .flatten()
             .flatten()
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("toml"))
+            .filter(|path| {
+                path.extension().and_then(|extension| extension.to_str()) == Some("toml")
+            })
             .collect();
         for path in paths {
             let campaign = commands::load_campaign_or_die(&path)?;
             let name = campaign.campaign.name.clone();
-            hits.extend(index::search(&campaign, &query)?.into_iter().map(|hit| (name.clone(), hit)));
+            hits.extend(
+                index::search(&campaign, &query)?
+                    .into_iter()
+                    .map(|hit| (name.clone(), hit)),
+            );
         }
     } else {
         let campaign = commands::load_campaign_or_die(&commands::resolve_campaign(None)?)?;
         let name = campaign.campaign.name.clone();
-        hits.extend(index::search(&campaign, &query)?.into_iter().map(|hit| (name.clone(), hit)));
+        hits.extend(
+            index::search(&campaign, &query)?
+                .into_iter()
+                .map(|hit| (name.clone(), hit)),
+        );
     }
     if hits.is_empty() {
         ui::warn("no matches (generate notes first, or the index may be empty)");
@@ -40,7 +50,12 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     };
     for (campaign, hit) in &hits {
         let row = if args.all {
-            vec![campaign.clone(), hit.session.clone(), hit.kind.clone(), hit.snippet.clone()]
+            vec![
+                campaign.clone(),
+                hit.session.clone(),
+                hit.kind.clone(),
+                hit.snippet.clone(),
+            ]
         } else {
             vec![hit.session.clone(), hit.kind.clone(), hit.snippet.clone()]
         };

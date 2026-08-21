@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
-const AUDIO_EXTS: &[&str] = &["wav", "mp3", "m4a", "flac", "ogg", "opus", "aac", "wma", "webm"];
+const AUDIO_EXTS: &[&str] = &[
+    "wav", "mp3", "m4a", "flac", "ogg", "opus", "aac", "wma", "webm",
+];
 
 #[derive(Debug, Clone)]
 pub struct AudioFile {
@@ -20,7 +22,10 @@ pub struct AudioFile {
 
 impl AudioFile {
     pub fn stem(&self) -> String {
-        self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+        self.path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -30,14 +35,22 @@ pub fn scan(dir: &Path, transcripts_dir: &Path) -> Result<Vec<AudioFile>> {
         return Ok(files);
     }
     for entry in WalkDir::new(dir).follow_links(true).into_iter().flatten() {
-        if entry.path().components().any(|part| part.as_os_str() == "merged") {
+        if entry
+            .path()
+            .components()
+            .any(|part| part.as_os_str() == "merged")
+        {
             continue;
         }
         if !entry.file_type().is_file() {
             continue;
         }
         let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
         if !AUDIO_EXTS.iter().any(|&e| e == ext) {
             continue;
         }
@@ -46,7 +59,10 @@ pub fn scan(dir: &Path, transcripts_dir: &Path) -> Result<Vec<AudioFile>> {
             Err(_) => continue,
         };
         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         let transcript_path = transcripts_dir.join(format!("{stem}.txt"));
         files.push(AudioFile {
             path: path.to_path_buf(),
@@ -68,9 +84,15 @@ pub fn find_by_stem(dir: &Path, stem: &str) -> Option<PathBuf> {
         .flatten()
         .filter(|entry| {
             entry.file_type().is_file()
-                && !entry.path().components().any(|part| part.as_os_str() == "merged")
+                && !entry
+                    .path()
+                    .components()
+                    .any(|part| part.as_os_str() == "merged")
                 && entry.path().file_stem().and_then(|value| value.to_str()) == Some(stem)
-                && entry.path().extension().and_then(|value| value.to_str())
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|value| value.to_str())
                     .map(|value| AUDIO_EXTS.iter().any(|ext| ext.eq_ignore_ascii_case(value)))
                     .unwrap_or(false)
         })
@@ -81,16 +103,27 @@ pub fn find_by_stem(dir: &Path, stem: &str) -> Option<PathBuf> {
 /// Probe duration via ffprobe. Returns None if ffprobe is unavailable or fails.
 pub fn probe_duration(path: &Path) -> Option<f64> {
     let out = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration",
-               "-of", "default=noprint_wrappers=1:nokey=1"])
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
         .arg(path)
-        .output().ok()?;
-    if !out.status.success() { return None; }
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
 pub fn enrich_durations(files: &mut [AudioFile]) {
-    let pending: Vec<_> = files.iter().enumerate()
+    let pending: Vec<_> = files
+        .iter()
+        .enumerate()
         .filter(|(_, file)| file.duration_secs.is_none())
         .map(|(index, file)| (index, file.path.clone()))
         .collect();
@@ -111,7 +144,9 @@ pub fn enrich_durations(files: &mut [AudioFile]) {
             let next = &next;
             scope.spawn(move || loop {
                 let job = next.fetch_add(1, Ordering::Relaxed);
-                let Some((index, path)) = pending.get(job) else { break };
+                let Some((index, path)) = pending.get(job) else {
+                    break;
+                };
                 let _ = tx.send((*index, probe_duration(path)));
             });
         }
@@ -130,8 +165,11 @@ pub fn human_duration(secs: Option<f64>) -> String {
             let h = total / 3600;
             let m = (total % 3600) / 60;
             let sec = total % 60;
-            if h > 0 { format!("{h:02}:{m:02}:{sec:02}") }
-            else { format!("{m:02}:{sec:02}") }
+            if h > 0 {
+                format!("{h:02}:{m:02}:{sec:02}")
+            } else {
+                format!("{m:02}:{sec:02}")
+            }
         }
     }
 }
@@ -140,10 +178,15 @@ pub fn human_age(t: SystemTime) -> String {
     match SystemTime::now().duration_since(t) {
         Ok(d) => {
             let s = d.as_secs();
-            if s < 60 { format!("{s}s ago") }
-            else if s < 3600 { format!("{}m ago", s / 60) }
-            else if s < 86400 { format!("{}h ago", s / 3600) }
-            else { format!("{}d ago", s / 86400) }
+            if s < 60 {
+                format!("{s}s ago")
+            } else if s < 3600 {
+                format!("{}m ago", s / 60)
+            } else if s < 86400 {
+                format!("{}h ago", s / 3600)
+            } else {
+                format!("{}d ago", s / 86400)
+            }
         }
         Err(_) => "future".into(),
     }
@@ -165,7 +208,8 @@ mod tests {
         for (i, n) in ["old.wav", "new.wav"].iter().enumerate() {
             let p = audio_dir.join(n);
             std::fs::write(&p, b"x").unwrap();
-            let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 + i as u64 * 1000);
+            let t = SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_000_000 + i as u64 * 1000);
             if let Ok(f) = std::fs::File::options().write(true).open(&p) {
                 let _ = f.set_modified(t);
             }
@@ -185,7 +229,12 @@ mod tests {
         let newest = nested.join("session.flac");
         std::fs::write(&old, b"old").unwrap();
         std::fs::write(&newest, b"new").unwrap();
-        std::fs::File::options().write(true).open(&old).unwrap().set_modified(SystemTime::UNIX_EPOCH).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
 
         assert_eq!(find_by_stem(tmp.path(), "session"), Some(newest));
     }

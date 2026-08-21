@@ -86,9 +86,7 @@ pub fn parse(text: &str) -> CampaignLog {
         if lines[i].trim_start().starts_with("## Ongoing Threads") {
             i += 1;
             let mut body = Vec::new();
-            while i < lines.len()
-                && !lines[i].trim_start().starts_with("<!-- ss:session")
-            {
+            while i < lines.len() && !lines[i].trim_start().starts_with("<!-- ss:session") {
                 body.push(lines[i]);
                 i += 1;
             }
@@ -149,7 +147,10 @@ fn parse_marker_attrs(s: &str) -> (String, String) {
 fn parse_title(header: &str) -> String {
     let h = header.trim_start_matches('#').trim();
     // The em dash is the heading separator; hyphens are valid title text.
-    let after = h.split_once('—').map(|(_, title)| title.trim()).unwrap_or(h);
+    let after = h
+        .split_once('—')
+        .map(|(_, title)| title.trim())
+        .unwrap_or(h);
     // Drop a trailing "(date)".
     let title = if let Some(pos) = after.rfind('(') {
         after[..pos].trim()
@@ -181,7 +182,10 @@ impl CampaignLog {
 
     /// The body of the block for `id`, if present.
     pub fn block_body(&self, id: &str) -> Option<&str> {
-        self.blocks.iter().find(|b| b.id == id).map(|b| b.body.as_str())
+        self.blocks
+            .iter()
+            .find(|b| b.id == id)
+            .map(|b| b.body.as_str())
     }
 
     /// Render the clean, human-readable markdown document (no machine markers).
@@ -230,7 +234,12 @@ mod tests {
             threads: "- Find the bell".into(),
             ..Default::default()
         };
-        log.upsert("DnD1", "2026-01-01", "The Bell".into(), "They found it.".into());
+        log.upsert(
+            "DnD1",
+            "2026-01-01",
+            "The Bell".into(),
+            "They found it.".into(),
+        );
         let text = log.render();
         // No machine markers leak into the human-facing markdown.
         assert!(!text.contains("<!-- ss:session"), "markers leaked: {text}");
@@ -245,7 +254,12 @@ mod tests {
             threads: "- open thread".into(),
             ..Default::default()
         };
-        log.upsert("DnD1", "2026-01-01", "The Bell".into(), "They found it.".into());
+        log.upsert(
+            "DnD1",
+            "2026-01-01",
+            "The Bell".into(),
+            "They found it.".into(),
+        );
         let json = serde_json::to_string(&log).unwrap();
         let back: CampaignLog = serde_json::from_str(&json).unwrap();
         assert_eq!(back.blocks.len(), 1);
@@ -271,5 +285,26 @@ mod tests {
             parse_title("## Session 3 — The Ice-Bell (2026-01-01)"),
             "The Ice-Bell"
         );
+    }
+
+    #[test]
+    fn persist_writes_both_artifacts_without_temporary_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut log = CampaignLog::default();
+        log.upsert(
+            "session-1",
+            "2026-08-21",
+            "A Title".into(),
+            "A body.".into(),
+        );
+
+        persist(directory.path(), &log).unwrap();
+
+        assert!(state_path(directory.path()).exists());
+        assert!(md_path(directory.path()).exists());
+        assert!(!state_path(directory.path())
+            .with_extension("json.tmp")
+            .exists());
+        assert!(!md_path(directory.path()).with_extension("md.tmp").exists());
     }
 }

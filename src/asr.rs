@@ -239,7 +239,13 @@ fn prepared_dir() -> Option<std::path::PathBuf> {
 
 fn marker_name(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use std::io::Write;
 
 use sessionsmith::cli::{Cli, Command};
 use sessionsmith::commands;
@@ -15,6 +16,7 @@ async fn main() -> Result<()> {
         .with_target(false)
         .compact()
         .init();
+    install_crash_report_hook();
 
     // Install Ctrl-C handler: kills any running ASR child process first so
     // VRAM is freed immediately, then exits.
@@ -69,4 +71,57 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn install_crash_report_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        original(info);
+        sessionsmith::transcribe::kill_current_asr();
+        let report = crash_report(info);
+        eprintln!("\n{report}");
+        if let Some(path) = write_crash_report(&report) {
+            eprintln!("Crash report saved to {}", path.display());
+        }
+    }));
+}
+
+fn crash_report(info: &std::panic::PanicHookInfo<'_>) -> String {
+    format!(
+        "SessionSmith crashed.\n\n{info}\n\nVersion: {}\nPlatform: {}-{}\nRe-run with RUST_BACKTRACE=1 and report this output at {}.",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        env!("CARGO_PKG_REPOSITORY"),
+    )
+}
+
+fn write_crash_report(report: &str) -> Option<std::path::PathBuf> {
+    let directory = dirs::cache_dir()?.join("sessionsmith");
+    std::fs::create_dir_all(&directory).ok()?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let path = directory.join(format!("crash-{timestamp}.log"));
+    let mut file = std::fs::File::create(&path).ok()?;
+    file.write_all(report.as_bytes()).ok()?;
+    file.write_all(b"\n").ok()?;
+    Some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crash_log_writer_persists_the_report() {
+        let report = "test crash report";
+        let path = write_crash_report(report).expect("cache directory should be available");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "test crash report\n"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 }

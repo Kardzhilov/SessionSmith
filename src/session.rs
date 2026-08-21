@@ -28,14 +28,20 @@ pub struct SessionInput {
 
 /// Convert a list of `AudioFile` selections into `SessionInput` values,
 /// prompting interactively when more than one file is selected.
-pub async fn build_sessions(selected: Vec<AudioFile>, g: &GlobalConfig) -> Result<Vec<SessionInput>> {
+pub async fn build_sessions(
+    selected: Vec<AudioFile>,
+    g: &GlobalConfig,
+) -> Result<Vec<SessionInput>> {
     if selected.is_empty() {
         return Err(anyhow!("no files selected"));
     }
     if selected.len() == 1 {
         let f = selected.into_iter().next().unwrap();
         let name = f.stem();
-        return Ok(vec![SessionInput { files: vec![f.path], name }]);
+        return Ok(vec![SessionInput {
+            files: vec![f.path],
+            name,
+        }]);
     }
 
     let as_one = Confirm::new(&format!(
@@ -47,8 +53,12 @@ pub async fn build_sessions(selected: Vec<AudioFile>, g: &GlobalConfig) -> Resul
     .prompt()?;
 
     if !as_one {
-        return Ok(selected.into_iter()
-            .map(|f| SessionInput { files: vec![f.path.clone()], name: f.stem() })
+        return Ok(selected
+            .into_iter()
+            .map(|f| SessionInput {
+                files: vec![f.path.clone()],
+                name: f.stem(),
+            })
             .collect());
     }
 
@@ -81,7 +91,8 @@ pub async fn build_sessions(selected: Vec<AudioFile>, g: &GlobalConfig) -> Resul
         _ => paths,
     };
 
-    let default_name = ordered.first()
+    let default_name = ordered
+        .first()
         .and_then(|p| p.file_stem())
         .map(|s| format!("{}_combined", s.to_string_lossy()))
         .unwrap_or_else(|| "session_combined".to_string());
@@ -90,7 +101,10 @@ pub async fn build_sessions(selected: Vec<AudioFile>, g: &GlobalConfig) -> Resul
         .with_default(&default_name)
         .prompt()?;
 
-    Ok(vec![SessionInput { files: ordered, name }])
+    Ok(vec![SessionInput {
+        files: ordered,
+        name,
+    }])
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +122,10 @@ fn manual_reorder(files: Vec<PathBuf>, meta: &[AudioFile]) -> Result<Vec<PathBuf
             crate::audio::human_duration(m.duration_secs),
         ));
     }
-    let hint = (1..=files.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(" ");
+    let hint = (1..=files.len())
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
     let input = Text::new(&format!(
         "Enter playback order as space-separated numbers 1–{} (e.g. \"{hint}\"):",
         files.len()
@@ -118,7 +135,8 @@ fn manual_reorder(files: Vec<PathBuf>, meta: &[AudioFile]) -> Result<Vec<PathBuf
 
     let indices: Vec<usize> = {
         let mut seen = HashSet::new();
-        input.split_whitespace()
+        input
+            .split_whitespace()
             .filter_map(|s| s.parse::<usize>().ok())
             .filter(|&i| i >= 1 && i <= files.len())
             .map(|i| i - 1)
@@ -129,7 +147,9 @@ fn manual_reorder(files: Vec<PathBuf>, meta: &[AudioFile]) -> Result<Vec<PathBuf
     if indices.len() != files.len() {
         anyhow::bail!(
             "expected {} unique indices (1–{}), got {}. Aborting.",
-            files.len(), files.len(), indices.len()
+            files.len(),
+            files.len(),
+            indices.len()
         );
     }
     Ok(indices.into_iter().map(|i| files[i].clone()).collect())
@@ -163,7 +183,10 @@ async fn ai_sort_by_content(
     let cache = crate::models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
     if let Ok(p) = crate::models::whisper_path(fast_model, &cache) {
         if !p.exists() {
-            ui::info(&format!("downloading '{}' model for snippet ordering…", fast_model));
+            ui::info(&format!(
+                "downloading '{}' model for snippet ordering…",
+                fast_model
+            ));
             crate::models::download_whisper(fast_model, &cache).await?;
         }
     }
@@ -183,7 +206,10 @@ async fn ai_sort_by_content(
         vad: false,
     };
 
-    ui::header(&format!("Transcribing first 90 s of {} files for ordering…", files.len()));
+    ui::header(&format!(
+        "Transcribing first 90 s of {} files for ordering…",
+        files.len()
+    ));
 
     let mut snippets: Vec<String> = Vec::new();
     for (i, file) in files.iter().enumerate() {
@@ -202,7 +228,10 @@ async fn ai_sort_by_content(
             .unwrap_or(false);
 
         if !ok {
-            ui::warn(&format!("could not extract snippet from {}", file.display()));
+            ui::warn(&format!(
+                "could not extract snippet from {}",
+                file.display()
+            ));
             snippets.push(String::new());
             continue;
         }
@@ -230,8 +259,16 @@ async fn ai_sort_by_content(
     // Show snippet previews.
     println!();
     for (i, s) in snippets.iter().enumerate() {
-        let name = meta[i].path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let preview = if s.is_empty() { "(no text)" } else { s.as_str() };
+        let name = meta[i]
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let preview = if s.is_empty() {
+            "(no text)"
+        } else {
+            s.as_str()
+        };
         ui::info(&format!(
             "[{}] {} →  {}",
             i + 1,
@@ -242,12 +279,21 @@ async fn ai_sort_by_content(
 
     // Ask the LLM to determine the chronological order.
     let backend = crate::llm::build(g)?;
-    let model_name = g.backend.model.clone()
+    let model_name = g
+        .backend
+        .model
+        .clone()
         .ok_or_else(|| anyhow!("no LLM model configured for AI sort"))?;
 
-    let snippet_text = snippets.iter().enumerate()
+    let snippet_text = snippets
+        .iter()
+        .enumerate()
         .map(|(i, t)| {
-            let content = if t.is_empty() { "(no content)" } else { t.as_str() };
+            let content = if t.is_empty() {
+                "(no content)"
+            } else {
+                t.as_str()
+            };
             format!("File {}: {}", i + 1, content)
         })
         .collect::<Vec<_>>()
@@ -305,9 +351,16 @@ async fn ai_sort_by_content(
     if ordered_indices.len() == files.len() {
         ui::ok(&format!(
             "AI order: {}",
-            ordered_indices.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(" → ")
+            ordered_indices
+                .iter()
+                .map(|i| (i + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(" → ")
         ));
-        Ok(ordered_indices.into_iter().map(|i| files[i].clone()).collect())
+        Ok(ordered_indices
+            .into_iter()
+            .map(|i| files[i].clone())
+            .collect())
     } else {
         ui::warn(&format!(
             "LLM response could not be parsed ({:?}) — keeping current order",

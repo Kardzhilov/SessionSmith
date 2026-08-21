@@ -14,7 +14,11 @@ pub struct DepStatus {
 
 pub fn check_ffmpeg() -> DepStatus {
     match which("ffmpeg") {
-        Some(p) => DepStatus { name: "ffmpeg".into(), ok: true, detail: p.display().to_string() },
+        Some(p) => DepStatus {
+            name: "ffmpeg".into(),
+            ok: true,
+            detail: p.display().to_string(),
+        },
         None => DepStatus {
             name: "ffmpeg".into(),
             ok: false,
@@ -25,7 +29,11 @@ pub fn check_ffmpeg() -> DepStatus {
 
 pub fn check_ffprobe() -> DepStatus {
     match which("ffprobe") {
-        Some(p) => DepStatus { name: "ffprobe".into(), ok: true, detail: p.display().to_string() },
+        Some(p) => DepStatus {
+            name: "ffprobe".into(),
+            ok: true,
+            detail: p.display().to_string(),
+        },
         None => DepStatus {
             name: "ffprobe".into(),
             ok: false,
@@ -48,7 +56,8 @@ pub fn check_uv() -> DepStatus {
             name: "uv (advanced ASR engines)".into(),
             ok: false,
             detail: "optional; enables Parakeet/Canary/Voxtral/faster-whisper — \
-                     curl -LsSf https://astral.sh/uv/install.sh | sh".into(),
+                     curl -LsSf https://astral.sh/uv/install.sh | sh"
+                .into(),
         },
     }
 }
@@ -58,7 +67,11 @@ pub fn check_whisper_cli(custom: Option<&Path>) -> DepStatus {
     if let Some(p) = custom {
         if p.exists() {
             let label = asr_label(p);
-            return DepStatus { name: label, ok: true, detail: p.display().to_string() };
+            return DepStatus {
+                name: label,
+                ok: true,
+                detail: p.display().to_string(),
+            };
         }
     }
     // The in-process whisper-rs engine is available whenever compiled in.
@@ -74,17 +87,29 @@ pub fn check_whisper_cli(custom: Option<&Path>) -> DepStatus {
     #[allow(unreachable_code)]
     for candidate in ["whisper-cli", "whisper.cpp", "main"] {
         if let Some(p) = which(candidate) {
-            return DepStatus { name: "asr (whisper-cli)".into(), ok: true, detail: p.display().to_string() };
+            return DepStatus {
+                name: "asr (whisper-cli)".into(),
+                ok: true,
+                detail: p.display().to_string(),
+            };
         }
     }
     // whisperx in project .venv — no external install required
     let venv_wx = Path::new(".venv/bin/whisperx");
     if venv_wx.exists() {
-        return DepStatus { name: "asr (whisperx)".into(), ok: true, detail: venv_wx.display().to_string() };
+        return DepStatus {
+            name: "asr (whisperx)".into(),
+            ok: true,
+            detail: venv_wx.display().to_string(),
+        };
     }
     // whisperx anywhere on PATH
     if let Some(p) = which("whisperx") {
-        return DepStatus { name: "asr (whisperx)".into(), ok: true, detail: p.display().to_string() };
+        return DepStatus {
+            name: "asr (whisperx)".into(),
+            ok: true,
+            detail: p.display().to_string(),
+        };
     }
     DepStatus {
         name: "asr".into(),
@@ -95,7 +120,11 @@ pub fn check_whisper_cli(custom: Option<&Path>) -> DepStatus {
 
 fn asr_label(p: &Path) -> String {
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if name.contains("whisperx") { "asr (whisperx)".into() } else { "asr (whisper-cli)".into() }
+    if name.contains("whisperx") {
+        "asr (whisperx)".into()
+    } else {
+        "asr (whisper-cli)".into()
+    }
 }
 
 pub fn check_whisper_model(model: &str, cache_dir: &Path) -> DepStatus {
@@ -108,7 +137,10 @@ pub fn check_whisper_model(model: &str, cache_dir: &Path) -> DepStatus {
         Ok(p) => DepStatus {
             name: format!("whisper model: {model}"),
             ok: false,
-            detail: format!("missing at {} — run `sessionsmith models pull {model}`", p.display()),
+            detail: format!(
+                "missing at {} — run `sessionsmith models pull {model}`",
+                p.display()
+            ),
         },
         Err(e) => DepStatus {
             name: format!("whisper model: {model}"),
@@ -122,39 +154,64 @@ pub async fn check_backend(g: &GlobalConfig) -> DepStatus {
     let b = &g.backend;
     let label = format!("backend: {}", b.kind);
     match b.kind.as_str() {
-        "ollama" => check_ollama(b).await.map(|d| DepStatus { name: label.clone(), ok: true, detail: d })
-            .unwrap_or_else(|e| DepStatus { name: label, ok: false, detail: e }),
-        "openai" => check_openai_like(b, g).await.map(|d| DepStatus { name: label.clone(), ok: true, detail: d })
-            .unwrap_or_else(|e| DepStatus { name: label, ok: false, detail: e }),
-        "anthropic" => check_anthropic(b, g).await.map(|d| DepStatus { name: label.clone(), ok: true, detail: d })
-            .unwrap_or_else(|e| DepStatus { name: label, ok: false, detail: e }),
-        other => DepStatus { name: label, ok: false, detail: format!("unknown backend '{other}'") },
+        "ollama" => check_ollama(b)
+            .await
+            .map(|d| DepStatus {
+                name: label.clone(),
+                ok: true,
+                detail: d,
+            })
+            .unwrap_or_else(|e| DepStatus {
+                name: label,
+                ok: false,
+                detail: e,
+            }),
+        "openai" => check_openai_like(b, g)
+            .await
+            .map(|d| DepStatus {
+                name: label.clone(),
+                ok: true,
+                detail: d,
+            })
+            .unwrap_or_else(|e| DepStatus {
+                name: label,
+                ok: false,
+                detail: e,
+            }),
+        "anthropic" => check_anthropic(b, g)
+            .await
+            .map(|d| DepStatus {
+                name: label.clone(),
+                ok: true,
+                detail: d,
+            })
+            .unwrap_or_else(|e| DepStatus {
+                name: label,
+                ok: false,
+                detail: e,
+            }),
+        other => DepStatus {
+            name: label,
+            ok: false,
+            detail: format!("unknown backend '{other}'"),
+        },
     }
 }
 
 async fn check_ollama(b: &BackendConfig) -> std::result::Result<String, String> {
-    let base = b.base_url.clone().unwrap_or_else(|| "http://localhost:11434".into());
+    let base = b
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:11434".into());
     let url = format!("{}/api/tags", base.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
-        .build().map_err(|e| e.to_string())?;
-    let resp = client.get(&url).send().await.map_err(|e| format!("unreachable: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    Ok(base)
-}
-
-async fn check_openai_like(b: &BackendConfig, g: &GlobalConfig) -> std::result::Result<String, String> {
-    let base = b.base_url.clone().unwrap_or_else(|| "https://api.openai.com".into());
-    let key = g.resolved_api_key().unwrap_or_default();
-    if key.is_empty() {
-        return Err("missing api_key in global config (or unset env var)".into());
-    }
-    let url = format!("{}/v1/models", base.trim_end_matches('/'));
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build()
+        .build()
         .map_err(|e| e.to_string())?;
-    let resp = client.get(&url).bearer_auth(&key).send().await
+    let resp = client
+        .get(&url)
+        .send()
+        .await
         .map_err(|e| format!("unreachable: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
@@ -162,19 +219,58 @@ async fn check_openai_like(b: &BackendConfig, g: &GlobalConfig) -> std::result::
     Ok(base)
 }
 
-async fn check_anthropic(b: &BackendConfig, g: &GlobalConfig) -> std::result::Result<String, String> {
-    let base = b.base_url.clone().unwrap_or_else(|| "https://api.anthropic.com".into());
+async fn check_openai_like(
+    b: &BackendConfig,
+    g: &GlobalConfig,
+) -> std::result::Result<String, String> {
+    let base = b
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "https://api.openai.com".into());
     let key = g.resolved_api_key().unwrap_or_default();
     if key.is_empty() {
         return Err("missing api_key in global config (or unset env var)".into());
     }
     let url = format!("{}/v1/models", base.trim_end_matches('/'));
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build()
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
         .map_err(|e| e.to_string())?;
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
+        .bearer_auth(&key)
+        .send()
+        .await
+        .map_err(|e| format!("unreachable: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(base)
+}
+
+async fn check_anthropic(
+    b: &BackendConfig,
+    g: &GlobalConfig,
+) -> std::result::Result<String, String> {
+    let base = b
+        .base_url
+        .clone()
+        .unwrap_or_else(|| "https://api.anthropic.com".into());
+    let key = g.resolved_api_key().unwrap_or_default();
+    if key.is_empty() {
+        return Err("missing api_key in global config (or unset env var)".into());
+    }
+    let url = format!("{}/v1/models", base.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&url)
         .header("x-api-key", &key)
         .header("anthropic-version", "2023-06-01")
-        .send().await
+        .send()
+        .await
         .map_err(|e| format!("unreachable: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
@@ -191,8 +287,7 @@ pub fn ensure_dirs() -> Result<()> {
     // are published and created (not just the defaults).
     let _ = crate::config::GlobalConfig::load_or_default();
     for d in [crate::config::audio_dir(), crate::config::output_dir()] {
-        std::fs::create_dir_all(&d)
-            .with_context(|| format!("creating {}", d.display()))?;
+        std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
     }
     Ok(())
 }

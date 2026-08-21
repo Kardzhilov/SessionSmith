@@ -59,8 +59,12 @@ impl Artifact {
 }
 
 pub const ALL_ARTIFACTS: &[Artifact] = &[
-    Artifact::Bullets, Artifact::DmNotes, Artifact::Recap,
-    Artifact::Summary, Artifact::Story, Artifact::Quotes,
+    Artifact::Bullets,
+    Artifact::DmNotes,
+    Artifact::Recap,
+    Artifact::Summary,
+    Artifact::Story,
+    Artifact::Quotes,
 ];
 
 const BULLETS_BASE: &str = "\
@@ -148,23 +152,13 @@ transcript verbatim, do not include it at all.
 chatter, filler and rules talk.
 - 8–20 quotes, in chronological order. No preamble, no headers, nothing else.";
 
-const CAMPAIGN_LOG_BASE: &str = "\
-You are maintaining a long-running campaign log. You will be given the current log \
-(or an empty slate) and a new session summary. Produce the COMPLETE updated log:
-
-- Keep a `## Ongoing Threads` block as the VERY FIRST section, updated to reflect what \
-is now open vs. resolved (add, edit or remove bullets as appropriate).
-- Below Ongoing Threads, list the `## Session N — …` sections in REVERSE chronological \
-order: the most recent session directly under Ongoing Threads, then progressively older \
-sessions, with the oldest at the very bottom.
-- Add a section for this new session with the next-highest index, its date and a short \
-title, placed immediately below Ongoing Threads (above all older sessions).
-- Preserve the content of every existing session section; you may only reorder them so \
-that the newest is on top and the oldest is at the bottom.
-
-Output the entire updated markdown file. No preamble.";
-
-fn compose_system(base: &str, campaign: &CampaignConfig, preset: &Preset, extra: &str, strip_roster: bool) -> String {
+fn compose_system(
+    base: &str,
+    campaign: &CampaignConfig,
+    preset: &Preset,
+    extra: &str,
+    strip_roster: bool,
+) -> String {
     let mut s = String::with_capacity(base.len() + 1024);
     s.push_str(base);
     s.push_str("\n\n--- Campaign context ---\n");
@@ -200,7 +194,8 @@ fn compose_system(base: &str, campaign: &CampaignConfig, preset: &Preset, extra:
 
 pub fn system_for(artifact: Artifact, campaign: &CampaignConfig, preset: &Preset) -> String {
     let overrides = &campaign.prompts;
-    let base = artifact_override(artifact, overrides).unwrap_or_else(|| artifact_base(artifact).to_string());
+    let base = artifact_override(artifact, overrides)
+        .unwrap_or_else(|| artifact_base(artifact).to_string());
     // Strip the character roster from ALL artifact prompts.  The roster maps
     // player names to character names; the LLM uses that mapping to substitute
     // names it sees in the transcript (e.g. "Emilia" → "Fatethrial") even when
@@ -226,12 +221,6 @@ The transcript is machine-generated speech-to-text and may contain spelling, \
 homophone, or word-boundary errors — especially for invented names of people, \
 places, spells, and items. Infer the intended word from context and use a \
 consistent spelling for each proper noun throughout.";
-
-pub fn campaign_log_system(campaign: &CampaignConfig, preset: &Preset) -> String {
-    let base = campaign.prompts.campaign_log.clone()
-        .unwrap_or_else(|| CAMPAIGN_LOG_BASE.to_string());
-    compose_system(&base, campaign, preset, "", false)
-}
 
 /// System prompt for a single session's campaign-log entry. Deterministic
 /// assembly places it under a stem-keyed marker, so this only produces the
@@ -279,9 +268,7 @@ pub fn user_ongoing_threads(current_threads: &str, latest_session: &str) -> Stri
     } else {
         current_threads.trim()
     };
-    format!(
-        "Current ongoing threads:\n\n{cur}\n\n---\n\nNewest session recap:\n\n{latest_session}"
-    )
+    format!("Current ongoing threads:\n\n{cur}\n\n---\n\nNewest session recap:\n\n{latest_session}")
 }
 
 fn artifact_base(a: Artifact) -> &'static str {
@@ -391,26 +378,35 @@ pub fn user_quotes_from_transcript(transcript: &str) -> String {
     format!("Timestamped transcript (lines prefixed with [HH:MM:SS]):\n\n{transcript}")
 }
 
-pub fn user_campaign_log_merge(existing: &str, summary: &str, session_date: &str, session_title: &str) -> String {
-    format!(
-        "Existing campaign log (may be empty):\n\n{existing}\n\n---\n\nNew session date: {session_date}\nSuggested session title: {session_title}\n\nNew session summary:\n\n{summary}"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Campaign, CampaignConfig, OutputsConfig, Player, PromptOverrides, SystemRef};
+    use crate::config::{
+        Campaign, CampaignConfig, OutputsConfig, Player, PromptOverrides, SystemRef,
+    };
     use crate::presets;
 
     fn camp() -> CampaignConfig {
         CampaignConfig {
-            campaign: Campaign { name: "Test".into(), gm: "Mike".into(), setting: "Damasus".into(), notes: String::new() },
+            campaign: Campaign {
+                name: "Test".into(),
+                gm: "Mike".into(),
+                setting: "Damasus".into(),
+                notes: String::new(),
+            },
             backend: Default::default(),
             asr: Default::default(),
-            players: vec![Player { player: "Bob".into(), character: "Drokel".into(), ancestry: "Dwarf".into(), class: "Fighter".into() }],
+            players: vec![Player {
+                player: "Bob".into(),
+                character: "Drokel".into(),
+                ancestry: "Dwarf".into(),
+                class: "Fighter".into(),
+            }],
             transcription: crate::config::TranscriptionConfig::default(),
-            system: SystemRef { preset: "dnd5e".into(), overrides: "We use milestone XP.".into() },
+            system: SystemRef {
+                preset: "dnd5e".into(),
+                overrides: "We use milestone XP.".into(),
+            },
             outputs: OutputsConfig::default(),
             prompts: PromptOverrides::default(),
         }
@@ -421,7 +417,10 @@ mod tests {
         let c = camp();
         let p = presets::load("dnd5e").unwrap();
         let s = system_for(Artifact::DmNotes, &c, &p);
-        assert!(!s.contains("Drokel"), "character roster is stripped from all artifact prompts");
+        assert!(
+            !s.contains("Drokel"),
+            "character roster is stripped from all artifact prompts"
+        );
         assert!(s.contains("D&D 5e"));
         assert!(s.contains("milestone XP"));
         assert!(s.contains("HP"));

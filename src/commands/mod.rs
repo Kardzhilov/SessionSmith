@@ -26,17 +26,24 @@ use crate::config::CampaignConfig;
 /// 3. `campaign.toml` in cwd (backward compat).
 /// 4. Error with actionable hint.
 pub fn resolve_campaign(override_path: Option<&PathBuf>) -> Result<PathBuf> {
-    if let Some(p) = override_path { return Ok(p.clone()); }
-    if let Ok(p) = std::env::var("SESSIONSMITH_CAMPAIGN") { return Ok(PathBuf::from(p)); }
+    if let Some(p) = override_path {
+        return Ok(p.clone());
+    }
+    if let Ok(p) = std::env::var("SESSIONSMITH_CAMPAIGN") {
+        return Ok(PathBuf::from(p));
+    }
 
     let campaigns_dir = PathBuf::from("campaigns");
     if campaigns_dir.is_dir() {
         let mut options: Vec<PathBuf> = std::fs::read_dir(&campaigns_dir)
-            .into_iter().flatten().flatten()
+            .into_iter()
+            .flatten()
+            .flatten()
             .map(|e| e.path())
             .filter(|p| {
                 p.extension().and_then(|e| e.to_str()) == Some("toml")
-                    && !p.file_name()
+                    && !p
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .map(|n| n.starts_with('.'))
                         .unwrap_or(true)
@@ -47,8 +54,14 @@ pub fn resolve_campaign(override_path: Option<&PathBuf>) -> Result<PathBuf> {
             0 => { /* fall through */ }
             1 => return Ok(options.remove(0)),
             _ => {
-                let labels: Vec<String> = options.iter()
-                    .map(|p| p.file_stem().unwrap_or_default().to_string_lossy().to_string())
+                let labels: Vec<String> = options
+                    .iter()
+                    .map(|p| {
+                        p.file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    })
                     .collect();
                 let chosen = inquire::Select::new("Select campaign:", labels.clone())
                     .prompt()
@@ -61,7 +74,9 @@ pub fn resolve_campaign(override_path: Option<&PathBuf>) -> Result<PathBuf> {
 
     // Backward compat: root campaign.toml
     let root = PathBuf::from("campaign.toml");
-    if root.exists() { return Ok(root); }
+    if root.exists() {
+        return Ok(root);
+    }
 
     Err(anyhow!(
         "no campaign config found.\n  \
@@ -81,12 +96,5 @@ pub fn load_campaign_or_die(path: &std::path::Path) -> Result<CampaignConfig> {
 
 /// Derive a filesystem-safe slug from a campaign name.
 pub fn slugify(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
+    crate::util::slugify(name)
 }

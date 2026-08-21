@@ -49,12 +49,19 @@ fn bridge_dir() -> Result<PathBuf> {
 fn hf_cache_model_dir(repo: &str) -> Option<PathBuf> {
     let cache = dirs::cache_dir()?;
     let safe = repo.replace('/', "--");
-    Some(cache.join("huggingface").join("hub").join(format!("models--{safe}")))
+    Some(
+        cache
+            .join("huggingface")
+            .join("hub")
+            .join(format!("models--{safe}")),
+    )
 }
 
 fn bridge_model_cache(engine: AsrEngine, model_ref: &str) -> Option<PathBuf> {
     match engine {
-        AsrEngine::FasterWhisper => hf_cache_model_dir(&format!("Systran/faster-whisper-{model_ref}")),
+        AsrEngine::FasterWhisper => {
+            hf_cache_model_dir(&format!("Systran/faster-whisper-{model_ref}"))
+        }
         AsrEngine::Parakeet | AsrEngine::CanaryQwen | AsrEngine::Voxtral => {
             hf_cache_model_dir(model_ref)
         }
@@ -68,8 +75,7 @@ pub fn delete_asr_cache(engine: AsrEngine, model_ref: &str) -> Result<()> {
     let (script_name, _) = script_for(engine)?;
     let script = bridge_dir()?.join(script_name);
     if script.exists() {
-        std::fs::remove_file(&script)
-            .with_context(|| format!("deleting {}", script.display()))?;
+        std::fs::remove_file(&script).with_context(|| format!("deleting {}", script.display()))?;
     }
     if let Some(model_dir) = bridge_model_cache(engine, model_ref) {
         if model_dir.exists() {
@@ -285,8 +291,17 @@ fn stream_uv(engine: AsrEngine, cmd: &mut Command) -> Result<()> {
         // message and/or a C++ abort message (`what(): ...`, `RuntimeError`,
         // CUDA errors) rather than the low-level stack frames, which are noise.
         let keywords = [
-            "error", "exception", "traceback", "runtimeerror", "valueerror",
-            "what():", "terminate called", "cuda", "assert", "oom", "out of memory",
+            "error",
+            "exception",
+            "traceback",
+            "runtimeerror",
+            "valueerror",
+            "what():",
+            "terminate called",
+            "cuda",
+            "assert",
+            "oom",
+            "out of memory",
         ];
         let mut highlights: Vec<&str> = stderr_text
             .lines()
@@ -299,9 +314,23 @@ fn stream_uv(engine: AsrEngine, cmd: &mut Command) -> Result<()> {
         highlights.dedup();
         let summary = if highlights.is_empty() {
             // Fall back to the tail if nothing matched.
-            stderr_text.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()
+            stderr_text
+                .lines()
+                .rev()
+                .take(20)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
         } else {
-            highlights.into_iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()
+            highlights
+                .into_iter()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
         }
         .join("\n");
         bail!("{} failed:\n{summary}", engine.label());
@@ -638,4 +667,3 @@ def main():
 if __name__ == "__main__":
     main()
 "#;
-

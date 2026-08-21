@@ -16,7 +16,9 @@ pub async fn run(args: RecordArgs) -> Result<()> {
 
     let name = match args.name {
         Some(n) => n,
-        None => Text::new("Recording name:").with_default("session").prompt()?,
+        None => Text::new("Recording name:")
+            .with_default("session")
+            .prompt()?,
     };
     let out = crate::config::audio_dir().join(format!("{name}.wav"));
     if out.exists() {

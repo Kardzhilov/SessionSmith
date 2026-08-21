@@ -12,7 +12,11 @@ pub async fn rebuild_for(
     preset: &crate::presets::Preset,
 ) -> Result<()> {
     let chat_opts = ChatOptions {
-        model: g.backend.model.clone().ok_or_else(|| anyhow::anyhow!("no model configured"))?,
+        model: g
+            .backend
+            .model
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no model configured"))?,
         temperature: Some(0.3),
         max_tokens: None,
         timeout: std::time::Duration::from_secs(g.runtime.timeout_secs),
