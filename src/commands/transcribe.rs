@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use crate::audio;
@@ -21,6 +22,16 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         speaker_map.insert(label, name);
     }
     if let Some(stem) = &args.remap {
+        if args.speakers.is_empty() && std::io::stdin().is_terminal() {
+            let raw = tx_dir.join(format!("{stem}.diarized.txt"));
+            let source = if raw.exists() { raw } else { tx_dir.join(format!("{stem}.txt")) };
+            let text = std::fs::read_to_string(&source)?;
+            speaker_map = crate::speakers::confirm_interactively(
+                &text,
+                &speaker_map,
+                &roster_names(&campaign),
+            )?;
+        }
         crate::speakers::apply_to_session(&tx_dir, stem, &speaker_map)?;
         ui::ok(&format!("updated speaker mapping for {stem}"));
         return Ok(());
@@ -69,12 +80,33 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         let mut session_opts = tx_opts.clone();
         session_opts.source_files = sess.files.clone();
         let out = transcribe::transcribe(&audio_path, &tx_dir, &g, &session_opts).await?;
-        if !speaker_map.is_empty() {
-            let stem = out.txt.file_stem().and_then(|value| value.to_str()).unwrap_or(&sess.name);
-            crate::speakers::apply_to_session(&tx_dir, stem, &speaker_map)?;
+        let stem = out.txt.file_stem().and_then(|value| value.to_str()).unwrap_or(&sess.name);
+        let confirmed_map = if tx_opts.diarize && args.speakers.is_empty() && std::io::stdin().is_terminal() {
+            crate::speakers::confirm_interactively(
+                &std::fs::read_to_string(&out.txt)?,
+                &speaker_map,
+                &roster_names(&campaign),
+            )?
+        } else {
+            speaker_map.clone()
+        };
+        if !confirmed_map.is_empty() {
+            crate::speakers::apply_to_session(&tx_dir, stem, &confirmed_map)?;
         }
     }
     Ok(())
+}
+
+fn roster_names(campaign: &crate::config::CampaignConfig) -> Vec<String> {
+    let mut names = Vec::new();
+    for player in &campaign.players {
+        for name in [&player.character, &player.player] {
+            if !name.is_empty() && !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    names
 }
 
 /// Show the audio picker and session builder interactively.

@@ -48,8 +48,10 @@ vocab_prompt = true # default; set false to disable prompt biasing
 ```
 
 The prompt is capped at roughly 180 tokens and only whole terms are included.
-Local Whisper, `whisper-cli`, and faster-whisper support it; engines without
-an initial-prompt API report that they skipped it.
+Local Whisper, `whisper-cli`, and faster-whisper support it. WhisperX is probed
+once at startup and receives the prompt only when its installed CLI advertises
+`--initial_prompt`; engines without an initial-prompt API report that they
+skipped it.
 
 ### Engine selection
 
@@ -188,6 +190,17 @@ When thinking is enabled, the spinner shows progress:
   with instructions to run `sessionsmith log rebuild` later.
 - **Resume support:** `--resume` skips any artifact whose output file
   already exists. Safe to re-run after a partial failure.
+- **Retry behaviour:** request initiation retries transient connection failures
+  and HTTP 408/429/5xx responses with jittered backoff. A stream that already
+  yielded output is not replayed; rerun with `--resume` to fill only missing
+  artifacts.
+
+### Usage and cost reporting
+
+After notes generation, SessionSmith prints input/output token totals and an
+estimated API cost for known OpenAI and Anthropic model families. OpenAI and
+Anthropic stream usage metadata is used when supplied; other calls use a
+clearly approximate word-based count. Ollama reports tokens only.
 
 ### Structured output & search index
 

@@ -107,7 +107,7 @@ pub struct TranscribeArgs {
     #[arg(long = "speaker", value_name = "LABEL=NAME")]
     pub speakers: Vec<String>,
     /// Reapply `--speaker` mappings to an existing diarized transcript stem.
-    #[arg(long, value_name = "STEM", requires = "speakers")]
+    #[arg(long, value_name = "STEM")]
     pub remap: Option<String>,
 }
 
@@ -231,6 +231,9 @@ pub enum ModelsAction {
         /// Either a whisper ggml name (`base`, `small`, `medium`, `large-v3`, `large-v3-turbo`)
         /// or an `ollama:` prefixed model id.
         name: String,
+        /// Skip catalog SHA-256 verification. Unsafe; use only for self-built models.
+        #[arg(long)]
+        no_verify: bool,
     },
     /// Print hardware-based recommendations.
     Recommend,

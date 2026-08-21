@@ -6,6 +6,8 @@
 //! normalized 16 kHz mono WAV.
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -36,10 +38,50 @@ impl Backend {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ChunkTranscript {
     text: String,
     start: f64,
     end: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Checkpoint {
+    model: String,
+    audio_sha1_first_mb: String,
+    chunk_s: f64,
+    overlap_s: f64,
+    segments: Vec<ChunkTranscript>,
+}
+
+fn checkpoint_path(out_prefix: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.progress.json", out_prefix.display()))
+}
+
+fn first_mb_sha1(path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("reading {} for checkpoint", path.display()))?;
+    let mut bytes = vec![0; 1_048_576];
+    let read = file.read(&mut bytes)?;
+    Ok(hex::encode(Sha1::digest(&bytes[..read])))
+}
+
+fn load_checkpoint(path: &Path, model: &str, audio_sha1: &str) -> Option<Vec<ChunkTranscript>> {
+    let checkpoint: Checkpoint = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let matches = checkpoint.model == model
+        && checkpoint.audio_sha1_first_mb == audio_sha1
+        && checkpoint.chunk_s == TARGET_CHUNK_SECONDS
+        && checkpoint.overlap_s == CHUNK_OVERLAP_SECONDS;
+    matches.then_some(checkpoint.segments)
+}
+
+fn write_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<()> {
+    let tmp = path.with_extension("json.part");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(checkpoint)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 fn runtime_root() -> Result<PathBuf> {
@@ -52,16 +94,7 @@ fn cached_binary() -> Result<PathBuf> {
 }
 
 fn which(bin: &str) -> Option<PathBuf> {
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin}"))
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+    crate::util::find_in_path(bin)
 }
 
 fn command_ok(bin: &str) -> bool {
@@ -559,18 +592,33 @@ pub fn run_asr(
     let backend = runtime_backend(&binary, device);
     let wav = normalize_audio(audio)?;
     let duration = audio_duration_seconds(&wav);
-    let mut chunks = Vec::new();
+    let checkpoint_file = checkpoint_path(out_prefix);
+    let audio_sha1 = first_mb_sha1(&wav)?;
+    let model_id = model_path.display().to_string();
+    let mut chunks = load_checkpoint(&checkpoint_file, &model_id, &audio_sha1).unwrap_or_default();
+    if !chunks.is_empty() {
+        let resumed_at = chunks.iter().map(|chunk| chunk.end).fold(0.0, f64::max);
+        crate::ui::info(&format!("resuming transcribe.cpp at {}", fmt_ts(resumed_at)));
+    }
 
     if duration <= TARGET_CHUNK_SECONDS || duration <= 0.0 {
-        let text = run_chunk(&binary, model_path, &wav, language, backend)?;
-        chunks.push(ChunkTranscript { text, start: 0.0, end: duration });
+        if chunks.is_empty() {
+            let text = run_chunk(&binary, model_path, &wav, language, backend)?;
+            chunks.push(ChunkTranscript { text, start: 0.0, end: duration });
+            write_checkpoint(&checkpoint_file, &Checkpoint {
+                model: model_id.clone(), audio_sha1_first_mb: audio_sha1.clone(),
+                chunk_s: TARGET_CHUNK_SECONDS, overlap_s: CHUNK_OVERLAP_SECONDS, segments: chunks.clone(),
+            })?;
+        }
     } else {
         let total_chunks = (duration / TARGET_CHUNK_SECONDS).ceil() as usize;
         crate::ui::info(&format!(
             "audio is {:.1} min; splitting into {total_chunks} transcribe.cpp chunks",
             duration / 60.0
         ));
-        for idx in 0..total_chunks {
+        let completed_until = chunks.iter().map(|chunk| chunk.end).fold(0.0, f64::max);
+        let first_pending = ((completed_until / TARGET_CHUNK_SECONDS).floor() as usize).min(total_chunks);
+        for idx in first_pending..total_chunks {
             crate::ui::step(idx + 1, total_chunks, &format!("transcribe.cpp chunk {}/{}", idx + 1, total_chunks));
             let start = idx as f64 * TARGET_CHUNK_SECONDS;
             let end = (start + TARGET_CHUNK_SECONDS).min(duration);
@@ -578,6 +626,10 @@ pub fn run_asr(
             chunks.extend(transcribe_span(
                 &binary, model_path, &wav, language, backend, start, end, &label,
             )?);
+            write_checkpoint(&checkpoint_file, &Checkpoint {
+                model: model_id.clone(), audio_sha1_first_mb: audio_sha1.clone(),
+                chunk_s: TARGET_CHUNK_SECONDS, overlap_s: CHUNK_OVERLAP_SECONDS, segments: chunks.clone(),
+            })?;
         }
     }
     let _ = std::fs::remove_file(&wav);
@@ -616,6 +668,7 @@ pub fn run_asr(
     let srt = PathBuf::from(format!("{}.srt", out_prefix.display()));
     std::fs::write(&txt, format!("{text}\n"))?;
     std::fs::write(&srt, srt_body)?;
+    std::fs::remove_file(&checkpoint_file).ok();
     Ok(())
 }
 
@@ -660,5 +713,21 @@ mod tests {
         assert!(!has_repetition_loop(
             "No, no, no. That is not what I said. Yes, yes, we can continue."
         ));
+    }
+
+    #[test]
+    fn checkpoint_requires_matching_model_audio_and_parameters() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.progress.json");
+        write_checkpoint(&path, &Checkpoint {
+            model: "model.gguf".into(),
+            audio_sha1_first_mb: "fingerprint".into(),
+            chunk_s: TARGET_CHUNK_SECONDS,
+            overlap_s: CHUNK_OVERLAP_SECONDS,
+            segments: vec![ChunkTranscript { text: "notes".into(), start: 0.0, end: 30.0 }],
+        }).unwrap();
+        assert_eq!(load_checkpoint(&path, "model.gguf", "fingerprint").unwrap().len(), 1);
+        assert!(load_checkpoint(&path, "other.gguf", "fingerprint").is_none());
+        assert!(load_checkpoint(&path, "model.gguf", "other").is_none());
     }
 }

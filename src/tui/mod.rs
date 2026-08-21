@@ -85,6 +85,12 @@ fn run_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
         }
         if let Some((title, command)) = app.pending_shell.take() {
             run_shell_suspended(terminal, &title, &command);
+            if app.pending_campaign_reload.is_some() {
+                app.reload_campaigns_after_wizard();
+            } else if app.pending_data_reload {
+                app.pending_data_reload = false;
+                app.load_campaign_data();
+            }
         }
         if app.mouse_toggle_pending {
             app.mouse_toggle_pending = false;
@@ -160,7 +166,7 @@ fn run_shell_suspended(terminal: &mut Term, title: &str, command: &str) {
     let mut answer = String::new();
     let _ = io::stdin().read_line(&mut answer);
     if answer.trim().eq_ignore_ascii_case("y") {
-        let status = std::process::Command::new("sh").arg("-c").arg(command).status();
+        let status = run_shell_command(command);
         match status {
             Ok(s) if s.success() => println!("\n✓ Done."),
             Ok(s) => println!("\n✗ Command exited with status {s}."),
@@ -177,6 +183,13 @@ fn run_shell_suspended(terminal: &mut Term, title: &str, command: &str) {
     enable_raw_mode().ok();
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture).ok();
     terminal.clear().ok();
+}
+
+fn run_shell_command(command: &str) -> io::Result<std::process::ExitStatus> {
+    #[cfg(windows)]
+    return std::process::Command::new("cmd").args(["/C", command]).status();
+    #[cfg(not(windows))]
+    std::process::Command::new("sh").args(["-c", command]).status()
 }
 
 /// Copy `text` to the system clipboard via the OSC 52 terminal escape, which

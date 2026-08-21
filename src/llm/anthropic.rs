@@ -7,8 +7,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use super::{ChatMessage, ChatOptions, LlmBackend, LlmUsage, Role, StreamEvent};
 use crate::config::GlobalConfig;
-use super::{ChatMessage, ChatOptions, LlmBackend, Role};
 
 pub struct AnthropicBackend {
     base_url: String,
@@ -19,10 +19,16 @@ pub struct AnthropicBackend {
 
 impl AnthropicBackend {
     pub fn from_config(g: &GlobalConfig) -> Result<Self> {
-        let base_url = g.backend.base_url.clone().unwrap_or_else(|| "https://api.anthropic.com".into());
+        let base_url = g
+            .backend
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "https://api.anthropic.com".into());
         let api_key = g.resolved_api_key().unwrap_or_default();
         if api_key.is_empty() {
-            return Err(anyhow!("anthropic backend requires api_key in global config"));
+            return Err(anyhow!(
+                "anthropic backend requires api_key in global config"
+            ));
         }
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -47,7 +53,10 @@ struct MsgReq<'a> {
 }
 
 #[derive(Serialize)]
-struct MsgOut<'a> { role: &'a str, content: &'a str }
+struct MsgOut<'a> {
+    role: &'a str,
+    content: &'a str,
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -56,8 +65,25 @@ enum SseEvent {
     ContentBlockDelta { delta: TextDelta },
     #[serde(rename = "message_stop")]
     MessageStop,
+    #[serde(rename = "message_start")]
+    MessageStart { message: MessageStart },
+    #[serde(rename = "message_delta")]
+    MessageDelta { usage: OutputUsage },
     #[serde(other)]
     Other,
+}
+
+#[derive(Deserialize)]
+struct MessageStart {
+    usage: InputUsage,
+}
+#[derive(Deserialize)]
+struct InputUsage {
+    input_tokens: usize,
+}
+#[derive(Deserialize)]
+struct OutputUsage {
+    output_tokens: usize,
 }
 
 #[derive(Deserialize)]
@@ -71,13 +97,22 @@ enum TextDelta {
 
 #[async_trait]
 impl LlmBackend for AnthropicBackend {
-    fn name(&self) -> &'static str { "anthropic" }
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
 
-    async fn stream_chat(&self, messages: Vec<ChatMessage>, opts: ChatOptions)
-        -> Result<mpsc::Receiver<Result<String>>>
-    {
-        let model = if !opts.model.is_empty() { opts.model.clone() }
-                    else { self.default_model.clone().ok_or_else(|| anyhow!("no model configured"))? };
+    async fn stream_chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        opts: ChatOptions,
+    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        let model = if !opts.model.is_empty() {
+            opts.model.clone()
+        } else {
+            self.default_model
+                .clone()
+                .ok_or_else(|| anyhow!("no model configured"))?
+        };
 
         // Pull out system messages — Anthropic uses a separate top-level field.
         let mut system = String::new();
@@ -85,11 +120,19 @@ impl LlmBackend for AnthropicBackend {
         for m in &messages {
             match m.role {
                 Role::System => {
-                    if !system.is_empty() { system.push_str("\n\n"); }
+                    if !system.is_empty() {
+                        system.push_str("\n\n");
+                    }
                     system.push_str(&m.content);
                 }
-                Role::User => chat.push(MsgOut { role: "user", content: &m.content }),
-                Role::Assistant => chat.push(MsgOut { role: "assistant", content: &m.content }),
+                Role::User => chat.push(MsgOut {
+                    role: "user",
+                    content: &m.content,
+                }),
+                Role::Assistant => chat.push(MsgOut {
+                    role: "assistant",
+                    content: &m.content,
+                }),
             }
         }
 
@@ -103,12 +146,14 @@ impl LlmBackend for AnthropicBackend {
         };
 
         let resp = crate::llm::send_with_retry("anthropic", || {
-            self.client.post(format!("{}/v1/messages", self.base_url))
+            self.client
+                .post(format!("{}/v1/messages", self.base_url))
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01")
                 .json(&body)
                 .send()
-        }).await?;
+        })
+        .await?;
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
@@ -116,17 +161,46 @@ impl LlmBackend for AnthropicBackend {
             while let Some(ev) = stream.next().await {
                 let ev = match ev {
                     Ok(e) => e,
-                    Err(e) => { let _ = tx.send(Err(anyhow!("sse: {e}"))).await; return; }
+                    Err(e) => {
+                        let _ = tx.send(Err(anyhow!("sse: {e}"))).await;
+                        return;
+                    }
                 };
-                if ev.data.is_empty() { continue; }
+                if ev.data.is_empty() {
+                    continue;
+                }
                 // The send is a side effect, so it stays in the arm body rather
                 // than being folded into a (should-be-pure) match guard.
                 #[allow(clippy::collapsible_match)]
                 match serde_json::from_str::<SseEvent>(&ev.data) {
-                    Ok(SseEvent::ContentBlockDelta { delta: TextDelta::Text { text } })
-                        if !text.is_empty() =>
-                    {
-                        if tx.send(Ok(text)).await.is_err() {
+                    Ok(SseEvent::ContentBlockDelta {
+                        delta: TextDelta::Text { text },
+                    }) if !text.is_empty() => {
+                        if tx.send(Ok(StreamEvent::Text(text))).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(SseEvent::MessageStart { message }) => {
+                        if tx
+                            .send(Ok(StreamEvent::Usage(LlmUsage {
+                                input_tokens: message.usage.input_tokens,
+                                output_tokens: 0,
+                            })))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(SseEvent::MessageDelta { usage }) => {
+                        if tx
+                            .send(Ok(StreamEvent::Usage(LlmUsage {
+                                input_tokens: 0,
+                                output_tokens: usage.output_tokens,
+                            })))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -136,5 +210,29 @@ impl LlmBackend for AnthropicBackend {
             }
         });
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_stream_usage_events() {
+        let start: SseEvent = serde_json::from_str(
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":12}}}"#,
+        )
+        .unwrap();
+        let delta: SseEvent =
+            serde_json::from_str(r#"{"type":"message_delta","usage":{"output_tokens":34}}"#)
+                .unwrap();
+        match start {
+            SseEvent::MessageStart { message } => assert_eq!(message.usage.input_tokens, 12),
+            _ => panic!("expected message_start"),
+        }
+        match delta {
+            SseEvent::MessageDelta { usage } => assert_eq!(usage.output_tokens, 34),
+            _ => panic!("expected message_delta"),
+        }
     }
 }

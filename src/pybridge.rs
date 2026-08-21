@@ -35,17 +35,7 @@ pub fn uv_path() -> Option<PathBuf> {
 }
 
 fn which(bin: &str) -> Result<PathBuf> {
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin}"))
-        .output()?;
-    if out.status.success() {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !s.is_empty() {
-            return Ok(PathBuf::from(s));
-        }
-    }
-    bail!("{bin} not found")
+    crate::util::find_in_path(bin).ok_or_else(|| anyhow!("{bin} not found"))
 }
 
 /// Directory where bridge scripts are materialised.

@@ -164,12 +164,7 @@ fn pick_backend() -> Option<&'static str> {
 }
 
 fn bin_exists(bin: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin}"))
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    crate::util::find_in_path(bin).is_some()
 }
 
 fn spawn_cmd(backend: &str, file: &Path, offset: f64, volume: u8) -> io::Result<Child> {

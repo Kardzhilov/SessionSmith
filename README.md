@@ -120,6 +120,10 @@ Use `sessionsmith notes --candidate <transcript>` or
 `c` to compare the candidate with the current artifact and `a` to keep the
 version on screen.
 
+`run` also accepts `--language <code>` for ASR, or `--watch --watch-interval 30`
+to process recordings after they remain unchanged for two scans. The watcher
+processes one stable recording at a time and continues after per-file failures.
+
 ---
 
 ## 🚀 Getting started
@@ -143,6 +147,13 @@ cargo build --release --features cuda    # or: vulkan / metal
 
 See [docs/setup.md](docs/setup.md) for detailed installation and hardware guidance,
 then run `sessionsmith doctor` to verify everything.
+
+### Platform support
+
+Linux and macOS are supported for the full local workflow. Windows is covered
+by the `--no-default-features` CI test suite and supports dependency discovery,
+terminal UI, ffplay playback, and process-tree cancellation. The bundled local
+Whisper build on Windows still depends on a working CMake/clang toolchain.
 
 ---
 
@@ -172,8 +183,11 @@ cross‑contaminate.
 | `sessionsmith notes [transcript]` | Generate notes from an existing transcript |
 | `sessionsmith record [name]` | Capture live audio into `audio/` (via ffmpeg) |
 | `sessionsmith search <query>` | Search indexed session notes |
+| `sessionsmith search --all <query>` | Search indexes across every campaign |
 | `sessionsmith log show \| rebuild` | View or regenerate the campaign log |
 | `sessionsmith models` | List, pull, and configure ASR/LLM models |
+| `sessionsmith models pull <name> [--no-verify]` | Download an ASR model with SHA-256 verification (`--no-verify` is unsafe) |
+| `sessionsmith export <stem> --format html\|obsidian` | Export offline HTML or an Obsidian vault tree |
 | `sessionsmith systems list \| show <name>` | Browse game‑system presets |
 | `sessionsmith doctor` | Health check: deps, hardware, backend connectivity |
 | `sessionsmith init` | First‑run setup wizard |

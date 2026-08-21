@@ -1,6 +1,7 @@
 //! Speaker-label detection and non-destructive mapping for diarized transcripts.
 
 use anyhow::{Context, Result};
+use inquire::{Select, Text};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -46,6 +47,32 @@ pub fn labels(text: &str) -> Vec<String> {
         found.insert(label.as_str().to_string());
     }
     found.into_iter().collect()
+}
+
+/// First cue offset for each diarization label in an SRT transcript.
+pub fn preview_offsets(srt: &str) -> BTreeMap<String, f64> {
+    let mut offsets = BTreeMap::new();
+    for cue in srt.split("\n\n") {
+        let mut lines = cue.lines();
+        let _ = lines.next();
+        let Some(timing) = lines.next() else { continue };
+        let Some(start) = timing.split(" --> ").next() else { continue };
+        let seconds = parse_srt_time(start.trim()).unwrap_or(0.0);
+        let text = lines.collect::<Vec<_>>().join(" ");
+        for label in labels(&text) {
+            offsets.entry(label).or_insert(seconds);
+        }
+    }
+    offsets
+}
+
+fn parse_srt_time(value: &str) -> Option<f64> {
+    let (hms, millis) = value.split_once(',').unwrap_or((value, "0"));
+    let mut parts = hms.split(':').map(str::parse::<f64>);
+    let hours = parts.next().and_then(Result::ok)?;
+    let minutes = parts.next().and_then(Result::ok)?;
+    let seconds = parts.next().and_then(Result::ok)?;
+    Some(hours * 3600.0 + minutes * 60.0 + seconds + millis.parse::<f64>().ok()? / 1000.0)
 }
 
 /// Replace exact diarization labels in text, leaving unknown labels unchanged.
@@ -111,6 +138,53 @@ pub fn parse_mapping(value: &str) -> Result<(String, String)> {
     Ok((label.to_string(), name.to_string()))
 }
 
+/// Prompt for a roster-backed mapping of every diarization label. Existing
+/// entries are used as the initial choice, so campaign defaults are confirmed
+/// rather than silently trusted.
+pub fn confirm_interactively(
+    text: &str,
+    defaults: &BTreeMap<String, String>,
+    roster_names: &[String],
+) -> Result<BTreeMap<String, String>> {
+    let samples = detect_samples(text);
+    let mut map = BTreeMap::new();
+    for label in labels(text) {
+        crate::ui::header(&format!("Map {label}"));
+        for sample in samples.iter().filter(|sample| sample.label == label) {
+            crate::ui::info(&format!("  {}", sample.text));
+        }
+
+        let mut choices = roster_names.to_vec();
+        if let Some(default) = defaults.get(&label) {
+            if !choices.contains(default) {
+                choices.insert(0, default.clone());
+            }
+        }
+        choices.push("Type a name...".into());
+        choices.push("Skip".into());
+        let starting_cursor = defaults.get(&label)
+            .and_then(|name| choices.iter().position(|choice| choice == name))
+            .unwrap_or(choices.len().saturating_sub(1));
+        let selection = Select::new(&format!("{label} is:"), choices)
+            .with_starting_cursor(starting_cursor)
+            .prompt()?;
+        let name = if selection == "Type a name..." {
+            Text::new(&format!("Name for {label}:"))
+                .prompt()?
+                .trim()
+                .to_string()
+        } else if selection == "Skip" {
+            String::new()
+        } else {
+            selection
+        };
+        if !name.is_empty() {
+            map.insert(label, name);
+        }
+    }
+    Ok(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +204,13 @@ mod tests {
         assert_eq!(parse_mapping("SPEAKER_02=Garrick").unwrap(), ("SPEAKER_02".into(), "Garrick".into()));
         assert!(parse_mapping("speaker=Garrick").is_err());
         assert!(parse_mapping("SPEAKER_02").is_err());
+    }
+
+    #[test]
+    fn extracts_first_preview_offset_per_label() {
+        let srt = "1\n00:00:12,500 --> 00:00:15,000\nSPEAKER_01: First line\n\n2\n00:00:20,000 --> 00:00:22,000\nSPEAKER_01: Later\nSPEAKER_02: Hi\n";
+        let offsets = preview_offsets(srt);
+        assert_eq!(offsets.get("SPEAKER_01"), Some(&12.5));
+        assert_eq!(offsets.get("SPEAKER_02"), Some(&20.0));
     }
 }

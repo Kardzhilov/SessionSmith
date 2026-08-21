@@ -122,6 +122,9 @@ split into model-safe chunks automatically and stitched back into `.txt` and
 
 For Hugging Face-hosted GGML/GGUF model files, repeated model checks use remote
 metadata headers and skip the download when the local file is already current.
+Downloads resume from verified partial files and validate the catalog SHA-256
+before publishing. `sessionsmith models pull --no-verify` bypasses that check
+for self-built files only; it is intentionally unsafe for normal downloads.
 
 ### `[runtime]` section
 
@@ -171,6 +174,10 @@ class     = "Rogue"
 [transcription.replacements]
 "the Mosses" = "Damasus"
 "the Masses" = "Damasus"
+
+[transcription]
+vocabulary = ["Strahd", "Barovia"]  # optional ASR vocabulary hints
+vocab_prompt = true                    # set false to disable prompt biasing
 
 [backend]
 model = "qwen2.5:32b"                   # optional campaign override

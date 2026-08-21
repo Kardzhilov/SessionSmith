@@ -80,6 +80,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Overlay::Palette(_) => draw_palette(frame, app, &th, area),
         Overlay::Search(_) => draw_search(frame, app, &th, area),
         Overlay::Picker(_) => draw_picker(frame, app, &th, area),
+        Overlay::SpeakerMap(_) => draw_speaker_map(frame, app, &th, area),
         Overlay::ThemePicker { .. } => draw_theme_picker(frame, app, area),
     }
 }
@@ -1001,6 +1002,27 @@ fn draw_picker(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let empty = p.items.is_empty();
     let cursor = p.cursor;
     app.overlay_state.select(if empty { None } else { Some(cursor) });
+    app.rects.overlay_list = rect;
+    frame.render_stateful_widget(list, rect, &mut app.overlay_state);
+}
+
+fn draw_speaker_map(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
+    let Overlay::SpeakerMap(state) = &app.overlay else { return };
+    let rect = centered(area, 70, 62);
+    frame.render_widget(Clear, rect);
+    let items: Vec<ListItem> = state.labels.iter().enumerate().map(|(index, label)| {
+        let mapped = state.map.get(label).map(String::as_str).unwrap_or("Skip");
+        let sample = state.samples.get(label).and_then(|samples| samples.first()).cloned().unwrap_or_default();
+        ListItem::new(vec![
+            Line::from(vec![Span::styled(format!("{label}  "), th.accent_style()), Span::styled(mapped.to_string(), th.success_style())]),
+            Line::from(Span::styled(sample, th.muted_style())),
+        ]).style(hover_style(th, Some(index) == hovered_index(rect, (app.hover_col, app.hover_row), app.overlay_state.offset(), state.labels.len())))
+    }).collect();
+    let list = List::new(items)
+        .block(popup_block("Map speakers  Enter cycle · p preview · w write · Esc cancel", th))
+        .highlight_style(th.selection())
+        .highlight_symbol("▸ ");
+    app.overlay_state.select(if state.labels.is_empty() { None } else { Some(state.cursor) });
     app.rects.overlay_list = rect;
     frame.render_stateful_widget(list, rect, &mut app.overlay_state);
 }

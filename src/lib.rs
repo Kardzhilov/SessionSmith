@@ -24,6 +24,7 @@ pub mod transcribe;
 pub mod transcribe_cpp;
 pub mod tui;
 pub mod ui;
+pub mod util;
 #[cfg(feature = "local-whisper")]
 pub mod whisper_local;
 

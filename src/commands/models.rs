@@ -70,18 +70,21 @@ pub async fn run(args: ModelsArgs) -> Result<()> {
             print_list(&g).await?;
         }
 
-        Some(ModelsAction::Pull { name }) => {
+        Some(ModelsAction::Pull { name, no_verify }) => {
+            if no_verify {
+                ui::warn("model checksum verification disabled for this download");
+            }
             if let Some(ollama_name) = name.strip_prefix("ollama:") {
                 models::ollama_pull(ollama_name)?;
             } else if let Some(spec) = crate::asr::find(&name) {
                 match spec.engine {
                     crate::asr::AsrEngine::WhisperCpp => {
                         let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
-                        models::download_whisper(&name, &cache).await?;
+                        models::download_whisper_with_verification(&name, &cache, !no_verify).await?;
                     }
                     crate::asr::AsrEngine::TranscribeCpp => {
                         let cache = models::gguf_asr_cache_dir()?;
-                        models::download_gguf_asr(&name, &cache).await?;
+                        models::download_gguf_asr_with_verification(&name, &cache, !no_verify).await?;
                         let device = g.asr.device.clone();
                         tokio::task::spawn_blocking(move || {
                             crate::transcribe_cpp::ensure_runtime_for(device.as_deref())
@@ -101,7 +104,7 @@ pub async fn run(args: ModelsArgs) -> Result<()> {
                 }
             } else {
                 let cache = models::whisper_cache_dir(g.asr.model_dir.as_deref())?;
-                models::download_whisper(&name, &cache).await?;
+                models::download_whisper_with_verification(&name, &cache, !no_verify).await?;
             }
         }
 

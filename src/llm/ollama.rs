@@ -6,8 +6,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use super::{ChatMessage, ChatOptions, LlmBackend, StreamEvent};
 use crate::config::GlobalConfig;
-use super::{ChatMessage, ChatOptions, LlmBackend};
 
 pub struct OllamaBackend {
     base_url: String,
@@ -17,7 +17,11 @@ pub struct OllamaBackend {
 
 impl OllamaBackend {
     pub fn from_config(g: &GlobalConfig) -> Result<Self> {
-        let base_url = g.backend.base_url.clone().unwrap_or_else(|| "http://localhost:11434".into());
+        let base_url = g
+            .backend
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:11434".into());
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             default_model: g.backend.model.clone(),
@@ -85,7 +89,10 @@ pub async fn unload_all(base_url: &str) -> Vec<String> {
     for name in loaded {
         let ok = client
             .post(format!("{base}/api/generate"))
-            .json(&UnloadReq { model: &name, keep_alive: 0 })
+            .json(&UnloadReq {
+                model: &name,
+                keep_alive: 0,
+            })
             .send()
             .await
             .map(|r| r.status().is_success())
@@ -153,28 +160,48 @@ struct ChunkMessage {
 
 #[async_trait]
 impl LlmBackend for OllamaBackend {
-    fn name(&self) -> &'static str { "ollama" }
+    fn name(&self) -> &'static str {
+        "ollama"
+    }
 
-    async fn stream_chat(&self, messages: Vec<ChatMessage>, opts: ChatOptions)
-        -> Result<mpsc::Receiver<Result<String>>>
-    {
-        let model = if !opts.model.is_empty() { opts.model.clone() }
-                    else { self.default_model.clone().ok_or_else(|| anyhow!("no model configured"))? };
+    async fn stream_chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        opts: ChatOptions,
+    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        let model = if !opts.model.is_empty() {
+            opts.model.clone()
+        } else {
+            self.default_model
+                .clone()
+                .ok_or_else(|| anyhow!("no model configured"))?
+        };
         let body = ChatReq {
             model: &model,
-            messages: messages.iter()
-                .map(|m| MsgOut { role: m.role.as_str(), content: &m.content })
+            messages: messages
+                .iter()
+                .map(|m| MsgOut {
+                    role: m.role.as_str(),
+                    content: &m.content,
+                })
                 .collect(),
             stream: true,
-            options: OllamaOptions { temperature: opts.temperature, num_predict: opts.max_tokens, num_ctx: opts.num_ctx, num_gpu: -1 },
+            options: OllamaOptions {
+                temperature: opts.temperature,
+                num_predict: opts.max_tokens,
+                num_ctx: opts.num_ctx,
+                num_gpu: -1,
+            },
             think: opts.think,
             format: opts.format.clone(),
         };
         let resp = crate::llm::send_with_retry("ollama", || {
-            self.client.post(format!("{}/api/chat", self.base_url))
+            self.client
+                .post(format!("{}/api/chat", self.base_url))
                 .json(&body)
                 .send()
-        }).await?;
+        })
+        .await?;
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
@@ -183,13 +210,18 @@ impl LlmBackend for OllamaBackend {
             let mut thinking_words = 0usize;
             while let Some(chunk) = stream.next().await {
                 match chunk {
-                    Err(e) => { let _ = tx.send(Err(e.into())).await; return; }
+                    Err(e) => {
+                        let _ = tx.send(Err(e.into())).await;
+                        return;
+                    }
                     Ok(bytes) => {
                         buf.extend_from_slice(&bytes);
                         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                             let line = buf.drain(..=pos).collect::<Vec<_>>();
                             let line = &line[..line.len() - 1];
-                            if line.is_empty() { continue; }
+                            if line.is_empty() {
+                                continue;
+                            }
                             match serde_json::from_slice::<ChatChunk>(line) {
                                 Ok(c) => {
                                     if let Some(err) = c.error {
@@ -202,16 +234,25 @@ impl LlmBackend for OllamaBackend {
                                         if let Some(ref t) = m.thinking {
                                             if !t.is_empty() {
                                                 thinking_words += t.split_whitespace().count();
-                                                let _ = tx.send(Ok(format!("\x00thinking:{thinking_words}"))).await;
+                                                let _ = tx
+                                                    .send(Ok(StreamEvent::Progress(format!(
+                                                        "thinking:{thinking_words}"
+                                                    ))))
+                                                    .await;
                                             }
                                         }
                                         if !m.content.is_empty()
-                                            && tx.send(Ok(m.content.clone())).await.is_err()
+                                            && tx
+                                                .send(Ok(StreamEvent::Text(m.content.clone())))
+                                                .await
+                                                .is_err()
                                         {
                                             return;
                                         }
                                     }
-                                    if c.done { return; }
+                                    if c.done {
+                                        return;
+                                    }
                                 }
                                 Err(_) => { /* ignore stray non-JSON lines */ }
                             }

@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::collections::VecDeque;
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use ratatui::layout::Rect;
@@ -56,6 +57,7 @@ pub struct SessionEntry {
 /// A palette command.
 #[derive(Clone, Copy)]
 pub enum Action {
+    NewCampaign,
     RunPipeline,
     Transcribe,
     GenerateNotes,
@@ -70,6 +72,7 @@ pub enum Action {
     RerunReplace,
     RerunKeepBoth,
     ToggleDiarize,
+    MapSpeakers,
     RebuildLog,
     SystemCheck,
     Quit,
@@ -78,6 +81,7 @@ pub enum Action {
 impl Action {
     pub fn label(self) -> &'static str {
         match self {
+            Action::NewCampaign => "New campaign — run setup wizard",
             Action::RunPipeline => "Run pipeline — transcribe + notes",
             Action::Transcribe => "Transcribe audio — audio → transcript",
             Action::GenerateNotes => "Generate notes — transcript → notes",
@@ -92,6 +96,7 @@ impl Action {
             Action::RerunReplace => "Re-run session — regenerate & replace artifacts",
             Action::RerunKeepBoth => "Re-run session — keep both to compare",
             Action::ToggleDiarize => "Toggle speaker diarization (on/off)",
+            Action::MapSpeakers => "Map speakers for the open session",
             Action::RebuildLog => "Rebuild campaign log",
             Action::SystemCheck => "System check (doctor)",
             Action::Quit => "Quit",
@@ -99,6 +104,7 @@ impl Action {
     }
     pub fn all() -> &'static [Action] {
         &[
+            Action::NewCampaign,
             Action::RunPipeline,
             Action::Transcribe,
             Action::GenerateNotes,
@@ -113,6 +119,7 @@ impl Action {
             Action::RerunReplace,
             Action::RerunKeepBoth,
             Action::ToggleDiarize,
+            Action::MapSpeakers,
             Action::RebuildLog,
             Action::SystemCheck,
             Action::Quit,
@@ -163,11 +170,23 @@ pub enum Overlay {
     Palette(PaletteState),
     Search(SearchState),
     Picker(PickerState),
+    SpeakerMap(SpeakerMapState),
     /// Theme chooser with live preview. `original` is restored on Esc.
     ThemePicker { cursor: usize, original: usize },
     Message { title: String, body: String, error: bool },
     /// A yes/no prompt. On confirm, `App::pending_confirm` drives the action.
     Confirm { title: String, body: String },
+}
+
+pub struct SpeakerMapState {
+    pub stem: String,
+    pub labels: Vec<String>,
+    pub samples: BTreeMap<String, Vec<String>>,
+    pub map: BTreeMap<String, String>,
+    pub choices: Vec<String>,
+    pub cursor: usize,
+    pub preview_offsets: BTreeMap<String, f64>,
+    pub audio: Option<PathBuf>,
 }
 
 pub enum ConfirmAction {
@@ -279,6 +298,10 @@ pub struct App {
     /// A shell command to run with the TUI suspended (e.g. the Ollama updater):
     /// `(title, command)`.
     pub pending_shell: Option<(String, String)>,
+    /// Campaign paths present before the setup wizard was launched.
+    pub pending_campaign_reload: Option<Vec<PathBuf>>,
+    /// Reload the selected campaign after an external interactive action exits.
+    pub pending_data_reload: bool,
     /// Active audio player (quote playback / audio scrubbing), if any.
     pub player: Option<super::player::Player>,
 
@@ -390,6 +413,8 @@ impl App {
             should_quit: false,
             pending_editor: None,
             pending_shell: None,
+            pending_campaign_reload: None,
+            pending_data_reload: false,
             player: None,
             pending_confirm: None,
             campaigns: Vec::new(),
@@ -499,6 +524,83 @@ impl App {
             self.campaign_idx = 0;
         }
         self.camp_state.select(if self.campaigns.is_empty() { None } else { Some(self.campaign_idx) });
+    }
+
+    /// Reload campaigns after the external setup wizard exits and select its
+    /// newly created campaign when one was added.
+    pub fn reload_campaigns_after_wizard(&mut self) {
+        let previous = self.pending_campaign_reload.take().unwrap_or_default();
+        self.load_campaigns();
+        if let Some(index) = self.campaigns.iter().position(|entry| !previous.contains(&entry.path)) {
+            self.campaign_idx = index;
+            self.camp_state.select(Some(index));
+        }
+        self.load_campaign_data();
+        self.status = self.campaigns.get(self.campaign_idx)
+            .map(|campaign| format!("Campaign ready: {}", campaign.name))
+            .unwrap_or_else(|| "Campaign wizard finished".into());
+    }
+
+    pub(super) fn request_new_campaign(&mut self) {
+        let executable = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                self.message("Cannot start wizard", &format!("could not locate SessionSmith: {error}"), true);
+                return;
+            }
+        };
+        self.pending_campaign_reload = Some(self.campaigns.iter().map(|entry| entry.path.clone()).collect());
+        self.pending_shell = Some((
+            "New campaign".into(),
+            format!("{} init", shell_quote(&executable.display().to_string())),
+        ));
+    }
+
+    pub(super) fn request_speaker_mapping(&mut self) {
+        let Some(session) = self.open_session.and_then(|index| self.sessions.get(index)) else {
+            self.message("No session", "Open a diarized session before mapping speakers.", true);
+            return;
+        };
+        let Some(campaign) = self.campaign.as_ref() else {
+            self.message("No campaign", "Select a campaign before mapping speakers.", true);
+            return;
+        };
+        let raw_txt = campaign.transcripts_dir().join(format!("{}.diarized.txt", session.stem));
+        let txt = campaign.transcripts_dir().join(format!("{}.txt", session.stem));
+        let source = if raw_txt.exists() { raw_txt } else { txt };
+        let Ok(text) = std::fs::read_to_string(&source) else {
+            self.message("No speaker labels", "Could not read this session's transcript.", true);
+            return;
+        };
+        let labels = crate::speakers::labels(&text);
+        if labels.is_empty() {
+            self.message("No speaker labels", "This session has no diarized speaker labels to map.", true);
+            return;
+        }
+        let mut samples = BTreeMap::new();
+        for sample in crate::speakers::detect_samples(&text) {
+            samples.entry(sample.label).or_insert_with(Vec::new).push(sample.text);
+        }
+        let mut map = crate::meta::load(&campaign.transcripts_dir(), &session.stem)
+            .and_then(|meta| meta.speaker_map)
+            .unwrap_or_else(|| campaign.transcription.speakers.clone());
+        map.retain(|label, _| labels.contains(label));
+        let mut choices = roster_names(campaign);
+        for name in map.values() {
+            if !choices.contains(name) {
+                choices.push(name.clone());
+            }
+        }
+        choices.push("Skip".into());
+        let raw_srt = campaign.transcripts_dir().join(format!("{}.diarized.srt", session.stem));
+        let srt = if raw_srt.exists() { raw_srt } else { campaign.transcripts_dir().join(format!("{}.srt", session.stem)) };
+        let preview_offsets = std::fs::read_to_string(srt)
+            .map(|srt| crate::speakers::preview_offsets(&srt))
+            .unwrap_or_default();
+        self.overlay = Overlay::SpeakerMap(SpeakerMapState {
+            stem: session.stem.clone(), labels, samples, map, choices, cursor: 0,
+            preview_offsets, audio: self.session_source_audio(),
+        });
     }
 
     /// Move the selected campaign up (`-1`) or down (`+1`) in the sidebar and
@@ -837,7 +939,7 @@ impl App {
     }
 
     /// Start (or restart) the player on `file` at `offset`.
-    fn start_player(&mut self, file: &std::path::Path, label: &str, offset: f64) {
+    pub(super) fn start_player(&mut self, file: &std::path::Path, label: &str, offset: f64) {
         let vol = self.global.ui.player_volume;
         match super::player::Player::start(file, label, offset, vol) {
             Ok(p) => {
@@ -1689,6 +1791,18 @@ fn find_audio_by_stem(audio_dir: &std::path::Path, stem: &str) -> Option<PathBuf
     audio::find_by_stem(audio_dir, stem)
 }
 
+fn roster_names(campaign: &CampaignConfig) -> Vec<String> {
+    let mut names = Vec::new();
+    for player in &campaign.players {
+        for name in [&player.character, &player.player] {
+            if !name.is_empty() && !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    names
+}
+
 /// The platform command that installs/updates Ollama, or `None` if we can't
 /// script it (e.g. Windows). Runs the official installer.
 fn ollama_update_command() -> Option<String> {
@@ -1714,6 +1828,9 @@ fn campaign_stem(path: &std::path::Path) -> String {
 }
 
 fn shell_quote(s: &str) -> String {
+    #[cfg(windows)]
+    return format!("\"{}\"", s.replace('"', "\\\""));
+    #[cfg(not(windows))]
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

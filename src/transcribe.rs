@@ -5,7 +5,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    OnceLock,
+};
 
 use crate::asr::AsrEngine;
 use crate::config::{CampaignConfig, GlobalConfig};
@@ -17,10 +20,43 @@ use crate::presets::Preset;
 /// to send SIGTERM so VRAM is freed immediately on exit.
 pub static WHISPERX_PID: AtomicU32 = AtomicU32::new(0);
 
+static WHISPERX_INITIAL_PROMPT_SUPPORTED: OnceLock<bool> = OnceLock::new();
+
+fn whisperx_supports_initial_prompt(
+    binary: &Path,
+    python: &Path,
+    use_module: bool,
+    via_uvx: bool,
+) -> bool {
+    *WHISPERX_INITIAL_PROMPT_SUPPORTED.get_or_init(|| {
+        let output = if via_uvx {
+            let uv = crate::pybridge::uv_path().unwrap_or_else(|| PathBuf::from("uv"));
+            Command::new(uv)
+                .args(["tool", "run", "whisperx", "--help"])
+                .output()
+        } else if use_module {
+            Command::new(python)
+                .args(["-m", "whisperx", "--help"])
+                .output()
+        } else {
+            Command::new(binary).arg("--help").output()
+        };
+        output
+            .map(|output| String::from_utf8_lossy(&output.stdout).contains("--initial_prompt"))
+            .unwrap_or(false)
+    })
+}
+
 /// Kill the current ASR child if one is running. Called from the Ctrl-C handler.
 pub fn kill_current_asr() {
     let pid = WHISPERX_PID.load(Ordering::Relaxed);
     if pid > 0 {
+        #[cfg(windows)]
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()
+            .ok();
+        #[cfg(not(windows))]
         std::process::Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output()
@@ -94,18 +130,33 @@ impl TranscribeOpts {
 
 fn valid_date(year: i32, month: u8, day: u8) -> Option<String> {
     let month = time::Month::try_from(month).ok()?;
-    time::Date::from_calendar_date(year, month, day).ok().map(|date| date.to_string())
+    time::Date::from_calendar_date(year, month, day)
+        .ok()
+        .map(|date| date.to_string())
 }
 
 pub fn session_date_for(audio: &Path, override_date: Option<&str>) -> Result<String> {
     if let Some(date) = override_date {
         let parsed = regex::Regex::new(r"^(\d{4})-(\d{2})-(\d{2})$")?
             .captures(date)
-            .and_then(|parts| valid_date(parts[1].parse().ok()?, parts[2].parse().ok()?, parts[3].parse().ok()?));
+            .and_then(|parts| {
+                valid_date(
+                    parts[1].parse().ok()?,
+                    parts[2].parse().ok()?,
+                    parts[3].parse().ok()?,
+                )
+            });
         return parsed.ok_or_else(|| anyhow!("invalid --date '{date}'; expected YYYY-MM-DD"));
     }
-    let name = audio.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
-    for pattern in [r"(\d{4})-(\d{2})-(\d{2})", r"(\d{4})(\d{2})(\d{2})", r"(\d{2})-(\d{2})-(\d{4})"] {
+    let name = audio
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    for pattern in [
+        r"(\d{4})-(\d{2})-(\d{2})",
+        r"(\d{4})(\d{2})(\d{2})",
+        r"(\d{2})-(\d{2})-(\d{4})",
+    ] {
         let captures = regex::Regex::new(pattern)?.captures(name);
         let Some(parts) = captures else { continue };
         let values: Option<Vec<i32>> = (1..=3).map(|index| parts[index].parse().ok()).collect();
@@ -119,7 +170,8 @@ pub fn session_date_for(audio: &Path, override_date: Option<&str>) -> Result<Str
             return Ok(date);
         }
     }
-    let modified = std::fs::metadata(audio).and_then(|metadata| metadata.modified())
+    let modified = std::fs::metadata(audio)
+        .and_then(|metadata| metadata.modified())
         .unwrap_or(std::time::SystemTime::now());
     Ok(time::OffsetDateTime::from(modified).date().to_string())
 }
@@ -129,13 +181,34 @@ const VOCABULARY_PROMPT_CHAR_LIMIT: usize = 720;
 pub fn vocabulary_terms(campaign: &CampaignConfig, preset: &Preset) -> Vec<String> {
     let mut terms = Vec::new();
     for player in &campaign.players {
-        terms.extend([player.player.trim(), player.character.trim()].into_iter()
-            .filter(|term| !term.is_empty()).map(ToOwned::to_owned));
+        terms.extend(
+            [player.player.trim(), player.character.trim()]
+                .into_iter()
+                .filter(|term| !term.is_empty())
+                .map(ToOwned::to_owned),
+        );
     }
-    terms.extend(campaign.transcription.replacements.values().map(|term| term.trim().to_owned()));
-    terms.extend(campaign.transcription.vocabulary.iter().map(|term| term.trim().to_owned()));
-    terms.extend(preset.terminology.lines().flat_map(|line| line.split([',', ';']))
-        .map(|term| term.trim().trim_start_matches(['-', '*', ' ']).to_owned()));
+    terms.extend(
+        campaign
+            .transcription
+            .replacements
+            .values()
+            .map(|term| term.trim().to_owned()),
+    );
+    terms.extend(
+        campaign
+            .transcription
+            .vocabulary
+            .iter()
+            .map(|term| term.trim().to_owned()),
+    );
+    terms.extend(
+        preset
+            .terminology
+            .lines()
+            .flat_map(|line| line.split([',', ';']))
+            .map(|term| term.trim().trim_start_matches(['-', '*', ' ']).to_owned()),
+    );
     terms.retain(|term| !term.is_empty());
     terms.sort_by_key(|term| term.to_lowercase());
     terms.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
@@ -162,9 +235,15 @@ pub fn vocabulary_prompt(campaign: &CampaignConfig, preset: &Preset) -> Option<S
 fn apply_replacements(text: &str, replacements: &BTreeMap<String, String>) -> String {
     let mut ordered: Vec<(&String, &String)> = replacements.iter().collect();
     ordered.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
-    ordered.into_iter().fold(text.to_string(), |text, (from, to)| {
-        if from.is_empty() { text } else { text.replace(from, to) }
-    })
+    ordered
+        .into_iter()
+        .fold(text.to_string(), |text, (from, to)| {
+            if from.is_empty() {
+                text
+            } else {
+                text.replace(from, to)
+            }
+        })
 }
 
 fn correct_transcript_files(
@@ -177,8 +256,9 @@ fn correct_transcript_files(
     }
     for path in [txt, srt] {
         if path.exists() {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading transcript corrections input: {}", path.display()))?;
+            let text = std::fs::read_to_string(path).with_context(|| {
+                format!("reading transcript corrections input: {}", path.display())
+            })?;
             std::fs::write(path, apply_replacements(&text, replacements))
                 .with_context(|| format!("writing transcript corrections: {}", path.display()))?;
         }
@@ -253,8 +333,9 @@ fn finalize_transcript(
     if !vad_spans.is_empty() && srt.exists() {
         let text = std::fs::read_to_string(srt)
             .with_context(|| format!("reading VAD transcript timestamps: {}", srt.display()))?;
-        std::fs::write(srt, remap_srt_vad_timestamps(&text, vad_spans))
-            .with_context(|| format!("writing remapped transcript timestamps: {}", srt.display()))?;
+        std::fs::write(srt, remap_srt_vad_timestamps(&text, vad_spans)).with_context(|| {
+            format!("writing remapped transcript timestamps: {}", srt.display())
+        })?;
     }
     correct_transcript_files(txt, srt, replacements)
 }
@@ -265,12 +346,18 @@ pub struct TranscribeOutput {
     pub srt: PathBuf,
 }
 
-pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &TranscribeOpts)
-    -> Result<TranscribeOutput>
-{
+pub async fn transcribe(
+    audio: &Path,
+    out_dir: &Path,
+    g: &GlobalConfig,
+    opts: &TranscribeOpts,
+) -> Result<TranscribeOutput> {
     std::fs::create_dir_all(out_dir)?;
-    let stem = audio.file_stem().ok_or_else(|| anyhow!("no stem for {}", audio.display()))?
-        .to_string_lossy().to_string();
+    let stem = audio
+        .file_stem()
+        .ok_or_else(|| anyhow!("no stem for {}", audio.display()))?
+        .to_string_lossy()
+        .to_string();
     let out_txt = out_dir.join(format!("{stem}.txt"));
     let out_srt = out_dir.join(format!("{stem}.srt"));
 
@@ -284,7 +371,10 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         .unwrap_or(true);
     if !opts.force && out_txt.exists() && out_srt.exists() && same_model {
         crate::ui::ok(&format!("transcript exists: {}", out_txt.display()));
-        return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
+        return Ok(TranscribeOutput {
+            txt: out_txt,
+            srt: out_srt,
+        });
     }
 
     // Transcription is usually GPU-bound; make sure the LLM backend isn't
@@ -316,7 +406,11 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     } else {
         (audio.to_path_buf(), Vec::new())
     };
-    let vad_temp = if asr_input != *audio { Some(asr_input.clone()) } else { None };
+    let vad_temp = if asr_input != *audio {
+        Some(asr_input.clone())
+    } else {
+        None
+    };
     let session_date = session_date_for(audio, opts.session_date.as_deref())?;
 
     // Records model + source audio after a successful transcription, so a
@@ -386,7 +480,10 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             crate::ui::ok(&format!("wrote {}", out_srt.display()));
         }
         write_meta(engine.label());
-        return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
+        return Ok(TranscribeOutput {
+            txt: out_txt,
+            srt: out_srt,
+        });
     }
 
     if let AsrBackend::TranscribeCpp(model_id) = &backend {
@@ -417,7 +514,10 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
         write_meta("transcribe.cpp");
-        return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
+        return Ok(TranscribeOutput {
+            txt: out_txt,
+            srt: out_srt,
+        });
     }
 
     // In-process transcription via whisper-rs — handled entirely here.
@@ -427,7 +527,10 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             .as_ref()
             .ok_or_else(|| anyhow!("local engine requires a ggml model"))?;
         let threads = g.asr.threads.unwrap_or_else(|| {
-            std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4).min(8)
+            std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4)
+                .min(8)
         }) as i32;
         let use_gpu = !matches!(g.asr.device.as_deref(), Some(d) if d.eq_ignore_ascii_case("cpu"));
 
@@ -445,9 +548,17 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             );
         }
 
-        let pb = crate::ui::spinner(&format!("transcribing {stem} with whisper-{} (in-process)", opts.model));
+        let pb = crate::ui::spinner(&format!(
+            "transcribing {stem} with whisper-{} (in-process)",
+            opts.model
+        ));
         let result = crate::whisper_local::transcribe_file(
-            model_path, &asr_input, &opts.language, threads, use_gpu, opts.initial_prompt.as_deref(),
+            model_path,
+            &asr_input,
+            &opts.language,
+            threads,
+            use_gpu,
+            opts.initial_prompt.as_deref(),
         );
         pb.finish_and_clear();
 
@@ -458,11 +569,17 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         std::fs::write(&out_txt, crate::whisper_local::segments_to_text(&segments))?;
         std::fs::write(&out_srt, crate::whisper_local::segments_to_srt(&segments))?;
         finalize_transcript(&out_txt, &out_srt, &opts.replacements, &vad_spans)?;
-        crate::ui::info(&format!("ASR device: {}", crate::whisper_local::gpu_label()));
+        crate::ui::info(&format!(
+            "ASR device: {}",
+            crate::whisper_local::gpu_label()
+        ));
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
         write_meta("whisper.cpp");
-        return Ok(TranscribeOutput { txt: out_txt, srt: out_srt });
+        return Ok(TranscribeOutput {
+            txt: out_txt,
+            srt: out_srt,
+        });
     }
 
     let spinner = crate::ui::spinner(&format!("transcribing {stem} with whisper-{}", opts.model));
@@ -471,15 +588,20 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         AsrBackend::WhisperCli(binary) => {
             let model_path = model_path_opt.as_ref().unwrap();
             let threads = g.asr.threads.unwrap_or_else(|| {
-                std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4).min(8)
+                std::thread::available_parallelism()
+                    .map(|n| n.get() as u32)
+                    .unwrap_or(4)
+                    .min(8)
             });
             // whisper-cli writes <prefix>.txt and <prefix>.srt.
             let prefix = out_dir.join(&stem);
             let mut cmd = Command::new(binary);
             cmd.args(["-m", model_path.to_str().unwrap()])
-                .arg("-f").arg(&asr_input)
+                .arg("-f")
+                .arg(&asr_input)
                 .args(["-otxt", "-osrt"])
-                .arg("-of").arg(&prefix)
+                .arg("-of")
+                .arg(&prefix)
                 .args(["-t", &threads.to_string()])
                 .args(["-p", "1"]);
             if opts.language != "auto" {
@@ -488,8 +610,11 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             if let Some(prompt) = &opts.initial_prompt {
                 cmd.args(["--prompt", prompt]);
             }
-            cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
-            let o = cmd.output().with_context(|| format!("running {}", binary.display()))?;
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped());
+            let o = cmd
+                .output()
+                .with_context(|| format!("running {}", binary.display()))?;
             (binary.clone(), o, None::<&'static str>)
         }
         AsrBackend::WhisperX(binary) => {
@@ -500,7 +625,8 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             // written at install time; if the venv was copied or created from a different Python
             // that shebang can point to the wrong interpreter, pulling in wrong site-packages.
             // Using `<venv>/bin/python3 -m whisperx` always uses the correct interpreter.
-            let python = binary.parent()
+            let python = binary
+                .parent()
                 .map(|p| p.join("python3"))
                 .filter(|p| p.exists())
                 .unwrap_or_else(|| binary.clone());
@@ -523,55 +649,66 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
                 _ if free_mb >= 4096 => ("cuda", "float16"),
                 _ => ("cpu", "int8"),
             };
+            let whisperx_initial_prompt = opts
+                .initial_prompt
+                .as_deref()
+                .filter(|_| whisperx_supports_initial_prompt(binary, &python, use_module, via_uvx));
+            if opts.initial_prompt.is_some() && whisperx_initial_prompt.is_none() {
+                crate::ui::info("vocabulary biasing is unavailable with this whisperX version");
+            }
 
-            let run_whisperx = |device: &str, compute: &str| -> std::io::Result<std::process::Output> {
-                let mut cmd = if via_uvx {
-                    // `uv tool run whisperx …` — ephemeral, auto-installed env.
-                    let uv = crate::pybridge::uv_path()
-                        .unwrap_or_else(|| PathBuf::from("uv"));
-                    let mut c = Command::new(uv);
-                    c.args(["tool", "run", "whisperx"]);
-                    c
-                } else if use_module {
-                    let mut c = Command::new(&python);
-                    c.args(["-m", "whisperx"]);
-                    c
-                } else {
-                    Command::new(binary)
-                };
-                cmd.arg(&asr_input)
-                    .args(["--model", &wx_model])
-                    .args(["--output_dir", out_dir.to_str().unwrap()])
-                    .args(["--output_format", "all"])
-                    .args(["--device", device, "--compute_type", compute])
-                    .env_remove("PYTHONPATH"); // prevent stale PYTHONPATH from leaking in
-                if opts.diarize {
-                    // Diarization needs word alignment, so we must NOT pass
-                    // --no_align here. A HF token is required for the pyannote
-                    // models; pass it when configured.
-                    cmd.arg("--diarize");
-                    // Pin the diarization pipeline to community-1 (much better
-                    // than 3.1, unlimited speakers) rather than relying on the
-                    // whisperX default.
-                    let diar = crate::asr::diarize_spec(crate::asr::DEFAULT_DIARIZE);
-                    cmd.args(["--diarize_model", diar.model_ref]);
-                    if let Some(tok) = &hf_token {
-                        cmd.env("HF_TOKEN", tok);
+            let run_whisperx =
+                |device: &str, compute: &str| -> std::io::Result<std::process::Output> {
+                    let mut cmd = if via_uvx {
+                        // `uv tool run whisperx …` — ephemeral, auto-installed env.
+                        let uv = crate::pybridge::uv_path().unwrap_or_else(|| PathBuf::from("uv"));
+                        let mut c = Command::new(uv);
+                        c.args(["tool", "run", "whisperx"]);
+                        c
+                    } else if use_module {
+                        let mut c = Command::new(&python);
+                        c.args(["-m", "whisperx"]);
+                        c
+                    } else {
+                        Command::new(binary)
+                    };
+                    cmd.arg(&asr_input)
+                        .args(["--model", &wx_model])
+                        .args(["--output_dir", out_dir.to_str().unwrap()])
+                        .args(["--output_format", "all"])
+                        .args(["--device", device, "--compute_type", compute])
+                        .env_remove("PYTHONPATH"); // prevent stale PYTHONPATH from leaking in
+                    if opts.diarize {
+                        // Diarization needs word alignment, so we must NOT pass
+                        // --no_align here. A HF token is required for the pyannote
+                        // models; pass it when configured.
+                        cmd.arg("--diarize");
+                        // Pin the diarization pipeline to community-1 (much better
+                        // than 3.1, unlimited speakers) rather than relying on the
+                        // whisperX default.
+                        let diar = crate::asr::diarize_spec(crate::asr::DEFAULT_DIARIZE);
+                        cmd.args(["--diarize_model", diar.model_ref]);
+                        if let Some(tok) = &hf_token {
+                            cmd.env("HF_TOKEN", tok);
+                        }
+                    } else {
+                        cmd.arg("--no_align");
                     }
-                } else {
-                    cmd.arg("--no_align");
-                }
-                if opts.language != "auto" {
-                    cmd.args(["--language", &opts.language]);
-                }
-                cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
-                // Use spawn() so we can track the PID and kill it cleanly on Ctrl-C.
-                let child = cmd.spawn()?;
-                WHISPERX_PID.store(child.id(), Ordering::Relaxed);
-                let out = child.wait_with_output()?;
-                WHISPERX_PID.store(0, Ordering::Relaxed);
-                Ok(out)
-            };
+                    if opts.language != "auto" {
+                        cmd.args(["--language", &opts.language]);
+                    }
+                    if let Some(prompt) = whisperx_initial_prompt {
+                        cmd.args(["--initial_prompt", prompt]);
+                    }
+                    cmd.stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::piped());
+                    // Use spawn() so we can track the PID and kill it cleanly on Ctrl-C.
+                    let child = cmd.spawn()?;
+                    WHISPERX_PID.store(child.id(), Ordering::Relaxed);
+                    let out = child.wait_with_output()?;
+                    WHISPERX_PID.store(0, Ordering::Relaxed);
+                    Ok(out)
+                };
 
             let mut o = run_whisperx(device, compute)
                 .with_context(|| format!("running {}", binary.display()))?;
@@ -580,7 +717,9 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             let mut used_cpu_fallback = false;
             if !o.status.success() {
                 let err_text = String::from_utf8_lossy(&o.stderr);
-                if device == "cuda" && (err_text.contains("out of memory") || err_text.contains("CUDA")) {
+                if device == "cuda"
+                    && (err_text.contains("out of memory") || err_text.contains("CUDA"))
+                {
                     crate::ui::warn("CUDA OOM — retrying whisperx on CPU");
                     o = run_whisperx("cpu", "int8")
                         .with_context(|| format!("running {} (cpu retry)", binary.display()))?;
@@ -590,16 +729,18 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
 
             let device_label: &'static str = match (device, used_cpu_fallback, free_mb) {
                 ("cuda", false, _) => "cuda",
-                (_, true, _)       => "cpu (fallback — VRAM full)",
-                (_, false, 0)      => "cpu (no GPU detected)",
-                _                  => "cpu (VRAM low — GPU occupied)",
+                (_, true, _) => "cpu (fallback — VRAM full)",
+                (_, false, 0) => "cpu (no GPU detected)",
+                _ => "cpu (VRAM low — GPU occupied)",
             };
             (binary.clone(), o, Some(device_label))
         }
         #[cfg(feature = "local-whisper")]
         AsrBackend::Local => unreachable!("local engine handled before this match"),
         AsrBackend::Bridge(..) => unreachable!("bridge engine handled before this match"),
-        AsrBackend::TranscribeCpp(..) => unreachable!("transcribe.cpp engine handled before this match"),
+        AsrBackend::TranscribeCpp(..) => {
+            unreachable!("transcribe.cpp engine handled before this match")
+        }
     };
 
     spinner.finish_and_clear();
@@ -612,7 +753,10 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         crate::ui::info(&format!("ASR device: {dev}"));
     }
     if !out_txt.exists() {
-        bail!("ASR did not produce {} — check stderr above", out_txt.display());
+        bail!(
+            "ASR did not produce {} — check stderr above",
+            out_txt.display()
+        );
     }
     finalize_transcript(&out_txt, &out_srt, &opts.replacements, &vad_spans)?;
     if opts.diarize {
@@ -632,7 +776,10 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     };
     write_meta(meta_engine);
     let _ = binary_path; // used only for error context above
-    Ok(TranscribeOutput { txt: out_txt, srt: out_srt })
+    Ok(TranscribeOutput {
+        txt: out_txt,
+        srt: out_srt,
+    })
 }
 
 const SILENCE_NOISE: &str = "-35dB";
@@ -669,9 +816,18 @@ fn detected_silences(audio: &Path) -> Result<Vec<crate::meta::VadSpan>> {
             start = value.trim().parse::<f64>().ok();
         } else if let Some(value) = line.split("silence_end:").nth(1) {
             if let Some(start) = start.take() {
-                let end = value.split('|').next().unwrap_or(value).trim().parse::<f64>().ok();
+                let end = value
+                    .split('|')
+                    .next()
+                    .unwrap_or(value)
+                    .trim()
+                    .parse::<f64>()
+                    .ok();
                 if let Some(end) = end.filter(|end| *end > start) {
-                    spans.push(crate::meta::VadSpan { start, duration: end - start });
+                    spans.push(crate::meta::VadSpan {
+                        start,
+                        duration: end - start,
+                    });
                 }
             }
         }
@@ -684,7 +840,10 @@ fn detected_silences(audio: &Path) -> Result<Vec<crate::meta::VadSpan>> {
 fn apply_vad(audio: &Path, stem: &str) -> Result<VadOutput> {
     let spans = detected_silences(audio)?;
     if spans.is_empty() {
-        return Ok(VadOutput { input: audio.to_path_buf(), removed_spans: spans });
+        return Ok(VadOutput {
+            input: audio.to_path_buf(),
+            removed_spans: spans,
+        });
     }
     let dir = std::env::temp_dir().join("sessionsmith_vad");
     std::fs::create_dir_all(&dir)?;
@@ -702,14 +861,27 @@ fn apply_vad(audio: &Path, stem: &str) -> Result<VadOutput> {
         cursor = span.start + span.duration;
     }
     let part_count = filter_parts.len();
-    filter_parts.push(format!("[0:a]atrim=start={cursor},asetpts=PTS-STARTPTS[a{part_count}]"));
-    let labels = (0..=part_count).map(|index| format!("[a{index}]")).collect::<String>();
+    filter_parts.push(format!(
+        "[0:a]atrim=start={cursor},asetpts=PTS-STARTPTS[a{part_count}]"
+    ));
+    let labels = (0..=part_count)
+        .map(|index| format!("[a{index}]"))
+        .collect::<String>();
     filter_parts.push(format!("{labels}concat=n={}:v=0:a=1[out]", part_count + 1));
     let filter = filter_parts.join(";");
     let status = Command::new("ffmpeg")
         .args(["-y", "-i"])
         .arg(audio)
-        .args(["-filter_complex", &filter, "-map", "[out]", "-ar", "16000", "-ac", "1"])
+        .args([
+            "-filter_complex",
+            &filter,
+            "-map",
+            "[out]",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+        ])
         .arg(&out)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -720,14 +892,20 @@ fn apply_vad(audio: &Path, stem: &str) -> Result<VadOutput> {
         bail!("ffmpeg silence-removal failed");
     }
     crate::ui::ok(&format!("VAD → {}", out.display()));
-    Ok(VadOutput { input: out, removed_spans: spans })
+    Ok(VadOutput {
+        input: out,
+        removed_spans: spans,
+    })
 }
 
 /// Concatenate multiple audio files into one using ffmpeg's concat demuxer.
 /// Returns the path to the merged file in `out_dir/<stem>.wav`.
 /// If only one file is provided, returns it directly (no concat).
 fn concat_list_entry(path: &Path) -> String {
-    format!("file '{}'\n", path.display().to_string().replace('\'', "'\\''"))
+    format!(
+        "file '{}'\n",
+        path.display().to_string().replace('\'', "'\\''")
+    )
 }
 
 pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -> Result<PathBuf> {
@@ -739,7 +917,10 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
     }
     std::fs::create_dir_all(out_dir)?;
     let out = out_dir.join(format!("{stem}.wav"));
-    let expected_duration: Option<f64> = files.iter().map(|file| crate::audio::probe_duration(file)).sum();
+    let expected_duration: Option<f64> = files
+        .iter()
+        .map(|file| crate::audio::probe_duration(file))
+        .sum();
     let complete_existing = crate::audio::probe_duration(&out)
         .zip(expected_duration)
         .map(|(duration, expected)| duration >= expected * 0.9)
@@ -751,7 +932,8 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
     let part = out.with_extension("wav.part");
     std::fs::remove_file(&part).ok();
     let list_path = out_dir.join(format!("_{stem}_concat.txt"));
-    let content: String = files.iter()
+    let content: String = files
+        .iter()
         .map(|f| {
             let abs = f.canonicalize().unwrap_or_else(|_| f.clone());
             concat_list_entry(&abs)
@@ -807,13 +989,15 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
 fn resolve_asr_backend(g: &GlobalConfig, opts: &TranscribeOpts) -> Result<AsrBackend> {
     // Diarization is a whisperX-only capability.
     if opts.diarize {
-        return resolve_whisperx(g).ok_or_else(|| anyhow!(
-            "diarization requires whisperX (pyannote community-1).\n  \
+        return resolve_whisperx(g).ok_or_else(|| {
+            anyhow!(
+                "diarization requires whisperX (pyannote community-1).\n  \
              Install `uv` so it can run automatically \
              (curl -LsSf https://astral.sh/uv/install.sh | sh), or install whisperX \
              manually. It also needs a Hugging Face token in [asr] hf_token and \
              acceptance of the community-1 model terms."
-        ));
+            )
+        });
     }
 
     // Modern engines are selected by model id. Python-ecosystem engines run
@@ -832,20 +1016,25 @@ fn resolve_asr_backend(g: &GlobalConfig, opts: &TranscribeOpts) -> Result<AsrBac
     match g.asr.engine.as_deref().map(|s| s.to_lowercase()) {
         Some(ref e) if e == "local" => {
             #[cfg(feature = "local-whisper")]
-            { Ok(AsrBackend::Local) }
+            {
+                Ok(AsrBackend::Local)
+            }
             #[cfg(not(feature = "local-whisper"))]
-            { bail!("engine = \"local\" but this binary was built without the `local-whisper` feature") }
+            {
+                bail!("engine = \"local\" but this binary was built without the `local-whisper` feature")
+            }
         }
-        Some(ref e) if e == "whisper-cli" => {
-            resolve_whisper_cli(g).ok_or_else(|| anyhow!("whisper-cli not found (engine = \"whisper-cli\")"))
-        }
+        Some(ref e) if e == "whisper-cli" => resolve_whisper_cli(g)
+            .ok_or_else(|| anyhow!("whisper-cli not found (engine = \"whisper-cli\")")),
         Some(ref e) if e == "whisperx" => {
             resolve_whisperx(g).ok_or_else(|| anyhow!("whisperx not found (engine = \"whisperx\")"))
         }
         _ => {
             // auto: prefer the in-process engine when available.
             #[cfg(feature = "local-whisper")]
-            { Ok(AsrBackend::Local) }
+            {
+                Ok(AsrBackend::Local)
+            }
             #[cfg(not(feature = "local-whisper"))]
             {
                 if let Some(b) = resolve_whisper_cli(g) {
@@ -888,7 +1077,10 @@ fn resolve_whisper_cli(g: &GlobalConfig) -> Option<AsrBackend> {
             return Some(AsrBackend::WhisperCli(p));
         }
     }
-    for extra in ["./whisper.cpp/build/bin/whisper-cli", "./build/bin/whisper-cli"] {
+    for extra in [
+        "./whisper.cpp/build/bin/whisper-cli",
+        "./build/bin/whisper-cli",
+    ] {
         let p = Path::new(extra);
         if p.exists() {
             return Some(AsrBackend::WhisperCli(p.to_path_buf()));
@@ -929,23 +1121,18 @@ fn free_vram_mb() -> u64 {
         .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
         .output();
     match out {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .and_then(|l| l.trim().parse::<u64>().ok())
-                .unwrap_or(0)
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .next()
+            .and_then(|l| l.trim().parse::<u64>().ok())
+            .unwrap_or(0),
         _ => 0,
     }
 }
 
-/// Resolve a command name to its full path via `which`.
+/// Resolve a command name to its full path via the process PATH.
 fn path_of(cmd: &str) -> Option<PathBuf> {
-    let out = Command::new("which").arg(cmd).output().ok()?;
-    if !out.status.success() { return None; }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+    crate::util::find_in_path(cmd)
 }
 
 #[cfg(test)]
@@ -967,8 +1154,14 @@ mod tests {
     #[test]
     fn vad_timestamp_remap_accounts_for_each_prior_silence() {
         let spans = vec![
-            crate::meta::VadSpan { start: 10.0, duration: 5.0 },
-            crate::meta::VadSpan { start: 30.0, duration: 10.0 },
+            crate::meta::VadSpan {
+                start: 10.0,
+                duration: 5.0,
+            },
+            crate::meta::VadSpan {
+                start: 30.0,
+                duration: 10.0,
+            },
         ];
 
         assert_eq!(remap_vad_timestamp(12.0, &spans), 17.0);
@@ -992,7 +1185,10 @@ mod tests {
             ancestry: String::new(),
             class: String::new(),
         }];
-        campaign.transcription.replacements.insert("Strawd".into(), "Strahd".into());
+        campaign
+            .transcription
+            .replacements
+            .insert("Strawd".into(), "Strahd".into());
         campaign.transcription.vocabulary = vec!["Barovia".into(), "barovia".into()];
         let preset = Preset {
             name: "test".into(),
@@ -1009,7 +1205,10 @@ mod tests {
     fn vocabulary_terms_combine_sources_case_insensitively() {
         let (campaign, preset) = vocabulary_fixture();
         let terms = vocabulary_terms(&campaign, &preset);
-        assert_eq!(terms, vec!["Alice", "Barovia", "HP", "spell slots", "Strahd"]);
+        assert_eq!(
+            terms,
+            vec!["Alice", "Barovia", "HP", "spell slots", "Strahd"]
+        );
     }
 
     #[test]
@@ -1029,9 +1228,18 @@ mod tests {
 
     #[test]
     fn session_dates_parse_supported_filename_formats() {
-        assert_eq!(session_date_for(Path::new("2026-08-14_session.wav"), None).unwrap(), "2026-08-14");
-        assert_eq!(session_date_for(Path::new("session_20260814.wav"), None).unwrap(), "2026-08-14");
-        assert_eq!(session_date_for(Path::new("14-08-2026-session.wav"), None).unwrap(), "2026-08-14");
+        assert_eq!(
+            session_date_for(Path::new("2026-08-14_session.wav"), None).unwrap(),
+            "2026-08-14"
+        );
+        assert_eq!(
+            session_date_for(Path::new("session_20260814.wav"), None).unwrap(),
+            "2026-08-14"
+        );
+        assert_eq!(
+            session_date_for(Path::new("14-08-2026-session.wav"), None).unwrap(),
+            "2026-08-14"
+        );
         assert!(session_date_for(Path::new("v2-final.wav"), Some("2026-13-40")).is_err());
     }
 }

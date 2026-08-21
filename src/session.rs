@@ -148,9 +148,7 @@ async fn ai_sort_by_content(
 
     // Check that whisper-cli is on PATH (needed for snippet transcription).
     let whisper_ok = g.asr.binary.as_ref().map(|b| b.exists()).unwrap_or(false)
-        || Command::new("which").arg("whisper-cli").output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        || crate::util::find_in_path("whisper-cli").is_some();
 
     if !whisper_ok {
         ui::warn("whisper-cli not found — falling back to oldest-first order");

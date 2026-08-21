@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::{CampaignConfig, GlobalConfig};
-use crate::llm::{self, ChatMessage, ChatOptions, LlmBackend, Role};
+use crate::llm::{self, ChatMessage, ChatOptions, LlmBackend, LlmUsage, Role};
 use crate::presets::Preset;
 use crate::prompts::{self, Artifact};
 
@@ -20,6 +20,83 @@ pub struct PipelineOpts {
     /// Write artifacts to `<name>.candidate.md` instead of overwriting, so the
     /// user can compare against the existing version before keeping one.
     pub candidate: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactUsage {
+    pub artifact: String,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub estimated_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineReport {
+    pub model: String,
+    pub usages: Vec<ArtifactUsage>,
+}
+
+impl PipelineReport {
+    fn record(
+        &mut self,
+        artifact: impl Into<String>,
+        input: &str,
+        output: &str,
+        usage: Option<LlmUsage>,
+    ) {
+        let (input_tokens, output_tokens) = usage
+            .map(|usage| (usage.input_tokens, usage.output_tokens))
+            .unwrap_or_else(|| (approximate_tokens(input), approximate_tokens(output)));
+        self.usages.push(ArtifactUsage {
+            artifact: artifact.into(),
+            input_tokens,
+            output_tokens,
+            estimated_cost_usd: estimated_cost(&self.model, input_tokens, output_tokens),
+        });
+    }
+
+    fn emit(&self) {
+        if self.usages.is_empty() {
+            return;
+        }
+        let input: usize = self.usages.iter().map(|usage| usage.input_tokens).sum();
+        let output: usize = self.usages.iter().map(|usage| usage.output_tokens).sum();
+        let cost: Option<f64> = self.usages.iter().try_fold(0.0, |total, usage| {
+            usage.estimated_cost_usd.map(|cost| total + cost)
+        });
+        let mut lines = vec![
+            format!("model: {}", self.model),
+            format!("tokens: ~{input} input / ~{output} output"),
+        ];
+        lines.push(match cost {
+            Some(cost) => format!("estimated API cost: ~${cost:.4}"),
+            None => "estimated API cost: unavailable for this model".into(),
+        });
+        crate::ui::panel("Generation usage", &lines);
+    }
+}
+
+fn approximate_tokens(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+fn estimated_cost(model: &str, input_tokens: usize, output_tokens: usize) -> Option<f64> {
+    let model = model.to_ascii_lowercase();
+    let (_, input_per_million, output_per_million) = [
+        ("gpt-4o-mini", 0.15, 0.60),
+        ("gpt-4o", 2.50, 10.00),
+        ("gpt-4.1-mini", 0.40, 1.60),
+        ("gpt-4.1", 2.00, 8.00),
+        ("claude-haiku", 0.80, 4.00),
+        ("claude-sonnet", 3.00, 15.00),
+        ("claude-opus", 15.00, 75.00),
+    ]
+    .into_iter()
+    .find(|(prefix, _, _)| model.starts_with(prefix))?;
+    Some(
+        input_tokens as f64 * input_per_million / 1_000_000.0
+            + output_tokens as f64 * output_per_million / 1_000_000.0,
+    )
 }
 
 /// Output filename for an artifact, honouring candidate (compare) mode.
@@ -50,12 +127,18 @@ pub struct Session {
 
 impl Session {
     pub fn new(transcript: &Path, notes_root: &Path) -> Result<Self> {
-        let stem = transcript.file_stem()
+        let stem = transcript
+            .file_stem()
             .ok_or_else(|| anyhow!("no stem for {}", transcript.display()))?
-            .to_string_lossy().to_string();
+            .to_string_lossy()
+            .to_string();
         let notes_dir = notes_root.join(&stem);
         std::fs::create_dir_all(&notes_dir)?;
-        Ok(Self { stem, transcript_path: transcript.to_path_buf(), notes_dir })
+        Ok(Self {
+            stem,
+            transcript_path: transcript.to_path_buf(),
+            notes_dir,
+        })
     }
 }
 
@@ -65,7 +148,7 @@ pub async fn run_notes(
     campaign: &CampaignConfig,
     preset: &Preset,
     opts: &PipelineOpts,
-) -> Result<()> {
+) -> Result<PipelineReport> {
     let backend = llm::build(g)?;
     let model = opts.model_override.clone()
         .or_else(|| g.backend.model.clone())
@@ -83,12 +166,21 @@ pub async fn run_notes(
 
     let transcript = std::fs::read_to_string(&session.transcript_path)
         .with_context(|| format!("reading {}", session.transcript_path.display()))?;
+    let mut report = PipelineReport {
+        model: model.clone(),
+        usages: Vec::new(),
+    };
 
     // --- Pass A: bullets (everything except quotes derives from it) ---
-    let needs_derived = opts.artifacts.iter().any(|a| !matches!(a, Artifact::Bullets | Artifact::Quotes));
+    let needs_derived = opts
+        .artifacts
+        .iter()
+        .any(|a| !matches!(a, Artifact::Bullets | Artifact::Quotes));
     let regen_bullets = opts.artifacts.contains(&Artifact::Bullets);
     let bullets_real = session.notes_dir.join(Artifact::Bullets.filename());
-    let bullets_out = session.notes_dir.join(artifact_file(Artifact::Bullets, opts.candidate));
+    let bullets_out = session
+        .notes_dir
+        .join(artifact_file(Artifact::Bullets, opts.candidate));
 
     let bullets = if regen_bullets {
         crate::ui::phase("Outline");
@@ -99,6 +191,7 @@ pub async fn run_notes(
             let sys = prompts::system_for(Artifact::Bullets, campaign, preset);
             let text = generate_bullets(backend.as_ref(), &chat_opts, sys, &transcript, g).await?;
             std::fs::write(&bullets_out, &text)?;
+            report.record(Artifact::Bullets.label(), &transcript, &text, None);
             crate::ui::ok(&format!("wrote {}", bullets_out.display()));
             text
         }
@@ -112,6 +205,7 @@ pub async fn run_notes(
             let sys = prompts::system_for(Artifact::Bullets, campaign, preset);
             let text = generate_bullets(backend.as_ref(), &chat_opts, sys, &transcript, g).await?;
             std::fs::write(&bullets_real, &text)?;
+            report.record(Artifact::Bullets.label(), &transcript, &text, None);
             crate::ui::ok(&format!("wrote {}", bullets_real.display()));
             text
         }
@@ -120,7 +214,10 @@ pub async fn run_notes(
     };
 
     // --- Derived passes ---
-    let derived: Vec<Artifact> = opts.artifacts.iter().copied()
+    let derived: Vec<Artifact> = opts
+        .artifacts
+        .iter()
+        .copied()
         .filter(|a| !matches!(a, Artifact::Bullets | Artifact::Quotes))
         .collect();
 
@@ -137,19 +234,27 @@ pub async fn run_notes(
                 }
                 let sys = prompts::system_for(a, campaign, preset);
                 let user = prompts::user_from_bullets(&bullets);
+                let usage_input = user.clone();
                 let opts2 = chat_opts.clone();
                 let g2 = g.clone();
                 handles.push(tokio::spawn(async move {
                     let b = llm::build(&g2)?;
-                    let text = call_one(b.as_ref(), &opts2, a, sys, user).await?;
-                    std::fs::write(&out, &text)?;
+                    let response = call_one_with_usage(b.as_ref(), &opts2, a, sys, user).await?;
+                    std::fs::write(&out, &response.text)?;
                     crate::ui::ok(&format!("wrote {}", out.display()));
-                    Ok::<(), anyhow::Error>(())
+                    Ok::<(Artifact, String, llm::CollectedResponse), anyhow::Error>((
+                        a,
+                        usage_input,
+                        response,
+                    ))
                 }));
             }
             for h in handles {
-                if let Err(e) = h.await? {
-                    crate::ui::warn(&format!("artifact failed — {e:#}"));
+                match h.await? {
+                    Ok((artifact, input, response)) => {
+                        report.record(artifact.label(), &input, &response.text, response.usage)
+                    }
+                    Err(e) => crate::ui::warn(&format!("artifact failed — {e:#}")),
                 }
             }
         } else {
@@ -161,9 +266,11 @@ pub async fn run_notes(
                 }
                 let sys = prompts::system_for(a, campaign, preset);
                 let user = prompts::user_from_bullets(&bullets);
-                match call_one(backend.as_ref(), &chat_opts, a, sys, user).await {
-                    Ok(text) => {
-                        std::fs::write(&out, &text)?;
+                let usage_input = user.clone();
+                match call_one_with_usage(backend.as_ref(), &chat_opts, a, sys, user).await {
+                    Ok(response) => {
+                        std::fs::write(&out, &response.text)?;
+                        report.record(a.label(), &usage_input, &response.text, response.usage);
                         crate::ui::ok(&format!("wrote {}", out.display()));
                     }
                     Err(e) => {
@@ -176,9 +283,15 @@ pub async fn run_notes(
 
     // --- Quotes (verbatim, timestamped — read from the transcript directly) ---
     if opts.artifacts.contains(&Artifact::Quotes) {
-        let out = session.notes_dir.join(artifact_file(Artifact::Quotes, opts.candidate));
+        let out = session
+            .notes_dir
+            .join(artifact_file(Artifact::Quotes, opts.candidate));
         if opts.resume && !opts.candidate && out.exists() && !opts.force {
-            crate::ui::ok(&format!("{}: reuse {}", Artifact::Quotes.label(), out.display()));
+            crate::ui::ok(&format!(
+                "{}: reuse {}",
+                Artifact::Quotes.label(),
+                out.display()
+            ));
         } else {
             let ts = timestamped_transcript(session);
             let sys = prompts::system_for(Artifact::Quotes, campaign, preset);
@@ -188,6 +301,7 @@ pub async fn run_notes(
                     // transcript, and pin each timestamp to where it occurs.
                     let grounded = ground_quotes(&text, &ts);
                     std::fs::write(&out, &grounded)?;
+                    report.record(Artifact::Quotes.label(), &ts, &grounded, None);
                     crate::ui::ok(&format!("wrote {}", out.display()));
                 }
                 Err(e) => crate::ui::warn(&format!("{}: failed — {e:#}", Artifact::Quotes.label())),
@@ -197,7 +311,9 @@ pub async fn run_notes(
 
     // --- Structured JSON companion (opt-in) ---
     if g.runtime.structured && opts.artifacts.contains(&Artifact::DmNotes) {
-        let out = session.notes_dir.join(candidate_name("dm-notes.json", opts.candidate));
+        let out = session
+            .notes_dir
+            .join(candidate_name("dm-notes.json", opts.candidate));
         if opts.resume && !opts.candidate && out.exists() && !opts.force {
             crate::ui::ok(&format!("dm-notes.json: reuse {}", out.display()));
         } else {
@@ -205,14 +321,18 @@ pub async fn run_notes(
             sopts.format = Some(prompts::dm_notes_schema());
             let sys = prompts::dm_notes_structured_system(campaign, preset);
             let user = prompts::user_from_bullets(&bullets);
-            match call_one(backend.as_ref(), &sopts, Artifact::DmNotes, sys, user).await {
-                Ok(text) => {
+            let usage_input = user.clone();
+            match call_one_with_usage(backend.as_ref(), &sopts, Artifact::DmNotes, sys, user).await
+            {
+                Ok(response) => {
+                    let text = response.text;
                     // Best-effort pretty-print; write raw if not valid JSON.
                     let pretty = serde_json::from_str::<serde_json::Value>(&text)
                         .ok()
                         .and_then(|v| serde_json::to_string_pretty(&v).ok())
                         .unwrap_or(text);
                     std::fs::write(&out, &pretty)?;
+                    report.record("dm-notes.json", &usage_input, &pretty, response.usage);
                     crate::ui::ok(&format!("wrote {}", out.display()));
                 }
                 Err(e) => crate::ui::warn(&format!("dm-notes.json: failed — {e:#}")),
@@ -228,7 +348,9 @@ pub async fn run_notes(
         let summary_path = session.notes_dir.join(Artifact::Summary.filename());
         if summary_path.exists() {
             let summary = std::fs::read_to_string(&summary_path)?;
-            if let Err(e) = update_campaign_log(g, campaign, preset, &session.stem, &summary, &chat_opts).await {
+            if let Err(e) =
+                update_campaign_log(g, campaign, preset, &session.stem, &summary, &chat_opts).await
+            {
                 crate::ui::warn(&format!("campaign log: {e:#}"));
                 crate::ui::warn("  run `sessionsmith log rebuild` to retry");
             }
@@ -249,16 +371,48 @@ pub async fn run_notes(
     // idle blocking the next transcription (or another GPU workload).
     crate::llm::free_vram(g).await;
 
-    Ok(())
+    report.emit();
+    Ok(report)
 }
 
-async fn call_one(backend: &dyn LlmBackend, chat_opts: &ChatOptions, a: Artifact, sys: String, user: String) -> Result<String> {
-    let pb = crate::ui::spinner(&format!("{}: {} via {}", a.label(), chat_opts.model, backend.name()));
+async fn call_one(
+    backend: &dyn LlmBackend,
+    chat_opts: &ChatOptions,
+    a: Artifact,
+    sys: String,
+    user: String,
+) -> Result<String> {
+    Ok(call_one_with_usage(backend, chat_opts, a, sys, user)
+        .await?
+        .text)
+}
+
+async fn call_one_with_usage(
+    backend: &dyn LlmBackend,
+    chat_opts: &ChatOptions,
+    a: Artifact,
+    sys: String,
+    user: String,
+) -> Result<llm::CollectedResponse> {
+    let pb = crate::ui::spinner(&format!(
+        "{}: {} via {}",
+        a.label(),
+        chat_opts.model,
+        backend.name()
+    ));
     let messages = vec![
-        ChatMessage { role: Role::System, content: sys },
-        ChatMessage { role: Role::User, content: user },
+        ChatMessage {
+            role: Role::System,
+            content: sys,
+        },
+        ChatMessage {
+            role: Role::User,
+            content: user,
+        },
     ];
-    let res = llm::collect(backend, messages, chat_opts.clone(), Some(&pb)).await;
+    let res = llm::collect_with_usage(backend, messages, chat_opts.clone(), Some(&pb))
+        .await
+        .map_err(|error| anyhow!("{}: {error:#}", a.label()));
     pb.finish_and_clear();
     res
 }
@@ -293,7 +447,9 @@ async fn update_campaign_log(
         crate::campaign_log::CampaignLog::default()
     };
 
-    let existing_date = log.blocks.iter()
+    let existing_date = log
+        .blocks
+        .iter()
         .find(|block| block.id == session_stem)
         .map(|block| block.date.as_str());
     let summary_mtime = std::fs::metadata(notes_dir.join(session_stem).join("summary.md"))
@@ -303,14 +459,26 @@ async fn update_campaign_log(
 
     let backend = llm::build(g)?;
     let pb = crate::ui::spinner("campaign log: writing session entry");
-    let (title, body) =
-        generate_session_entry(backend.as_ref(), chat_opts, campaign, preset, summary, &date)
-            .await?;
+    let (title, body) = generate_session_entry(
+        backend.as_ref(),
+        chat_opts,
+        campaign,
+        preset,
+        summary,
+        &date,
+    )
+    .await?;
     log.upsert(session_stem, &date, title, body);
     let latest = log.block_body(session_stem).unwrap_or("").to_string();
-    let threads =
-        generate_threads(backend.as_ref(), chat_opts, campaign, preset, &log.threads, &latest)
-            .await?;
+    let threads = generate_threads(
+        backend.as_ref(),
+        chat_opts,
+        campaign,
+        preset,
+        &log.threads,
+        &latest,
+    )
+    .await?;
     log.threads = threads;
     pb.finish_and_clear();
 
@@ -360,9 +528,14 @@ pub async fn rebuild_campaign_log(
         }
         dirs.sort_by_key(|d| d.1);
         for (dir, mtime) in dirs {
-            let stem = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let stem = dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let summary = std::fs::read_to_string(dir.join("summary.md")).unwrap_or_default();
-            let existing_date = existing_log.as_ref()
+            let existing_date = existing_log
+                .as_ref()
                 .and_then(|log| log.blocks.iter().find(|block| block.id == stem))
                 .map(|block| block.date.as_str());
             let date = campaign_session_date(campaign, &stem, existing_date, mtime);
@@ -378,20 +551,35 @@ pub async fn rebuild_campaign_log(
     let total = sessions.len();
     for (i, (stem, date, summary)) in sessions.into_iter().enumerate() {
         let pb = crate::ui::spinner(&format!("campaign log: {}/{} · {stem}", i + 1, total));
-        let (title, body) =
-            generate_session_entry(backend.as_ref(), chat_opts, campaign, preset, &summary, &date)
-                .await?;
+        let (title, body) = generate_session_entry(
+            backend.as_ref(),
+            chat_opts,
+            campaign,
+            preset,
+            &summary,
+            &date,
+        )
+        .await?;
         log.upsert(&stem, &date, title, body);
         let latest = log.block_body(&stem).unwrap_or("").to_string();
-        log.threads =
-            generate_threads(backend.as_ref(), chat_opts, campaign, preset, &log.threads, &latest)
-                .await?;
+        log.threads = generate_threads(
+            backend.as_ref(),
+            chat_opts,
+            campaign,
+            preset,
+            &log.threads,
+            &latest,
+        )
+        .await?;
         pb.finish_and_clear();
         crate::ui::ok(&format!("logged {stem}"));
     }
 
     crate::campaign_log::persist(&notes_dir, &log)?;
-    crate::ui::ok(&format!("rebuilt {}", crate::campaign_log::md_path(&notes_dir).display()));
+    crate::ui::ok(&format!(
+        "rebuilt {}",
+        crate::campaign_log::md_path(&notes_dir).display()
+    ));
     Ok(())
 }
 
@@ -409,8 +597,14 @@ async fn generate_session_entry(
     let out = llm::collect(
         backend,
         vec![
-            ChatMessage { role: Role::System, content: sys },
-            ChatMessage { role: Role::User, content: user },
+            ChatMessage {
+                role: Role::System,
+                content: sys,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: user,
+            },
         ],
         chat_opts.clone(),
         None,
@@ -430,7 +624,10 @@ async fn generate_session_entry(
     let low = title.to_lowercase();
     for pfx in ["session title:", "title:"] {
         if low.starts_with(pfx) {
-            title = title[pfx.len()..].trim().trim_matches(['*', '"', ' ']).to_string();
+            title = title[pfx.len()..]
+                .trim()
+                .trim_matches(['*', '"', ' '])
+                .to_string();
             break;
         }
     }
@@ -438,7 +635,11 @@ async fn generate_session_entry(
         title = "Untitled Session".to_string();
     }
     let body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    let body = if body.is_empty() { summary.trim().to_string() } else { body };
+    let body = if body.is_empty() {
+        summary.trim().to_string()
+    } else {
+        body
+    };
     Ok((title, body))
 }
 
@@ -456,8 +657,14 @@ async fn generate_threads(
     let out = llm::collect(
         backend,
         vec![
-            ChatMessage { role: Role::System, content: sys },
-            ChatMessage { role: Role::User, content: user },
+            ChatMessage {
+                role: Role::System,
+                content: sys,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: user,
+            },
         ],
         chat_opts.clone(),
         None,
@@ -470,13 +677,21 @@ pub fn parse_artifacts(spec: &str) -> Result<Vec<Artifact>> {
     let mut out = Vec::new();
     for part in spec.split(',') {
         let p = part.trim().to_lowercase();
-        if p.is_empty() { continue; }
+        if p.is_empty() {
+            continue;
+        }
         if p == "all" {
             return Ok(prompts::ALL_ARTIFACTS.to_vec());
         }
         match Artifact::from_id(&p) {
-            Some(a) => if !out.contains(&a) { out.push(a); },
-            None => return Err(anyhow!("unknown artifact '{p}'. Valid: bullets, dm-notes, recap, summary, story, quotes")),
+            Some(a) => {
+                if !out.contains(&a) {
+                    out.push(a);
+                }
+            }
+            None => return Err(anyhow!(
+                "unknown artifact '{p}'. Valid: bullets, dm-notes, recap, summary, story, quotes"
+            )),
         }
     }
     Ok(out)
@@ -523,7 +738,10 @@ fn ground_quotes(raw: &str, timestamped: &str) -> String {
                     }
                 }
                 if let Some(ts) = grounder.locate(&quote) {
-                    out.push_str(&format!("> *\"{}\"*\n> — {speaker} — [{ts}]\n\n", quote.trim()));
+                    out.push_str(&format!(
+                        "> *\"{}\"*\n> — {speaker} — [{ts}]\n\n",
+                        quote.trim()
+                    ));
                     kept += 1;
                 }
             }
@@ -606,7 +824,10 @@ impl QuoteGrounder {
             return None;
         }
         let pos = self.norm.find(q)?;
-        self.ts_at.get(pos).cloned().or_else(|| Some("00:00:00".to_string()))
+        self.ts_at
+            .get(pos)
+            .cloned()
+            .or_else(|| Some("00:00:00".to_string()))
     }
 }
 
@@ -692,7 +913,11 @@ async fn generate_quotes(
         let user = prompts::user_quotes_from_transcript(chunk);
         match call_one(backend, chat_opts, Artifact::Quotes, sys.clone(), user).await {
             Ok(t) => all.push(t.trim().to_string()),
-            Err(e) => crate::ui::warn(&format!("quotes chunk {}/{} failed — {e:#}", i + 1, chunks.len())),
+            Err(e) => crate::ui::warn(&format!(
+                "quotes chunk {}/{} failed — {e:#}",
+                i + 1,
+                chunks.len()
+            )),
         }
     }
     if all.is_empty() {
@@ -732,7 +957,11 @@ async fn generate_bullets(
         let user = prompts::user_bullets_chunk(chunk, i + 1, chunks.len());
         match call_one(backend, chat_opts, Artifact::Bullets, sys.clone(), user).await {
             Ok(text) => partials.push(text),
-            Err(e) => crate::ui::warn(&format!("bullets chunk {}/{} failed — {e:#}", i + 1, chunks.len())),
+            Err(e) => crate::ui::warn(&format!(
+                "bullets chunk {}/{} failed — {e:#}",
+                i + 1,
+                chunks.len()
+            )),
         }
     }
 
@@ -780,7 +1009,9 @@ fn chunk_text(text: &str, max_chars: usize, overlap: usize) -> Vec<String> {
             let mut rest = line;
             while rest.len() > max_chars {
                 let mut split = max_chars;
-                while !rest.is_char_boundary(split) && split > 0 { split -= 1; }
+                while !rest.is_char_boundary(split) && split > 0 {
+                    split -= 1;
+                }
                 chunks.push(rest[..split].to_string());
                 rest = &rest[split..];
             }
@@ -794,7 +1025,9 @@ fn chunk_text(text: &str, max_chars: usize, overlap: usize) -> Vec<String> {
                 if let Some(prev) = chunks.last() {
                     let start = prev.len().saturating_sub(overlap);
                     let mut s = start;
-                    while !prev.is_char_boundary(s) && s < prev.len() { s += 1; }
+                    while !prev.is_char_boundary(s) && s < prev.len() {
+                        s += 1;
+                    }
                     current.push_str(&prev[s..]);
                 }
             }
@@ -824,7 +1057,10 @@ mod tests {
         let chunks = chunk_text(&text, 1000, 100);
         assert!(chunks.len() > 1, "expected multiple chunks");
         for c in &chunks {
-            assert!(c.chars().count() <= 1000 + 100, "chunk within budget+overlap");
+            assert!(
+                c.chars().count() <= 1000 + 100,
+                "chunk within budget+overlap"
+            );
         }
     }
 
@@ -851,9 +1087,18 @@ mod tests {
         let raw = "> *\"I have the high ground now\"*\n> — Obi-Wan — [09:99:99]\n\n\
                    > *\"this line was completely invented\"*\n> — Nobody — [00:00:01]\n";
         let out = ground_quotes(raw, ts);
-        assert!(out.contains("I have the high ground now"), "kept real quote: {out}");
-        assert!(out.contains("[00:01:10]"), "timestamp pinned to transcript: {out}");
-        assert!(!out.to_lowercase().contains("invented"), "dropped fabricated: {out}");
+        assert!(
+            out.contains("I have the high ground now"),
+            "kept real quote: {out}"
+        );
+        assert!(
+            out.contains("[00:01:10]"),
+            "timestamp pinned to transcript: {out}"
+        );
+        assert!(
+            !out.to_lowercase().contains("invented"),
+            "dropped fabricated: {out}"
+        );
     }
 
     #[test]
@@ -868,8 +1113,18 @@ mod tests {
     fn candidate_names_are_derived() {
         assert_eq!(candidate_name("summary.md", false), "summary.md");
         assert_eq!(candidate_name("summary.md", true), "summary.candidate.md");
-        assert_eq!(candidate_name("dm-notes.json", true), "dm-notes.candidate.json");
+        assert_eq!(
+            candidate_name("dm-notes.json", true),
+            "dm-notes.candidate.json"
+        );
         assert_eq!(artifact_file(Artifact::Quotes, true), "quotes.candidate.md");
         assert_eq!(artifact_file(Artifact::Quotes, false), "quotes.md");
+    }
+
+    #[test]
+    fn estimates_cost_for_known_api_models_only() {
+        assert!(estimated_cost("gpt-4o-mini", 1_000_000, 1_000_000).unwrap() > 0.0);
+        assert!(estimated_cost("claude-sonnet-4", 1, 1).is_some());
+        assert!(estimated_cost("qwen3.5:27b", 1, 1).is_none());
     }
 }

@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::{BackendConfig, GlobalConfig};
 
@@ -184,10 +183,7 @@ async fn check_anthropic(b: &BackendConfig, g: &GlobalConfig) -> std::result::Re
 }
 
 fn which(cmd: &str) -> Option<PathBuf> {
-    let out = Command::new("which").arg(cmd).output().ok()?;
-    if !out.status.success() { return None; }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+    crate::util::find_in_path(cmd)
 }
 
 pub fn ensure_dirs() -> Result<()> {

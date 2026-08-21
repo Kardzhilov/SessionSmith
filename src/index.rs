@@ -27,8 +27,8 @@ fn open(campaign: &CampaignConfig) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(&path)
-        .with_context(|| format!("opening index db {}", path.display()))?;
+    let conn =
+        Connection::open(&path).with_context(|| format!("opening index db {}", path.display()))?;
     init_schema(&conn)?;
     Ok(conn)
 }
@@ -62,7 +62,10 @@ fn init_schema(conn: &Connection) -> Result<()> {
 }
 
 fn now_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Index (or re-index) every artifact file in a session's notes directory.
@@ -85,7 +88,11 @@ fn record_into(conn: &Connection, stem: &str, notes_dir: &Path) -> Result<()> {
         if ext != "md" && ext != "json" {
             continue;
         }
-        let kind = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let kind = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         conn.execute(
             "INSERT INTO artifacts (session, kind, path, content, updated)
@@ -127,7 +134,9 @@ fn search_conn(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
     match search_fts(conn, query) {
         Ok(hits) => Ok(hits),
         Err(error) => {
-            crate::ui::warn(&format!("FTS query unavailable ({error}); using literal search"));
+            crate::ui::warn(&format!(
+                "FTS query unavailable ({error}); using literal search"
+            ));
             search_like(conn, query)
         }
     }
@@ -144,7 +153,9 @@ fn fts_query(query: &str) -> Option<String> {
 }
 
 fn search_fts(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
-    let Some(query) = fts_query(query) else { return Ok(Vec::new()) };
+    let Some(query) = fts_query(query) else {
+        return Ok(Vec::new());
+    };
     let mut stmt = conn.prepare(
         "SELECT session, kind, path,
                 snippet(artifacts_fts, 3, '«', '»', ' … ', 12) AS snippet
@@ -161,13 +172,17 @@ fn search_fts(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
             snippet: row.get(3)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn search_like(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
     let like = format!(
         "%{}%",
-        query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
     );
     let mut stmt = conn.prepare(
         "SELECT session, kind, path, content FROM artifacts
@@ -187,7 +202,12 @@ fn search_like(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
     for row in rows {
         let (session, kind, path, content) = row?;
         let snippet = make_snippet(&content, &needle);
-        hits.push(SearchHit { session, kind, path, snippet });
+        hits.push(SearchHit {
+            session,
+            kind,
+            path,
+            snippet,
+        });
     }
     Ok(hits)
 }
@@ -198,13 +218,26 @@ fn make_snippet(content: &str, needle: &str) -> String {
     let Some(pos) = lower.find(needle) else {
         return content.chars().take(120).collect();
     };
-    let start = content[..pos].char_indices().rev().nth(40).map(|(i, _)| i).unwrap_or(0);
+    let start = content[..pos]
+        .char_indices()
+        .rev()
+        .nth(40)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     let end_rel = pos + needle.len();
-    let end = content[end_rel..].char_indices().nth(80).map(|(i, _)| end_rel + i).unwrap_or(content.len());
+    let end = content[end_rel..]
+        .char_indices()
+        .nth(80)
+        .map(|(i, _)| end_rel + i)
+        .unwrap_or(content.len());
     let mut s = String::new();
-    if start > 0 { s.push('…'); }
+    if start > 0 {
+        s.push('…');
+    }
     s.push_str(content[start..end].trim());
-    if end < content.len() { s.push('…'); }
+    if end < content.len() {
+        s.push('…');
+    }
     s.replace('\n', " ")
 }
 
@@ -218,8 +251,16 @@ mod tests {
         init_schema(&conn).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("summary.md"), "The party found the cursed amulet in the crypt.").unwrap();
-        std::fs::write(dir.path().join("recap.md"), "A quiet evening at the tavern.").unwrap();
+        std::fs::write(
+            dir.path().join("summary.md"),
+            "The party found the cursed amulet in the crypt.",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("recap.md"),
+            "A quiet evening at the tavern.",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("notes.txt"), "should be ignored").unwrap();
 
         record_into(&conn, "session1", dir.path()).unwrap();
@@ -254,5 +295,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(search_conn(&conn, "C:\\notes").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migrates_v1_database_into_fts_without_losing_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE artifacts (
+                id INTEGER PRIMARY KEY, session TEXT NOT NULL, kind TEXT NOT NULL,
+                path TEXT NOT NULL, content TEXT NOT NULL, updated INTEGER NOT NULL,
+                UNIQUE(session, kind)
+             );
+             INSERT INTO artifacts(session, kind, path, content, updated)
+             VALUES ('session1', 'summary.md', 'summary.md', 'The basilisk is awake.', 0);
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        init_schema(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(search_conn(&conn, "basilisk").unwrap().len(), 1);
     }
 }

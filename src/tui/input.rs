@@ -49,6 +49,10 @@ impl App {
                 self.on_key_picker(key);
                 return;
             }
+            Overlay::SpeakerMap(_) => {
+                self.on_key_speaker_map(key);
+                return;
+            }
             Overlay::ThemePicker { .. } => {
                 self.on_key_theme_picker(key);
                 return;
@@ -240,6 +244,58 @@ impl App {
                 self.global.save().ok();
                 self.status = format!("Theme: {name}");
                 self.overlay = Overlay::None;
+            }
+            _ => {}
+        }
+    }
+
+    fn on_key_speaker_map(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::SpeakerMap(state) = &mut self.overlay {
+                    state.cursor = state.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::SpeakerMap(state) = &mut self.overlay {
+                    state.cursor = (state.cursor + 1).min(state.labels.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Enter => {
+                if let Overlay::SpeakerMap(state) = &mut self.overlay {
+                    let Some(label) = state.labels.get(state.cursor).cloned() else { return };
+                    let current = state.map.get(&label).and_then(|name| state.choices.iter().position(|choice| choice == name));
+                    let next = current.map(|index| (index + 1) % state.choices.len()).unwrap_or(0);
+                    let choice = &state.choices[next];
+                    if choice == "Skip" { state.map.remove(&label); } else { state.map.insert(label, choice.clone()); }
+                }
+            }
+            KeyCode::Char('p') => {
+                let preview = if let Overlay::SpeakerMap(state) = &self.overlay {
+                    state.labels.get(state.cursor).and_then(|label| {
+                        state.preview_offsets.get(label).zip(state.audio.clone())
+                            .map(|(offset, audio)| (audio, label.clone(), *offset))
+                    })
+                } else { None };
+                if let Some((audio, label, offset)) = preview {
+                    self.start_player(&audio, &label, offset);
+                } else {
+                    self.status = "No source audio or diarized SRT cue available for preview".into();
+                }
+            }
+            KeyCode::Char('w') => {
+                let result = if let (Overlay::SpeakerMap(state), Some(campaign)) = (&self.overlay, &self.campaign) {
+                    crate::speakers::apply_to_session(&campaign.transcripts_dir(), &state.stem, &state.map)
+                } else { Ok(()) };
+                match result {
+                    Ok(()) => {
+                        self.overlay = Overlay::None;
+                        self.load_campaign_data();
+                        self.status = "Speaker mapping saved".into();
+                    }
+                    Err(error) => self.message("Could not save mapping", &format!("{error:#}"), true),
+                }
             }
             _ => {}
         }
@@ -840,6 +896,7 @@ impl App {
 
     pub fn dispatch(&mut self, action: Action) {
         match action {
+            Action::NewCampaign => self.request_new_campaign(),
             Action::RunPipeline => self.open_audio_picker(PickerKind::AudioRun),
             Action::Transcribe => self.open_audio_picker(PickerKind::AudioTranscribe),
             Action::GenerateNotes => self.open_artifact_picker(),
@@ -874,6 +931,7 @@ impl App {
             Action::RerunReplace => self.open_rerun_picker(false),
             Action::RerunKeepBoth => self.open_rerun_picker(true),
             Action::ToggleDiarize => self.toggle_diarize(),
+            Action::MapSpeakers => self.request_speaker_mapping(),
             Action::RebuildLog => self.start_job(JobRequestBuilder {
                 title: "Rebuild campaign log".into(),
                 kind: JobKind::RebuildLog,

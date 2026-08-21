@@ -35,6 +35,7 @@ humantime = "2"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 regex = "1"
 sha2 = "0.10"
+sha1 = "0.10"
 hex = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 whisper-rs = { version = "0.14", optional = true }
