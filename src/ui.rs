@@ -7,6 +7,7 @@ use owo_colors::OwoColorize;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
+use unicode_width::UnicodeWidthStr;
 
 /// Structured progress events emitted by the pipeline/transcription code.
 ///
@@ -33,6 +34,7 @@ pub enum UiEvent {
         label: String,
         pos: u64,
         total: u64,
+        rate: Option<f64>,
     },
     /// A background job finished: `Ok(summary)` or `Err(message)`.
     JobDone(std::result::Result<String, String>),
@@ -42,6 +44,20 @@ pub enum UiEvent {
 }
 
 static SINK: Lazy<Mutex<Option<UnboundedSender<UiEvent>>>> = Lazy::new(|| Mutex::new(None));
+static COLOR_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
+
+/// Set global terminal colour output. The CLI calls this for `--no-color`.
+pub fn set_color_enabled(enabled: bool) {
+    if let Ok(mut value) = COLOR_ENABLED.lock() {
+        *value = enabled;
+    }
+    owo_colors::set_override(enabled);
+}
+
+/// Whether command output may include ANSI styling.
+pub fn color_enabled() -> bool {
+    COLOR_ENABLED.lock().map(|value| *value).unwrap_or(true)
+}
 
 /// Install (or clear with `None`) the process-wide UI event sink. While a sink
 /// is active, the status helpers emit [`UiEvent`]s instead of printing.
@@ -69,10 +85,16 @@ fn emit(ev: UiEvent) -> bool {
 /// Emit a progress update to the TUI (no-op outside the TUI). `total == 0`
 /// marks the length as unknown.
 pub fn progress(label: &str, pos: u64, total: u64) {
+    progress_with_rate(label, pos, total, None);
+}
+
+/// Emit a progress update with an optional unit-per-second rate.
+pub fn progress_with_rate(label: &str, pos: u64, total: u64, rate: Option<f64>) {
     emit(UiEvent::Progress {
         label: label.to_string(),
         pos,
         total,
+        rate,
     });
 }
 
@@ -92,15 +114,17 @@ pub fn panel(title: &str, lines: &[String]) {
         .map(|l| visible_width(l))
         .max()
         .unwrap_or(0)
-        .max(title.len() + 4);
-    let bar = "─".repeat(width + 2);
+        .max(visible_width(title) + 4);
     println!(
         "{} {} {}",
         "╭".bright_black(),
         title.bold().cyan(),
-        format!("{}╮", "─".repeat(width.saturating_sub(title.len()))).bright_black()
+        format!(
+            "{}╮",
+            "─".repeat(width.saturating_sub(visible_width(title)))
+        )
+        .bright_black()
     );
-    let _ = bar; // future use
     for line in lines {
         let pad = " ".repeat(width.saturating_sub(visible_width(line)));
         println!(
@@ -119,9 +143,8 @@ pub fn panel(title: &str, lines: &[String]) {
     );
 }
 
-fn visible_width(s: &str) -> usize {
-    // Naive: strip ANSI escapes.
-    let mut count = 0;
+pub(crate) fn visible_width(s: &str) -> usize {
+    let mut plain = String::with_capacity(s.len());
     let mut in_esc = false;
     for c in s.chars() {
         if c == '\x1b' {
@@ -134,9 +157,9 @@ fn visible_width(s: &str) -> usize {
             }
             continue;
         }
-        count += 1;
+        plain.push(c);
     }
-    count
+    UnicodeWidthStr::width(plain.as_str())
 }
 
 pub fn header(title: &str) {
@@ -241,4 +264,16 @@ pub fn new_table(headers: &[&str]) -> Table {
         .set_content_arrangement(ContentArrangement::Dynamic);
     t.set_header(headers.iter().map(|h| Cell::new(h).fg(TableColor::Cyan)));
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_width_ignores_ansi_and_counts_wide_characters() {
+        assert_eq!(visible_width("\x1b[31mred\x1b[0m"), 3);
+        assert_eq!(visible_width("表"), 2);
+        assert_eq!(visible_width("café"), 4);
+    }
 }

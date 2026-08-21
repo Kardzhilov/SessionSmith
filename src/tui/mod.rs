@@ -410,21 +410,25 @@ mod tests {
         app.job_running = true;
         app.job_title = "Run".into();
         app.job_started = Some(std::time::Instant::now());
+        let started = std::time::Instant::now();
         app.job_stages = vec![
-            "Transcribe · session1".into(),
-            "Outline".into(),
-            "Notes".into(),
+            ("Transcribe · session1".into(), started),
+            (
+                "Outline".into(),
+                started + std::time::Duration::from_secs(4),
+            ),
+            ("Notes".into(), started + std::time::Duration::from_secs(7)),
         ];
-        app.job_progress = Some(("transcribing".into(), 45, 600));
+        app.job_progress = Some(("transcribing".into(), 45, 600, None));
         app.job_log.push((LogLevel::Step, "Notes".into()));
         for w in [40u16, 70, 110] {
             let _ = render_to_buffer(&mut app, w, 24);
         }
 
         // Indeterminate (pulse) bar + byte-sized download counter.
-        app.job_progress = Some(("downloading model".into(), 0, 0));
+        app.job_progress = Some(("downloading model".into(), 0, 0, None));
         let _ = render_to_buffer(&mut app, 80, 24);
-        app.job_progress = Some(("downloading model".into(), 5_000_000, 12_000_000));
+        app.job_progress = Some(("downloading model".into(), 5_000_000, 12_000_000, None));
         let _ = render_to_buffer(&mut app, 80, 24);
 
         // Finished: stages should all read as done without panicking.

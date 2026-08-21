@@ -127,6 +127,21 @@ pub fn builtins() -> Vec<Theme> {
             selection_bg: Color::White,
             selection_fg: Color::Black,
         },
+        Theme {
+            name: "paper".into(),
+            bg: Color::Reset,
+            fg: rgb(0x2a, 0x2a, 0x33),
+            primary: rgb(0x1d, 0x4e, 0xd8),
+            accent: rgb(0x7c, 0x3a, 0xed),
+            success: rgb(0x15, 0x80, 0x3d),
+            warn: rgb(0xb4, 0x53, 0x09),
+            error: rgb(0xb9, 0x1c, 0x1c),
+            muted: rgb(0x6b, 0x72, 0x80),
+            border: rgb(0x9c, 0xa3, 0xaf),
+            border_focus: rgb(0x1d, 0x4e, 0xd8),
+            selection_bg: rgb(0xdb, 0xea, 0xfe),
+            selection_fg: rgb(0x1e, 0x29, 0x3b),
+        },
     ]
 }
 
@@ -234,5 +249,16 @@ fn parse_color(s: Option<String>) -> Option<Color> {
         "darkgray" | "darkgrey" => Some(Color::DarkGray),
         "white" => Some(Color::White),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paper_theme_is_available() {
+        let paper = builtins().into_iter().find(|theme| theme.name == "paper");
+        assert!(paper.is_some());
     }
 }

@@ -7,8 +7,9 @@ pub mod openai;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use std::collections::VecDeque;
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::config::GlobalConfig;
@@ -344,7 +345,8 @@ pub async fn collect_with_usage(
     let mut rx = backend.stream_chat(messages, opts).await?;
     let mut out = String::new();
     let mut tokens = 0usize;
-    let mut last_emit = 0usize;
+    let mut last_emit = Instant::now() - Duration::from_millis(500);
+    let mut samples: VecDeque<(Instant, usize)> = VecDeque::new();
     let mut usage: Option<LlmUsage> = None;
     while let Some(chunk) = rx.recv().await {
         let chunk = match chunk {
@@ -359,10 +361,11 @@ pub async fn collect_with_usage(
         match chunk {
             StreamEvent::Progress(message) => {
                 if let Some(n) = message.strip_prefix("thinking:") {
+                    let tokens = n.trim().parse().unwrap_or(0);
                     if let Some(pb) = spinner {
-                        pb.set_message(format!("thinking · ~{n} tokens (reasoning…)"));
+                        pb.set_message(format!("thinking · {tokens} tok"));
                     }
-                    crate::ui::progress(&format!("thinking · ~{n} tokens (reasoning…)"), 0, 0);
+                    crate::ui::progress("thinking", tokens, 0);
                 }
             }
             StreamEvent::Usage(next) => {
@@ -373,16 +376,42 @@ pub async fn collect_with_usage(
             StreamEvent::Text(chunk) => {
                 tokens += chunk.split_whitespace().count();
                 out.push_str(&chunk);
-                if let Some(pb) = spinner {
-                    pb.set_message(format!("streaming · ~{tokens} tokens"));
+                let now = Instant::now();
+                samples.push_back((now, tokens));
+                while samples
+                    .front()
+                    .map(|(time, _)| now.duration_since(*time) > Duration::from_secs(5))
+                    .unwrap_or(false)
+                {
+                    samples.pop_front();
                 }
-                // Throttle progress events to the TUI so we don't flood the channel.
-                if tokens >= last_emit + 16 {
-                    last_emit = tokens;
-                    crate::ui::progress(&format!("generating · ~{tokens} tokens"), 0, 0);
+                // A half-second cadence keeps both the TUI and CLI responsive without
+                // flooding their progress channels.
+                if now.duration_since(last_emit) >= Duration::from_millis(500) {
+                    last_emit = now;
+                    let rate = rolling_token_rate(&samples);
+                    if let Some(pb) = spinner {
+                        pb.set_message(format!("generating · {tokens} tok · {rate:.1} tok/s"));
+                    }
+                    crate::ui::progress_with_rate("generating", tokens as u64, 0, Some(rate));
                 }
             }
         }
     }
     Ok(CollectedResponse { text: out, usage })
+}
+
+fn rolling_token_rate(samples: &VecDeque<(Instant, usize)>) -> f64 {
+    let Some((first_time, first_tokens)) = samples.front() else {
+        return 0.0;
+    };
+    let Some((last_time, last_tokens)) = samples.back() else {
+        return 0.0;
+    };
+    let elapsed = last_time.duration_since(*first_time).as_secs_f64();
+    if elapsed > 0.0 {
+        last_tokens.saturating_sub(*first_tokens) as f64 / elapsed
+    } else {
+        0.0
+    }
 }

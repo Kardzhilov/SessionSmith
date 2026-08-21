@@ -125,6 +125,19 @@ fn render_all(out_dir: &Path) -> std::io::Result<()> {
         "SessionSmith — live pipeline",
     )?;
 
+    // 5) The built-in paper theme, checked against the same real dashboard.
+    let mut app = App::new(handle);
+    set_theme(&mut app, "paper");
+    select_campaign(&mut app, "Emberfall");
+    app.pane = Pane::Sessions;
+    let buf = super::render_to_buffer(&mut app, w, h);
+    write_svg(
+        &out_dir.join("paper.svg"),
+        &buf,
+        &app,
+        "SessionSmith — paper theme",
+    )?;
+
     Ok(())
 }
 

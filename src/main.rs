@@ -32,6 +32,9 @@ async fn main() -> Result<()> {
     .ok();
 
     let cli = Cli::parse();
+    if cli.no_color {
+        sessionsmith::ui::set_color_enabled(false);
+    }
 
     // Propagate --campaign / -C into env so resolve_campaign() picks it up
     // regardless of which sub-command is running.

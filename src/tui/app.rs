@@ -276,6 +276,8 @@ pub struct Rects {
     pub footer_hits: Vec<(u16, u16, u16, FooterCmd)>,
     /// The live-job log pane.
     pub job: Rect,
+    /// The clickable progress track in the audio transport bar.
+    pub player_track: Rect,
     /// The interactive model-manager content pane (inner area).
     pub models_pane: Rect,
     /// Clickable model-row buttons: `(x0, x1, row_y, row_index, install)`.
@@ -324,9 +326,15 @@ pub struct App {
     pub preset: Option<Preset>,
     pub preset_name: String,
     pub global: GlobalConfig,
+    /// Cached ASR labels for the header; refreshed when campaign/config changes.
+    asr_model_label: String,
+    asr_device_label: String,
 
     pub audio: Vec<AudioFile>,
     pub audio_idx: usize,
+    /// Results from the nonblocking sidebar duration probes.
+    audio_probe_rx: Option<std::sync::mpsc::Receiver<(usize, usize, Option<f64>)>>,
+    audio_probe_generation: usize,
 
     pub sessions: Vec<SessionEntry>,
     pub session_idx: usize,
@@ -358,16 +366,18 @@ pub struct App {
     pub job_scroll: u16,
     /// When true, the job pane stays pinned to the newest output.
     pub job_follow: bool,
-    /// Latest progress update `(label, pos, total)`; `total == 0` = indeterminate.
-    pub job_progress: Option<(String, u64, u64)>,
+    /// Latest progress update `(label, pos, total, rate)`; `total == 0` = indeterminate.
+    pub job_progress: Option<(String, u64, u64, Option<f64>)>,
     /// Ordered high-level pipeline phases seen during the current job (for the
     /// animated stage timeline). The last entry is the active phase.
-    pub job_stages: Vec<String>,
+    pub job_stages: Vec<(String, std::time::Instant)>,
     /// When the current job started, for the elapsed-time readout.
     pub job_started: Option<std::time::Instant>,
     /// Frozen elapsed time of the last-finished job (so the readout stops
     /// counting once the job is done).
     pub job_elapsed: Option<std::time::Duration>,
+    /// Completion anchor used to freeze stage durations after a job ends.
+    pub job_finished_at: Option<std::time::Instant>,
     /// Animation frame counter (advances each draw) for the working spinner.
     pub tick: u64,
     /// Pending model jobs waiting for the current one to finish.
@@ -433,8 +443,12 @@ impl App {
             preset: None,
             preset_name: "—".into(),
             global,
+            asr_model_label: String::new(),
+            asr_device_label: String::new(),
             audio: Vec::new(),
             audio_idx: 0,
+            audio_probe_rx: None,
+            audio_probe_generation: 0,
             sessions: Vec::new(),
             session_idx: 0,
             pane: Pane::Campaigns,
@@ -457,6 +471,7 @@ impl App {
             job_stages: Vec::new(),
             job_started: None,
             job_elapsed: None,
+            job_finished_at: None,
             tick: 0,
             job_queue: VecDeque::new(),
             models: None,
@@ -719,6 +734,8 @@ impl App {
         self.log_selected = false;
         self.viewer_lines.clear();
 
+        self.refresh_asr_labels();
+
         let Some(entry) = self.campaigns.get(self.campaign_idx) else {
             return;
         };
@@ -735,6 +752,7 @@ impl App {
         if let Ok(files) = audio::scan(&crate::config::audio_dir(), &tx_dir) {
             self.audio = files;
         }
+        self.start_audio_duration_probes();
         self.audio_idx = 0;
         self.audio_state
             .select(if self.audio.is_empty() { None } else { Some(0) });
@@ -808,16 +826,33 @@ impl App {
         self.campaign = Some(cfg);
     }
 
-    fn asr_model(&self) -> String {
-        self.global.asr.model.clone().unwrap_or_else(|| {
-            crate::hardware::recommend(&crate::hardware::detect())
+    fn refresh_asr_labels(&mut self) {
+        let hardware = crate::hardware::detect();
+        self.asr_model_label = self.global.asr.model.clone().unwrap_or_else(|| {
+            crate::hardware::recommend(&hardware)
                 .whisper_model
                 .to_string()
-        })
+        });
+        self.asr_device_label = asr_device_label(
+            self.global.asr.device.as_deref(),
+            hardware.gpu.as_ref().map(|gpu| gpu.vendor.as_str()),
+        );
+    }
+
+    fn asr_model(&self) -> String {
+        self.asr_model_label.clone()
     }
 
     pub fn asr_model_label(&self) -> String {
         self.asr_model()
+    }
+
+    pub fn asr_runtime_label(&self) -> String {
+        format!(
+            "{} · {}",
+            crate::asr::engine_of(&self.asr_model_label).label(),
+            self.asr_device_label
+        )
     }
 
     /// If re-running `stem` could change the transcript — i.e. the source audio
@@ -1092,6 +1127,14 @@ impl App {
         }
     }
 
+    /// Seek the active player to an absolute position in seconds.
+    pub(super) fn player_seek_to(&mut self, position: f64) {
+        if let Some(p) = &mut self.player {
+            p.seek_to(position);
+            self.status = format!("⏩ {}", super::player::fmt_time(p.position()));
+        }
+    }
+
     /// Stop and drop the active player.
     pub(super) fn stop_audio(&mut self) {
         if self.player.take().is_some() {
@@ -1198,6 +1241,7 @@ impl App {
     // ---- job events ------------------------------------------------------
 
     pub fn drain_job_events(&mut self) {
+        self.drain_audio_duration_probes();
         // Absorb the background Ollama-installed query, if it has arrived.
         if let Some(mut rx) = self.model_refresh_rx.take() {
             match rx.try_recv() {
@@ -1221,12 +1265,23 @@ impl App {
                     UiEvent::Warn(m) => self.job_log.push((LogLevel::Warn, m)),
                     UiEvent::Error(m) => self.job_log.push((LogLevel::Error, m)),
                     UiEvent::Info(m) => self.job_log.push((LogLevel::Info, m)),
-                    UiEvent::Progress { label, pos, total } => {
-                        self.job_progress = Some((label, pos, total));
+                    UiEvent::Progress {
+                        label,
+                        pos,
+                        total,
+                        rate,
+                    } => {
+                        self.job_progress = Some((label, pos, total, rate));
                     }
                     UiEvent::Phase(name) => {
-                        if self.job_stages.last().map(|s| s != &name).unwrap_or(true) {
-                            self.job_stages.push(name.clone());
+                        if self
+                            .job_stages
+                            .last()
+                            .map(|(stage, _)| stage != &name)
+                            .unwrap_or(true)
+                        {
+                            self.job_stages
+                                .push((name.clone(), std::time::Instant::now()));
                         }
                         self.job_log.push((LogLevel::Step, name));
                         self.job_progress = None;
@@ -1240,6 +1295,7 @@ impl App {
             self.job_rx = None;
             self.job_progress = None;
             self.job_elapsed = self.job_started.map(|s| s.elapsed());
+            self.job_finished_at = Some(std::time::Instant::now());
             if self.job_elapsed.unwrap_or_default() >= std::time::Duration::from_secs(60) {
                 print!("\x07");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -1311,6 +1367,45 @@ impl App {
         }
     }
 
+    fn start_audio_duration_probes(&mut self) {
+        self.audio_probe_generation = self.audio_probe_generation.wrapping_add(1);
+        let generation = self.audio_probe_generation;
+        let pending: Vec<(usize, PathBuf)> = self
+            .audio
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.duration_secs.is_none())
+            .map(|(index, file)| (index, file.path.clone()))
+            .collect();
+        if pending.is_empty() {
+            self.audio_probe_rx = None;
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.audio_probe_rx = Some(rx);
+        std::thread::spawn(move || {
+            for (index, path) in pending {
+                let duration = audio::probe_duration(&path);
+                if tx.send((generation, index, duration)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn drain_audio_duration_probes(&mut self) {
+        let Some(rx) = &self.audio_probe_rx else {
+            return;
+        };
+        while let Ok((generation, index, duration)) = rx.try_recv() {
+            if generation == self.audio_probe_generation {
+                if let Some(file) = self.audio.get_mut(index) {
+                    file.duration_secs = duration;
+                }
+            }
+        }
+    }
+
     // ---- starting jobs ---------------------------------------------------
 
     fn require_ready(&mut self) -> Option<(CampaignConfig, Preset)> {
@@ -1349,6 +1444,7 @@ impl App {
         self.job_stages.clear();
         self.job_started = Some(std::time::Instant::now());
         self.job_elapsed = None;
+        self.job_finished_at = None;
         self.job_title = req_kind.title.clone();
         self.status = format!("Running: {}", req_kind.title);
 
@@ -1431,6 +1527,7 @@ impl App {
         self.job_stages.clear();
         self.job_started = Some(std::time::Instant::now());
         self.job_elapsed = None;
+        self.job_finished_at = None;
         let title = if candidate {
             format!("Re-run {stem} (compare)")
         } else {
@@ -1711,6 +1808,9 @@ impl App {
             ModelKind::Asr => self.global.asr.model = Some(id.clone()),
             ModelKind::Ollama => self.global.backend.model = Some(id.clone()),
         }
+        if matches!(kind, ModelKind::Whisper | ModelKind::Asr) {
+            self.refresh_asr_labels();
+        }
         self.global.save().ok();
         self.status = format!("Default set: {id} (saved)");
         self.refresh_model_rows();
@@ -1870,10 +1970,19 @@ impl App {
         self.job_stages.clear();
         self.job_started = Some(std::time::Instant::now());
         self.job_elapsed = None;
+        self.job_finished_at = None;
         self.job_title = title.clone();
         self.status = format!("Running: {title}");
         jobs::spawn_model(&self.handle, tx, self.global.clone(), job);
     }
+}
+
+fn asr_device_label(configured: Option<&str>, detected_vendor: Option<&str>) -> String {
+    configured
+        .filter(|device| !device.eq_ignore_ascii_case("auto"))
+        .map(str::to_string)
+        .or_else(|| detected_vendor.map(str::to_string))
+        .unwrap_or_else(|| "CPU".to_string())
 }
 
 fn notify_job_done(title: &str, succeeded: bool) {

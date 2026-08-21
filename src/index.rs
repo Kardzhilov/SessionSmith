@@ -201,7 +201,7 @@ fn search_like(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
     let mut hits = Vec::new();
     for row in rows {
         let (session, kind, path, content) = row?;
-        let snippet = make_snippet(&content, &needle);
+        let snippet = highlight_markers(&make_snippet(&content, &needle), query);
         hits.push(SearchHit {
             session,
             kind,
@@ -210,6 +210,48 @@ fn search_like(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
         });
     }
     Ok(hits)
+}
+
+/// Mark every case-insensitive query-word match with `«` and `»` for clients
+/// that can render highlighted snippets. Existing FTS5 markers are preserved.
+pub fn highlight_markers(snippet: &str, query: &str) -> String {
+    if snippet.contains('«') || query.trim().is_empty() {
+        return snippet.to_string();
+    }
+    let chars: Vec<char> = snippet.chars().collect();
+    let terms: Vec<Vec<char>> = query
+        .split_whitespace()
+        .map(|term| term.chars().flat_map(char::to_lowercase).collect())
+        .filter(|term: &Vec<char>| !term.is_empty())
+        .collect();
+    let mut matched = vec![false; chars.len()];
+    for term in terms {
+        if term.len() > chars.len() {
+            continue;
+        }
+        for start in 0..=chars.len() - term.len() {
+            if chars[start..start + term.len()]
+                .iter()
+                .flat_map(|character| character.to_lowercase())
+                .eq(term.iter().copied())
+            {
+                matched[start..start + term.len()].fill(true);
+            }
+        }
+    }
+    let mut output = String::with_capacity(snippet.len());
+    let mut in_match = false;
+    for (character, is_match) in chars.into_iter().zip(matched) {
+        if is_match != in_match {
+            output.push(if is_match { '«' } else { '»' });
+            in_match = is_match;
+        }
+        output.push(character);
+    }
+    if in_match {
+        output.push('»');
+    }
+    output
 }
 
 /// Extract a short context window around the first match of `needle`.
@@ -295,6 +337,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(search_conn(&conn, "C:\\notes").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn highlight_markers_are_unicode_safe_and_cover_every_term() {
+        assert_eq!(
+            highlight_markers("The cafe cafe has café", "cafe CAFÉ"),
+            "The «cafe» «cafe» has «café»"
+        );
     }
 
     #[test]

@@ -106,11 +106,13 @@ impl Player {
 
     /// Seek by `delta` seconds (negative to rewind), restarting playback there.
     pub fn seek(&mut self, delta: f64) {
-        let mut target = (self.position() + delta).max(0.0);
-        let dur = self.duration();
-        if dur > 0.0 {
-            target = target.min((dur - 0.2).max(0.0));
-        }
+        self.seek_to(self.position() + delta);
+    }
+
+    /// Seek to an absolute position in seconds, restarting playback there when
+    /// necessary.
+    pub fn seek_to(&mut self, position: f64) {
+        let target = clamp_seek_target(position, self.duration());
         if self.paused {
             self.paused_at = target;
         } else {
@@ -299,5 +301,26 @@ pub fn fmt_time(secs: f64) -> String {
         format!("{h}:{m:02}:{sec:02}")
     } else {
         format!("{m}:{sec:02}")
+    }
+}
+
+fn clamp_seek_target(position: f64, duration: f64) -> f64 {
+    let target = position.max(0.0);
+    if duration > 0.0 {
+        target.min((duration - 0.2).max(0.0))
+    } else {
+        target
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_seek_target_stays_within_known_duration() {
+        assert_eq!(clamp_seek_target(-1.0, 30.0), 0.0);
+        assert_eq!(clamp_seek_target(30.0, 30.0), 29.8);
+        assert_eq!(clamp_seek_target(12.0, 0.0), 12.0);
     }
 }

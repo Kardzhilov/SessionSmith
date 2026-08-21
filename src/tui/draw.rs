@@ -20,6 +20,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let th = app.theme().clone();
     app.tick = app.tick.wrapping_add(1);
+    app.rects.player_track = Rect::default();
 
     // Minimum-size guard.
     if area.width < 44 || area.height < 12 {
@@ -87,7 +88,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 /// A one-line transport bar for the active audio player: icon, label, elapsed /
 /// total time, and a progress bar. Shown above the footer while playing.
-fn draw_player_bar(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
+fn draw_player_bar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let Some(p) = &app.player else { return };
     let pos = p.position();
     let dur = p.duration();
@@ -110,6 +111,7 @@ fn draw_player_bar(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
     let total = area.width as usize;
     let bar_w = total.saturating_sub(pw + hw).max(6);
     let last = bar_w - 1;
+    app.rects.player_track = Rect::new(area.x + pw as u16, area.y, bar_w as u16, 1);
 
     // Progress track with a distinct ● knob at the current position. When the
     // duration is unknown the knob sweeps back and forth so there's still motion.
@@ -118,7 +120,15 @@ fn draw_player_bar(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
     } else {
         th.success_style()
     };
-    let knob_style = th.accent_style().add_modifier(Modifier::BOLD);
+    let knob_style = if app.hover_row == area.y
+        && app.hover_col >= app.rects.player_track.x
+        && app.hover_col < app.rects.player_track.x + app.rects.player_track.width
+    {
+        th.accent_style()
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        th.accent_style().add_modifier(Modifier::BOLD)
+    };
     let knob = if dur > 0.0 {
         ((pos / dur).clamp(0.0, 1.0) * last as f64).round() as usize
     } else {
@@ -162,7 +172,11 @@ fn header_lines(app: &App, th: &Theme, width: u16) -> Vec<Line<'static>> {
         (format!("· {campaign}  "), th.muted_style()),
         (format!("{}  ", app.backend_summary()), th.muted_style()),
         (
-            format!("· asr {} ", app.asr_model_label()),
+            format!(
+                "· asr {} ({}) ",
+                app.asr_model_label(),
+                app.asr_runtime_label()
+            ),
             th.muted_style(),
         ),
         (
@@ -345,12 +359,16 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         app.camp_state.offset(),
         app.campaigns.len(),
     );
-    let camp_items: Vec<ListItem> = app
+    let mut camp_items: Vec<ListItem> = app
         .campaigns
         .iter()
         .enumerate()
         .map(|(i, c)| ListItem::new(c.name.clone()).style(hover_style(th, Some(i) == camp_hov)))
         .collect();
+    if camp_items.is_empty() {
+        camp_items
+            .push(ListItem::new("no campaigns — run: sessionsmith init").style(th.muted_style()));
+    }
     let camp_list = List::new(camp_items)
         .block(section_block("Campaigns", th, app.pane == Pane::Campaigns))
         .highlight_style(th.selection())
@@ -393,6 +411,11 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             .style(hover_style(th, sess_hov == Some(i + 1))),
         );
     }
+    if app.sessions.is_empty() {
+        sess_items.push(
+            ListItem::new("no sessions yet — select audio and press r").style(th.muted_style()),
+        );
+    }
     let sess_list = List::new(sess_items)
         .block(section_block("Sessions", th, app.pane == Pane::Sessions))
         .highlight_style(th.selection())
@@ -402,7 +425,7 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
 
     // Audio.
     let audio_hov = hovered_index(parts[2], hover, app.audio_state.offset(), app.audio.len());
-    let audio_items: Vec<ListItem> = app
+    let mut audio_items: Vec<ListItem> = app
         .audio
         .iter()
         .enumerate()
@@ -411,10 +434,22 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{mark} "), th.muted_style()),
                 Span::raw(f.stem()),
+                Span::styled(
+                    f.duration_secs
+                        .map(|duration| {
+                            format!("  {}", crate::audio::human_duration(Some(duration)))
+                        })
+                        .unwrap_or_default(),
+                    th.muted_style(),
+                ),
             ]))
             .style(hover_style(th, Some(i) == audio_hov))
         })
         .collect();
+    if audio_items.is_empty() {
+        audio_items.push(ListItem::new("drop recordings into ./audio").style(th.muted_style()));
+        audio_items.push(ListItem::new("(wav mp3 m4a flac ogg opus...)").style(th.muted_style()));
+    }
     let audio_list = List::new(audio_items)
         .block(section_block("Audio", th, app.pane == Pane::Audio))
         .highlight_style(th.selection())
@@ -689,7 +724,7 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     if has_bar {
         let bar_area = rows[ri];
         ri += 1;
-        if let Some((label, pos, total)) = app.job_progress.clone() {
+        if let Some((label, pos, total, rate)) = app.job_progress.clone() {
             if total > 0 {
                 let ratio = (pos as f64 / total as f64).clamp(0.0, 1.0);
                 let pct = (ratio * 100.0).round() as u16;
@@ -701,8 +736,16 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                 frame.render_widget(gauge, bar_area);
             } else {
                 // Indeterminate: a marquee pulse gliding over a dim track.
+                let progress_label = if pos > 0 {
+                    let rate = rate
+                        .map(|value| format!(" · {value:.1} tok/s"))
+                        .unwrap_or_default();
+                    format!("{label} · {pos} tok{rate}")
+                } else {
+                    label
+                };
                 frame.render_widget(
-                    pulse_line(&label, bar_area.width as usize, app.tick, th),
+                    pulse_line(&progress_label, bar_area.width as usize, app.tick, th),
                     bar_area,
                 );
             }
@@ -714,6 +757,18 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     // Wrap every log entry to the inner width so long strings roll over.
     let width = (log_area.width as usize).max(1);
     let mut rows: Vec<Line> = Vec::new();
+    if !app.job_queue.is_empty() {
+        let queued = app
+            .job_queue
+            .iter()
+            .map(|(_, title)| title.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        rows.push(Line::from(Span::styled(
+            middle_truncate(&format!("queued: {queued}"), width),
+            th.muted_style(),
+        )));
+    }
     for (lvl, msg) in &app.job_log {
         let (sym, style) = match lvl {
             LogLevel::Ok => ("✓ ", th.success_style()),
@@ -755,6 +810,23 @@ fn draw_job(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     }
 }
 
+fn middle_truncate(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return "…".to_string();
+    }
+    let left = (width - 1).div_ceil(2);
+    let right = width - 1 - left;
+    format!(
+        "{}…{}",
+        chars[..left].iter().collect::<String>(),
+        chars[chars.len() - right..].iter().collect::<String>()
+    )
+}
+
 /// Render the animated pipeline stage timeline (e.g.
 /// `✓ Transcribe → ✓ Outline → ◐ Notes`). Older stages are dropped with a
 /// leading ellipsis when the strip is too narrow.
@@ -768,7 +840,7 @@ fn stage_timeline(app: &App, th: &Theme, width: usize) -> Paragraph<'static> {
     }
     let n = app.job_stages.len();
     let mut segs: Vec<Seg> = Vec::with_capacity(n);
-    for (i, name) in app.job_stages.iter().enumerate() {
+    for (i, (name, started)) in app.job_stages.iter().enumerate() {
         let active = app.job_running && i + 1 == n;
         let (sym, sym_style) = if active {
             (
@@ -783,10 +855,23 @@ fn stage_timeline(app: &App, th: &Theme, width: usize) -> Paragraph<'static> {
         } else {
             th.muted_style()
         };
+        let end = app
+            .job_stages
+            .get(i + 1)
+            .map(|(_, next_started)| *next_started)
+            .or_else(|| {
+                if app.job_running {
+                    Some(std::time::Instant::now())
+                } else {
+                    app.job_finished_at
+                }
+            })
+            .unwrap_or(*started);
+        let duration = human_time(end.saturating_duration_since(*started).as_secs());
         segs.push(Seg {
             sym,
             sym_style,
-            name: name.clone(),
+            name: format!("{name} {duration}"),
             name_style,
         });
     }
@@ -1027,11 +1112,16 @@ fn draw_search(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                     spans.push(Span::styled(format!("{name} · "), th.muted_style()));
                 }
             }
-            spans.extend([
-                Span::styled(format!("{} ", h.session), th.accent_style()),
-                Span::styled(format!("[{}] ", h.kind), th.muted_style()),
-                Span::raw(h.snippet.replace('\n', " ")),
-            ]);
+            spans.push(Span::styled(format!("{} ", h.session), th.accent_style()));
+            spans.push(Span::styled(
+                format!("[{}] ", h.kind),
+                artifact_kind_style(&h.kind, th),
+            ));
+            spans.extend(search_snippet_spans(
+                &h.snippet.replace('\n', " "),
+                &s.query,
+                th,
+            ));
             ListItem::new(Line::from(spans)).style(hover_style(th, Some(row) == hov))
         })
         .collect();
@@ -1053,6 +1143,43 @@ fn draw_search(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .select(if has { Some(cursor) } else { None });
     app.rects.overlay_list = parts[1];
     frame.render_stateful_widget(list, parts[1], &mut app.overlay_state);
+}
+
+fn artifact_kind_style(kind: &str, th: &Theme) -> Style {
+    if kind.contains("summary") {
+        th.accent_style()
+    } else if kind.contains("quote") {
+        th.warn_style()
+    } else if kind.contains("dm") {
+        th.success_style()
+    } else {
+        th.muted_style()
+    }
+}
+
+fn search_snippet_spans(snippet: &str, query: &str, th: &Theme) -> Vec<Span<'static>> {
+    let marked = crate::index::highlight_markers(snippet, query);
+    let mut spans = Vec::new();
+    let mut rest = marked.as_str();
+    while let Some(start) = rest.find('«') {
+        if start > 0 {
+            spans.push(Span::raw(rest[..start].to_string()));
+        }
+        let after_start = &rest[start + '«'.len_utf8()..];
+        let Some(end) = after_start.find('»') else {
+            spans.push(Span::raw(rest[start..].to_string()));
+            return spans;
+        };
+        spans.push(Span::styled(
+            after_start[..end].to_string(),
+            th.accent_style().add_modifier(Modifier::BOLD),
+        ));
+        rest = &after_start[end + '»'.len_utf8()..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::raw(rest.to_string()));
+    }
+    spans
 }
 
 fn draw_picker(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
@@ -1567,6 +1694,7 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
             "player: pause · seek ∓10s · volume · (S stop)",
         ),
         ("c / a", "compare re-run versions · keep the one shown"),
+        ("a (in pickers)", "toggle all checkboxes"),
         ("/", "search notes"),
         (": or Ctrl-P", "command palette"),
         ("T", "cycle theme"),

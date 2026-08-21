@@ -576,8 +576,8 @@ impl App {
             checked[self.audio_idx] = true;
         }
         let title = match kind {
-            PickerKind::AudioRun => "Run pipeline — space to toggle, ⏎ to choose artifacts",
-            PickerKind::AudioTranscribe => "Transcribe — space to toggle, ⏎ to run",
+            PickerKind::AudioRun => "Run pipeline — space toggle · a all · ⏎ choose artifacts",
+            PickerKind::AudioTranscribe => "Transcribe — space toggle · a all · ⏎ run",
             PickerKind::Artifacts
             | PickerKind::RunArtifacts
             | PickerKind::RerunReplace
@@ -612,7 +612,7 @@ impl App {
         let checked: Vec<bool> = ALL_ARTIFACTS.iter().map(|a| defaults.contains(a)).collect();
         self.overlay = Overlay::Picker(PickerState {
             title: format!(
-                "Generate notes for {} — space to toggle, ⏎ to run",
+                "Generate notes for {} — space toggle · a all · ⏎ run",
                 sess.stem
             ),
             kind: PickerKind::Artifacts,
@@ -642,7 +642,7 @@ impl App {
             .map(|a| *a == Artifact::Summary || defaults.contains(a))
             .collect();
         self.overlay = Overlay::Picker(PickerState {
-            title: "Artifacts to create now — space to toggle, ⏎ to run".to_string(),
+            title: "Artifacts to create now — space toggle · a all · ⏎ run".to_string(),
             kind: PickerKind::RunArtifacts,
             items,
             checked,
@@ -691,7 +691,7 @@ impl App {
             (PickerKind::RerunReplace, "replace")
         };
         self.overlay = Overlay::Picker(PickerState {
-            title: format!("Re-run {stem} ({mode}) — space toggle, ⏎ run"),
+            title: format!("Re-run {stem} ({mode}) — space toggle · a all · ⏎ run"),
             kind,
             items,
             checked,
@@ -1234,6 +1234,16 @@ impl App {
 
     fn on_click(&mut self, col: u16, row: u16) {
         let r = self.rects.clone();
+        if rect_contains(r.player_track, col, row) {
+            if let Some(player) = &self.player {
+                if player.duration() > 0.0 {
+                    if let Some(position) = track_position(r.player_track, col, player.duration()) {
+                        self.player_seek_to(position);
+                    }
+                }
+            }
+            return;
+        }
         // Footer keybar is clickable.
         if rect_contains(r.footer, col, row) {
             if let Some((_, _, _, cmd)) = r
@@ -1339,6 +1349,14 @@ fn rect_contains(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
         && col < r.x + r.width
         && row >= r.y
         && row < r.y + r.height
+}
+
+fn track_position(track: ratatui::layout::Rect, col: u16, duration: f64) -> Option<f64> {
+    if track.width < 2 || duration <= 0.0 || !rect_contains(track, col, track.y) {
+        return None;
+    }
+    let offset = (col - track.x) as f64;
+    Some((offset / (track.width - 1) as f64 * duration).clamp(0.0, duration))
 }
 
 /// Map a mouse row inside a bordered list `Rect` to an item index.
