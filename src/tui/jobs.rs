@@ -187,38 +187,44 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
         language: "auto".into(),
         force: req.force_transcribe,
         replacements: req.campaign.transcription.replacements.clone(),
+        source_files: Vec::new(),
         diarize: req.g.asr.diarize,
         vad: req.g.asr.vad,
     };
-    let tmp_dir = std::env::temp_dir().join("sessionsmith_concat");
+    let merge_dir = crate::config::audio_dir().join("merged");
     let total = req.sessions.len();
     let mut produced = 0usize;
+    let mut skipped = 0usize;
 
     for (i, sess) in req.sessions.iter().enumerate() {
         crate::ui::step(i + 1, total, &sess.name);
         crate::ui::phase(&format!("Transcribe · {}", sess.name));
 
+        let missing: Vec<_> = sess.files.iter().filter(|file| !file.exists()).collect();
+        if !missing.is_empty() {
+            for file in missing {
+                crate::ui::warn(&format!("audio not found: {}", file.display()));
+            }
+            crate::ui::warn(&format!("skipping session '{}'", sess.name));
+            skipped += 1;
+            continue;
+        }
+
         // Single-file passthrough; multi-file sessions are concatenated.
         let audio_path = if sess.files.len() == 1 {
             sess.files[0].clone()
         } else {
-            crate::commands::transcribe::prepare_audio(sess, &tmp_dir).await?
+            crate::commands::transcribe::prepare_audio(sess, &merge_dir).await?
         };
-        if !audio_path.exists() {
-            crate::ui::warn(&format!("audio not found: {}", audio_path.display()));
-            continue;
-        }
-
+        let mut session_opts = tx_opts.clone();
+        session_opts.source_files = sess.files.clone();
         let out = transcribe::transcribe(
             &audio_path,
             &req.campaign.transcripts_dir(),
             &req.g,
-            &tx_opts,
+            &session_opts,
         )
         .await?;
-        if sess.files.len() > 1 {
-            std::fs::remove_file(&audio_path).ok();
-        }
 
         if with_notes {
             let session_obj = Session::new(&out.txt, &req.campaign.notes_dir())?;
@@ -236,10 +242,15 @@ async fn run_pipeline(req: JobRequest, with_notes: bool) -> anyhow::Result<Strin
         produced += 1;
     }
 
-    Ok(if with_notes {
-        format!("processed {produced} session(s)")
+    let skipped_suffix = if skipped > 0 {
+        format!("; skipped {skipped} with missing audio")
     } else {
-        format!("transcribed {produced} session(s)")
+        String::new()
+    };
+    Ok(if with_notes {
+        format!("processed {produced} session(s){skipped_suffix}")
+    } else {
+        format!("transcribed {produced} session(s){skipped_suffix}")
     })
 }
 
@@ -319,10 +330,7 @@ async fn run_doctor(req: JobRequest) -> anyhow::Result<String> {
     })
 }
 
-async fn run_rebuild_log(_req: JobRequest) -> anyhow::Result<String> {
-    crate::commands::log_cmd::run(crate::cli::LogArgs {
-        action: Some(crate::cli::LogAction::Rebuild),
-    })
-    .await?;
+async fn run_rebuild_log(req: JobRequest) -> anyhow::Result<String> {
+    crate::commands::log_cmd::rebuild_for(&req.campaign, &req.g, &req.preset).await?;
     Ok("campaign log rebuilt".into())
 }

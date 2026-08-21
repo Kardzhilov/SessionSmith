@@ -11,7 +11,7 @@ use crate::prompts::{Artifact, ALL_ARTIFACTS};
 use crate::session::SessionInput;
 
 use super::app::{
-    Action, App, FooterCmd, JobRequestBuilder, Overlay, Pane, PaletteState, PickerKind,
+    Action, App, ConfirmAction, FooterCmd, JobRequestBuilder, Overlay, Pane, PaletteState, PickerKind,
     PickerState, SearchState,
 };
 use super::fuzzy;
@@ -21,7 +21,7 @@ impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         // Global quit shortcut.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
+            self.request_quit();
             return;
         }
 
@@ -99,7 +99,7 @@ impl App {
             }
         }
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char(':') => self.open_palette(),
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('/') => self.open_search(),
@@ -245,25 +245,31 @@ impl App {
         }
     }
 
-    /// Handle the re-transcribe confirmation prompt. `Y`/Enter re-transcribes,
-    /// `N` keeps the existing transcript, and `Esc` cancels the re-run entirely.
+    /// Handle a pending re-transcribe or quit confirmation.
     fn on_key_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 self.overlay = Overlay::None;
-                if let Some((target, artifacts, candidate)) = self.pending_rerun.take() {
-                    self.start_rerun(target, artifacts, candidate, true);
+                match self.pending_confirm.take() {
+                    Some(ConfirmAction::Rerun(target, artifacts, candidate)) => {
+                        self.start_rerun(target, artifacts, candidate, true);
+                    }
+                    Some(ConfirmAction::Quit) => self.should_quit = true,
+                    None => {}
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.overlay = Overlay::None;
-                if let Some((target, artifacts, candidate)) = self.pending_rerun.take() {
-                    self.start_rerun(target, artifacts, candidate, false);
+                match self.pending_confirm.take() {
+                    Some(ConfirmAction::Rerun(target, artifacts, candidate)) => {
+                        self.start_rerun(target, artifacts, candidate, false);
+                    }
+                    Some(ConfirmAction::Quit) | None => {}
                 }
             }
             KeyCode::Esc => {
                 self.overlay = Overlay::None;
-                self.pending_rerun = None;
+                self.pending_confirm = None;
             }
             _ => {}
         }
@@ -682,7 +688,7 @@ impl App {
                 // (and audio is available), ask whether to re-transcribe.
                 let stem = target.file_stem().unwrap_or_default().to_string_lossy().to_string();
                 if let Some((old_model, new_model)) = self.rerun_model_change(&stem) {
-                    self.pending_rerun = Some((target, artifacts, candidate));
+                    self.pending_confirm = Some(ConfirmAction::Rerun(target, artifacts, candidate));
                     self.overlay = Overlay::Confirm {
                         title: "Re-transcribe?".into(),
                         body: format!(
@@ -852,7 +858,7 @@ impl App {
                 transcripts: Vec::new(),
                 artifacts: Vec::new(),
             }),
-            Action::Quit => self.should_quit = true,
+            Action::Quit => self.request_quit(),
         }
     }
 
@@ -1023,7 +1029,7 @@ impl App {
             FooterCmd::Palette => self.open_palette(),
             FooterCmd::Search => self.open_search(),
             FooterCmd::Help => self.overlay = Overlay::Help,
-            FooterCmd::Quit => self.should_quit = true,
+            FooterCmd::Quit => self.request_quit(),
             FooterCmd::Editor => self.dispatch(Action::OpenInEditor),
             FooterCmd::Run => self.dispatch(Action::RunPipeline),
             FooterCmd::Transcribe => self.dispatch(Action::Transcribe),

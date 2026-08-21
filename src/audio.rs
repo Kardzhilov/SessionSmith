@@ -29,6 +29,9 @@ pub fn scan(dir: &Path, transcripts_dir: &Path) -> Result<Vec<AudioFile>> {
         return Ok(files);
     }
     for entry in WalkDir::new(dir).follow_links(true).into_iter().flatten() {
+        if entry.path().components().any(|part| part.as_os_str() == "merged") {
+            continue;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
@@ -54,6 +57,24 @@ pub fn scan(dir: &Path, transcripts_dir: &Path) -> Result<Vec<AudioFile>> {
     }
     files.sort_by_key(|f| std::cmp::Reverse(f.mtime));
     Ok(files)
+}
+
+/// Find the newest recursively-scanned audio file whose stem matches `stem`.
+pub fn find_by_stem(dir: &Path, stem: &str) -> Option<PathBuf> {
+    WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && !entry.path().components().any(|part| part.as_os_str() == "merged")
+                && entry.path().file_stem().and_then(|value| value.to_str()) == Some(stem)
+                && entry.path().extension().and_then(|value| value.to_str())
+                    .map(|value| AUDIO_EXTS.iter().any(|ext| ext.eq_ignore_ascii_case(value)))
+                    .unwrap_or(false)
+        })
+        .max_by_key(|entry| entry.metadata().ok().and_then(|meta| meta.modified().ok()))
+        .map(|entry| entry.into_path())
 }
 
 /// Probe duration via ffprobe. Returns None if ffprobe is unavailable or fails.
@@ -128,5 +149,19 @@ mod tests {
         let files = scan(&audio_dir, &tx_dir).unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].path.file_name().unwrap(), "new.wav");
+    }
+
+    #[test]
+    fn find_by_stem_recurses_and_prefers_newest_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("2026").join("recordings");
+        std::fs::create_dir_all(&nested).unwrap();
+        let old = tmp.path().join("session.wav");
+        let newest = nested.join("session.flac");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&newest, b"new").unwrap();
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(SystemTime::UNIX_EPOCH).unwrap();
+
+        assert_eq!(find_by_stem(tmp.path(), "session"), Some(newest));
     }
 }

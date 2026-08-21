@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VadSpan {
+    /// Start offset in the original audio, in seconds.
+    pub start: f64,
+    /// Amount of audio removed, in seconds.
+    pub duration: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     /// ASR model id used (e.g. `large-v3-turbo`, `parakeet-v3`).
     pub model: String,
@@ -21,6 +29,15 @@ pub struct SessionMeta {
     /// The audio file that was transcribed (for playback at timestamps).
     #[serde(default)]
     pub source_audio: Option<PathBuf>,
+    /// Original inputs in their session order.
+    #[serde(default)]
+    pub source_files: Vec<PathBuf>,
+    /// Whether VAD was requested for this transcription.
+    #[serde(default)]
+    pub vad: bool,
+    /// Silence intervals removed before ASR, expressed in original time.
+    #[serde(default)]
+    pub vad_removed_spans: Vec<VadSpan>,
     /// Unix seconds when the transcript was produced.
     #[serde(default)]
     pub created: i64,

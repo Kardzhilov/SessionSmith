@@ -25,6 +25,7 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         language: args.language,
         force: args.force,
         replacements: campaign.transcription.replacements.clone(),
+        source_files: Vec::new(),
         diarize: args.diarize || g.asr.diarize,
         vad: args.vad || g.asr.vad,
     };
@@ -39,14 +40,13 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
         }).collect()
     };
 
+    let merge_dir = crate::config::audio_dir().join("merged");
     for (i, sess) in sessions.iter().enumerate() {
         ui::step(i + 1, sessions.len(), &sess.name);
-        let audio_path = prepare_audio(sess, &tx_dir).await?;
-        transcribe::transcribe(&audio_path, &tx_dir, &g, &tx_opts).await?;
-        // Remove temp merged file if it was created in the transcripts dir.
-        if sess.files.len() > 1 && audio_path.parent() == Some(tx_dir.as_path()) {
-            std::fs::remove_file(&audio_path).ok();
-        }
+        let audio_path = prepare_audio(sess, &merge_dir).await?;
+        let mut session_opts = tx_opts.clone();
+        session_opts.source_files = sess.files.clone();
+        transcribe::transcribe(&audio_path, &tx_dir, &g, &session_opts).await?;
     }
     Ok(())
 }
@@ -97,12 +97,12 @@ pub async fn pick_and_build_sessions(g: &GlobalConfig, transcripts_dir: &Path) -
     session::build_sessions(selected, g).await
 }
 
-/// If a session has multiple files, concat them to a temp file; otherwise
+/// If a session has multiple files, concat them to a durable merged file; otherwise
 /// return the single file path directly.
-pub async fn prepare_audio(sess: &SessionInput, tmp_dir: &Path) -> Result<PathBuf> {
+pub async fn prepare_audio(sess: &SessionInput, merge_dir: &Path) -> Result<PathBuf> {
     if sess.files.len() <= 1 {
         Ok(sess.files.first().cloned().unwrap_or_default())
     } else {
-        transcribe::concat_audio_files(&sess.files, &sess.name, tmp_dir).await
+        transcribe::concat_audio_files(&sess.files, &sess.name, merge_dir).await
     }
 }

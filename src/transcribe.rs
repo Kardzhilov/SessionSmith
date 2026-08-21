@@ -62,6 +62,8 @@ pub struct TranscribeOpts {
     pub language: String,
     pub force: bool,
     pub replacements: BTreeMap<String, String>,
+    /// Original session inputs retained in metadata for merged sessions.
+    pub source_files: Vec<PathBuf>,
     /// Enable speaker diarization (whisperX only). Off by default.
     pub diarize: bool,
     /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
@@ -76,6 +78,7 @@ impl TranscribeOpts {
             language,
             force,
             replacements: BTreeMap::new(),
+            source_files: Vec::new(),
             diarize: g.asr.diarize,
             vad: g.asr.vad,
         }
@@ -113,6 +116,75 @@ fn correct_transcript_files(
     Ok(())
 }
 
+fn remap_vad_timestamp(trimmed_secs: f64, spans: &[crate::meta::VadSpan]) -> f64 {
+    let mut removed = 0.0;
+    for span in spans {
+        let compressed_start = span.start - removed;
+        if trimmed_secs < compressed_start {
+            break;
+        }
+        removed += span.duration;
+    }
+    trimmed_secs + removed
+}
+
+fn parse_srt_timestamp(value: &str) -> Option<f64> {
+    let mut parts = value.trim().split([':', ',']);
+    let hours: f64 = parts.next()?.parse().ok()?;
+    let minutes: f64 = parts.next()?.parse().ok()?;
+    let seconds: f64 = parts.next()?.parse().ok()?;
+    let millis: f64 = parts.next()?.parse().ok()?;
+    Some(hours * 3600.0 + minutes * 60.0 + seconds + millis / 1000.0)
+}
+
+fn format_srt_timestamp(seconds: f64) -> String {
+    let millis = (seconds.max(0.0) * 1000.0).round() as u64;
+    format!(
+        "{:02}:{:02}:{:02},{:03}",
+        millis / 3_600_000,
+        (millis / 60_000) % 60,
+        (millis / 1_000) % 60,
+        millis % 1_000,
+    )
+}
+
+fn remap_srt_vad_timestamps(srt: &str, spans: &[crate::meta::VadSpan]) -> String {
+    if spans.is_empty() {
+        return srt.to_string();
+    }
+    srt.lines()
+        .map(|line| {
+            let Some((start, end)) = line.split_once(" --> ") else {
+                return line.to_string();
+            };
+            match (parse_srt_timestamp(start), parse_srt_timestamp(end)) {
+                (Some(start), Some(end)) => format!(
+                    "{} --> {}",
+                    format_srt_timestamp(remap_vad_timestamp(start, spans)),
+                    format_srt_timestamp(remap_vad_timestamp(end, spans)),
+                ),
+                _ => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn finalize_transcript(
+    txt: &Path,
+    srt: &Path,
+    replacements: &BTreeMap<String, String>,
+    vad_spans: &[crate::meta::VadSpan],
+) -> Result<()> {
+    if !vad_spans.is_empty() && srt.exists() {
+        let text = std::fs::read_to_string(srt)
+            .with_context(|| format!("reading VAD transcript timestamps: {}", srt.display()))?;
+        std::fs::write(srt, remap_srt_vad_timestamps(&text, vad_spans))
+            .with_context(|| format!("writing remapped transcript timestamps: {}", srt.display()))?;
+    }
+    correct_transcript_files(txt, srt, replacements)
+}
+
 #[derive(Debug)]
 pub struct TranscribeOutput {
     pub txt: PathBuf,
@@ -147,22 +219,6 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
 
     let backend = resolve_asr_backend(g, opts)?;
 
-    // Records model + source audio after a successful transcription, so a
-    // re-run can skip transcription (same model) and the player can seek.
-    let write_meta = |engine: &str| {
-        let _ = crate::meta::save(
-            out_dir,
-            &stem,
-            &crate::meta::SessionMeta {
-                model: opts.model.clone(),
-                engine: engine.to_string(),
-                language: opts.language.clone(),
-                source_audio: Some(audio.to_path_buf()),
-                created: crate::meta::now_secs(),
-            },
-        );
-    };
-
     // whisper.cpp (external or in-process) needs a ggml model file; whisperx
     // manages its own model cache via Hugging Face.
     let model_path_opt = if backend.needs_ggml_model() {
@@ -175,18 +231,41 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     // Optional VAD (silence-removal) pre-pass. Produces a temp file with the
     // same stem (so whisperx names its outputs correctly) that is fed to ASR.
     let hf_token = g.resolved_hf_token();
-    let asr_input: PathBuf = if opts.vad {
+    let (asr_input, vad_spans): (PathBuf, Vec<crate::meta::VadSpan>) = if opts.vad {
         match apply_vad(audio, &stem) {
-            Ok(p) => p,
+            Ok(vad) => (vad.input, vad.removed_spans),
             Err(e) => {
                 crate::ui::warn(&format!("VAD pre-pass failed ({e}); using original audio"));
-                audio.to_path_buf()
+                (audio.to_path_buf(), Vec::new())
             }
         }
     } else {
-        audio.to_path_buf()
+        (audio.to_path_buf(), Vec::new())
     };
     let vad_temp = if asr_input != *audio { Some(asr_input.clone()) } else { None };
+
+    // Records model + source audio after a successful transcription, so a
+    // re-run can skip transcription (same model) and the player can seek.
+    let write_meta = |engine: &str| {
+        let _ = crate::meta::save(
+            out_dir,
+            &stem,
+            &crate::meta::SessionMeta {
+                model: opts.model.clone(),
+                engine: engine.to_string(),
+                language: opts.language.clone(),
+                source_audio: Some(audio.to_path_buf()),
+                source_files: if opts.source_files.is_empty() {
+                    vec![audio.to_path_buf()]
+                } else {
+                    opts.source_files.clone()
+                },
+                vad: opts.vad,
+                vad_removed_spans: vad_spans.clone(),
+                created: crate::meta::now_secs(),
+            },
+        );
+    };
 
     // Modern engines run through the uv Python bridge and write the outputs
     // themselves.
@@ -211,7 +290,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             std::fs::remove_file(tmp).ok();
         }
         res?;
-        correct_transcript_files(&out_txt, &out_srt, &opts.replacements)?;
+        finalize_transcript(&out_txt, &out_srt, &opts.replacements, &vad_spans)?;
         crate::ui::info(&format!("ASR engine: {}", engine.label()));
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         if out_srt.exists() {
@@ -241,7 +320,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
             std::fs::remove_file(tmp).ok();
         }
         res?;
-        correct_transcript_files(&out_txt, &out_srt, &opts.replacements)?;
+        finalize_transcript(&out_txt, &out_srt, &opts.replacements, &vad_spans)?;
         crate::ui::info("ASR engine: transcribe.cpp");
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
@@ -284,7 +363,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
         let segments = result?;
         std::fs::write(&out_txt, crate::whisper_local::segments_to_text(&segments))?;
         std::fs::write(&out_srt, crate::whisper_local::segments_to_srt(&segments))?;
-        correct_transcript_files(&out_txt, &out_srt, &opts.replacements)?;
+        finalize_transcript(&out_txt, &out_srt, &opts.replacements, &vad_spans)?;
         crate::ui::info(&format!("ASR device: {}", crate::whisper_local::gpu_label()));
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         crate::ui::ok(&format!("wrote {}", out_srt.display()));
@@ -380,7 +459,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
                     let diar = crate::asr::diarize_spec(crate::asr::DEFAULT_DIARIZE);
                     cmd.args(["--diarize_model", diar.model_ref]);
                     if let Some(tok) = &hf_token {
-                        cmd.args(["--hf_token", tok]);
+                        cmd.env("HF_TOKEN", tok);
                     }
                 } else {
                     cmd.arg("--no_align");
@@ -438,7 +517,7 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     if !out_txt.exists() {
         bail!("ASR did not produce {} — check stderr above", out_txt.display());
     }
-    correct_transcript_files(&out_txt, &out_srt, &opts.replacements)?;
+    finalize_transcript(&out_txt, &out_srt, &opts.replacements, &vad_spans)?;
     if opts.diarize {
         crate::ui::info("diarization enabled (whisperX) — transcript includes speaker labels");
     }
@@ -459,21 +538,81 @@ pub async fn transcribe(audio: &Path, out_dir: &Path, g: &GlobalConfig, opts: &T
     Ok(TranscribeOutput { txt: out_txt, srt: out_srt })
 }
 
-/// Apply a Voice-Activity-Detection style silence-removal pass with ffmpeg,
-/// writing a 16 kHz mono file with the same stem into a temp directory. This
-/// trims long gaps so ASR spends time only on speech.
-fn apply_vad(audio: &Path, stem: &str) -> Result<PathBuf> {
+const SILENCE_NOISE: &str = "-35dB";
+const SILENCE_MIN_DURATION: f64 = 1.0;
+
+struct VadOutput {
+    input: PathBuf,
+    removed_spans: Vec<crate::meta::VadSpan>,
+}
+
+fn detected_silences(audio: &Path) -> Result<Vec<crate::meta::VadSpan>> {
+    let output = Command::new("ffmpeg")
+        .args(["-i"])
+        .arg(audio)
+        .args([
+            "-af",
+            &format!("silencedetect=noise={SILENCE_NOISE}:d={SILENCE_MIN_DURATION}"),
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .with_context(|| "ffmpeg not found — install ffmpeg")?;
+    if !output.status.success() {
+        bail!("ffmpeg silence detection failed");
+    }
+
+    let mut spans = Vec::new();
+    let mut start = None;
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        if let Some(value) = line.split("silence_start:").nth(1) {
+            start = value.trim().parse::<f64>().ok();
+        } else if let Some(value) = line.split("silence_end:").nth(1) {
+            if let Some(start) = start.take() {
+                let end = value.split('|').next().unwrap_or(value).trim().parse::<f64>().ok();
+                if let Some(end) = end.filter(|end| *end > start) {
+                    spans.push(crate::meta::VadSpan { start, duration: end - start });
+                }
+            }
+        }
+    }
+    Ok(spans)
+}
+
+/// Detect and remove long silences while retaining a map to the original
+/// timeline, so generated subtitles can be remapped after ASR.
+fn apply_vad(audio: &Path, stem: &str) -> Result<VadOutput> {
+    let spans = detected_silences(audio)?;
+    if spans.is_empty() {
+        return Ok(VadOutput { input: audio.to_path_buf(), removed_spans: spans });
+    }
     let dir = std::env::temp_dir().join("sessionsmith_vad");
     std::fs::create_dir_all(&dir)?;
     let out = dir.join(format!("{stem}.wav"));
     let pb = crate::ui::spinner("VAD: removing silence with ffmpeg");
-    // Trim leading/trailing and internal silences longer than ~1s below -35dB.
-    let filter = "silenceremove=start_periods=1:start_silence=0.3:start_threshold=-35dB:\
-                  stop_periods=-1:stop_silence=1:stop_threshold=-35dB";
+    let mut filter_parts = Vec::new();
+    let mut cursor = 0.0;
+    for (index, span) in spans.iter().enumerate() {
+        if span.start > cursor {
+            filter_parts.push(format!(
+                "[0:a]atrim=start={cursor}:end={},asetpts=PTS-STARTPTS[a{index}]",
+                span.start
+            ));
+        }
+        cursor = span.start + span.duration;
+    }
+    let part_count = filter_parts.len();
+    filter_parts.push(format!("[0:a]atrim=start={cursor},asetpts=PTS-STARTPTS[a{part_count}]"));
+    let labels = (0..=part_count).map(|index| format!("[a{index}]")).collect::<String>();
+    filter_parts.push(format!("{labels}concat=n={}:v=0:a=1[out]", part_count + 1));
+    let filter = filter_parts.join(";");
     let status = Command::new("ffmpeg")
         .args(["-y", "-i"])
         .arg(audio)
-        .args(["-af", filter, "-ar", "16000", "-ac", "1"])
+        .args(["-filter_complex", &filter, "-map", "[out]", "-ar", "16000", "-ac", "1"])
         .arg(&out)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -484,12 +623,16 @@ fn apply_vad(audio: &Path, stem: &str) -> Result<PathBuf> {
         bail!("ffmpeg silence-removal failed");
     }
     crate::ui::ok(&format!("VAD → {}", out.display()));
-    Ok(out)
+    Ok(VadOutput { input: out, removed_spans: spans })
 }
 
 /// Concatenate multiple audio files into one using ffmpeg's concat demuxer.
 /// Returns the path to the merged file in `out_dir/<stem>.wav`.
 /// If only one file is provided, returns it directly (no concat).
+fn concat_list_entry(path: &Path) -> String {
+    format!("file '{}'\n", path.display().to_string().replace('\'', "'\\''"))
+}
+
 pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -> Result<PathBuf> {
     if files.is_empty() {
         anyhow::bail!("concat_audio_files: no input files");
@@ -499,14 +642,22 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
     }
     std::fs::create_dir_all(out_dir)?;
     let out = out_dir.join(format!("{stem}.wav"));
-    if out.exists() {
+    let expected_duration: Option<f64> = files.iter().map(|file| crate::audio::probe_duration(file)).sum();
+    let complete_existing = crate::audio::probe_duration(&out)
+        .zip(expected_duration)
+        .map(|(duration, expected)| duration >= expected * 0.9)
+        .unwrap_or(false);
+    if complete_existing {
         return Ok(out);
     }
+    std::fs::remove_file(&out).ok();
+    let part = out.with_extension("wav.part");
+    std::fs::remove_file(&part).ok();
     let list_path = out_dir.join(format!("_{stem}_concat.txt"));
     let content: String = files.iter()
         .map(|f| {
             let abs = f.canonicalize().unwrap_or_else(|_| f.clone());
-            format!("file '{}'\n", abs.display())
+            concat_list_entry(&abs)
         })
         .collect();
     std::fs::write(&list_path, &content)?;
@@ -515,7 +666,7 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
         .args(["-y", "-f", "concat", "-safe", "0", "-i"])
         .arg(&list_path)
         .args(["-c", "copy"])
-        .arg(&out)
+        .arg(&part)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -531,16 +682,18 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
             .args(["-y", "-f", "concat", "-safe", "0", "-i"])
             .arg(&list2)
             .args(["-ar", "16000", "-ac", "1"])
-            .arg(&out)
+            .arg(&part)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()?;
         pb2.finish_and_clear();
         std::fs::remove_file(&list2).ok();
         if !st2.success() {
+            std::fs::remove_file(&part).ok();
             bail!("ffmpeg could not concatenate audio files");
         }
     }
+    std::fs::rename(&part, &out)?;
     crate::ui::ok(&format!("merged audio → {}", out.display()));
     Ok(out)
 }
@@ -633,7 +786,7 @@ fn resolve_whisper_cli(g: &GlobalConfig) -> Option<AsrBackend> {
             }
         }
     }
-    for candidate in ["whisper-cli", "whisper.cpp", "main"] {
+    for candidate in ["whisper-cli", "whisper.cpp"] {
         if let Some(p) = path_of(candidate) {
             return Some(AsrBackend::WhisperCli(p));
         }
@@ -711,6 +864,26 @@ mod tests {
         assert_eq!(
             apply_replacements("the Mosses or Ports and the Mosses", &replacements),
             "Damasus and Damasus"
+        );
+    }
+
+    #[test]
+    fn vad_timestamp_remap_accounts_for_each_prior_silence() {
+        let spans = vec![
+            crate::meta::VadSpan { start: 10.0, duration: 5.0 },
+            crate::meta::VadSpan { start: 30.0, duration: 10.0 },
+        ];
+
+        assert_eq!(remap_vad_timestamp(12.0, &spans), 17.0);
+        assert_eq!(remap_vad_timestamp(27.0, &spans), 42.0);
+        assert_eq!(remap_vad_timestamp(40.0, &spans), 55.0);
+    }
+
+    #[test]
+    fn concat_list_entry_escapes_apostrophes() {
+        assert_eq!(
+            concat_list_entry(Path::new("Bob's session.wav")),
+            "file 'Bob'\\''s session.wav'\n"
         );
     }
 }

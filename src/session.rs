@@ -178,6 +178,7 @@ async fn ai_sort_by_content(
         language: "auto".to_string(),
         force: true,
         replacements: std::collections::BTreeMap::new(),
+        source_files: Vec::new(),
         diarize: false,
         vad: false,
     };

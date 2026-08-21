@@ -164,8 +164,13 @@ pub enum Overlay {
     /// Theme chooser with live preview. `original` is restored on Esc.
     ThemePicker { cursor: usize, original: usize },
     Message { title: String, body: String, error: bool },
-    /// A yes/no prompt. On confirm, `App::pending_rerun` drives the action.
+    /// A yes/no prompt. On confirm, `App::pending_confirm` drives the action.
     Confirm { title: String, body: String },
+}
+
+pub enum ConfirmAction {
+    Rerun(PathBuf, Vec<Artifact>, bool),
+    Quit,
 }
 
 /// Which family a model row belongs to.
@@ -275,9 +280,8 @@ pub struct App {
     /// Active audio player (quote playback / audio scrubbing), if any.
     pub player: Option<super::player::Player>,
 
-    /// A re-run awaiting a re-transcribe confirmation:
-    /// `(transcript, artifacts, candidate)`. Set when `Overlay::Confirm` is up.
-    pub pending_rerun: Option<(PathBuf, Vec<Artifact>, bool)>,
+    /// Action awaiting confirmation while `Overlay::Confirm` is open.
+    pub pending_confirm: Option<ConfirmAction>,
 
     pub campaigns: Vec<CampaignEntry>,
     pub campaign_idx: usize,
@@ -361,6 +365,18 @@ pub struct App {
 }
 
 impl App {
+    pub fn request_quit(&mut self) {
+        if self.job_running {
+            self.pending_confirm = Some(ConfirmAction::Quit);
+            self.overlay = Overlay::Confirm {
+                title: "Quit?".into(),
+                body: "A job is running and will be cancelled.".into(),
+            };
+        } else {
+            self.should_quit = true;
+        }
+    }
+
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         let global = GlobalConfig::load_or_default().unwrap_or_default();
         let (themes, theme_idx) = theme::resolve(&global.ui.theme);
@@ -373,7 +389,7 @@ impl App {
             pending_editor: None,
             pending_shell: None,
             player: None,
-            pending_rerun: None,
+            pending_confirm: None,
             campaigns: Vec::new(),
             campaign_idx: 0,
             campaign: None,
@@ -509,8 +525,7 @@ impl App {
         );
     }
 
-    /// Load the selected campaign's config, preset, audio and sessions, and pin
-    /// it in the environment so any dispatched command resolves the same one.
+    /// Load the selected campaign's config, preset, audio and sessions.
     pub fn load_campaign_data(&mut self) {
         self.campaign = None;
         self.preset = None;
@@ -525,9 +540,6 @@ impl App {
         let Some(entry) = self.campaigns.get(self.campaign_idx) else {
             return;
         };
-        if let Ok(abs) = std::fs::canonicalize(&entry.path) {
-            std::env::set_var("SESSIONSMITH_CAMPAIGN", abs);
-        }
         let Ok(cfg) = CampaignConfig::load(&entry.path) else {
             return;
         };
@@ -929,9 +941,9 @@ impl App {
         self.viewing_candidate = !self.viewing_candidate;
         self.refresh_viewer();
         self.status = if self.viewing_candidate {
-            "showing the NEW version — press k to keep it, or c to compare".into()
+            "showing the NEW version — press a to keep it, or c to compare".into()
         } else {
-            "showing the CURRENT version — press k to keep it, or c to compare".into()
+            "showing the CURRENT version — press a to keep it, or c to compare".into()
         };
     }
 
@@ -1023,18 +1035,41 @@ impl App {
                     self.status = format!("Failed: {e}");
                 }
             }
-            // Refresh data so new transcripts/artifacts appear.
+            // Refresh data so new transcripts/artifacts appear, while keeping
+            // the user's current document open when it still exists.
+            let open_stem = self.open_session
+                .and_then(|index| self.sessions.get(index))
+                .map(|session| session.stem.clone());
+            let was_log = self.viewing_log;
+            let tab = self.artifact_tab;
+            let was_candidate = self.viewing_candidate;
+            let scroll = self.viewer_scroll;
             let camp_idx = self.campaign_idx;
             self.load_campaign_data();
             self.campaign_idx = camp_idx;
+            self.artifact_tab = tab;
+            self.viewing_candidate = was_candidate;
+            if was_log {
+                self.viewing_log = true;
+                self.refresh_viewer();
+                self.viewer_scroll = scroll.min(
+                    self.viewer_lines.len().saturating_sub(1).min(u16::MAX as usize) as u16,
+                );
+            } else if let Some(stem) = open_stem {
+                if let Some(index) = self.sessions.iter().position(|session| session.stem == stem) {
+                    self.open_session = Some(index);
+                    self.session_idx = index;
+                    self.log_selected = false;
+                    self.sess_state.select(Some(index + 1));
+                    self.refresh_viewer();
+                    self.viewer_scroll = scroll.min(
+                        self.viewer_lines.len().saturating_sub(1).min(u16::MAX as usize) as u16,
+                    );
+                }
+            }
             if self.models.is_some() {
                 self.refresh_model_rows();
                 self.spawn_model_refresh();
-            }
-            if let Some(si) = self.open_session {
-                if si < self.sessions.len() {
-                    self.refresh_viewer();
-                }
             }
             // Start the next queued model job, if any.
             if let Some((job, title)) = self.job_queue.pop_front() {
@@ -1606,25 +1641,7 @@ fn parse_hms_bracket(line: &str) -> Option<f64> {
 /// locate the source recording for sessions transcribed before metadata
 /// existed). Searches common audio extensions.
 fn find_audio_by_stem(audio_dir: &std::path::Path, stem: &str) -> Option<PathBuf> {
-    let exts = ["wav", "mp3", "m4a", "flac", "ogg", "opus", "aac", "wma", "mp4"];
-    let entries = std::fs::read_dir(audio_dir).ok()?;
-    for entry in entries.flatten() {
-        let p = entry.path();
-        let matches_stem = p
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s == stem)
-            .unwrap_or(false);
-        let ok_ext = p
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| exts.contains(&e.to_lowercase().as_str()))
-            .unwrap_or(false);
-        if matches_stem && ok_ext {
-            return Some(p);
-        }
-    }
-    None
+    audio::find_by_stem(audio_dir, stem)
 }
 
 /// The platform command that installs/updates Ollama, or `None` if we can't

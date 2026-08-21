@@ -60,30 +60,34 @@ pub async fn run(args: RunArgs) -> Result<()> {
         language: "auto".into(),
         force: args.force,
         replacements: campaign.transcription.replacements.clone(),
+        source_files: Vec::new(),
         diarize: args.diarize || g.asr.diarize,
         vad: args.vad || g.asr.vad,
     };
 
     let artifacts = commands::notes::resolve_artifacts(&args.artifacts, &campaign.outputs.default)?;
-    let tmp_dir   = std::env::temp_dir().join("sessionsmith_concat");
+    let merge_dir = crate::config::audio_dir().join("merged");
+    let mut skipped = 0usize;
 
     for (i, sess) in sessions.iter().enumerate() {
         ui::step(i + 1, sessions.len(), &sess.name);
 
         // Validate files exist.
-        for f in &sess.files {
-            if !f.exists() {
-                ui::warn(&format!("audio file not found: {}", f.display()));
-                continue;
+        let missing: Vec<_> = sess.files.iter().filter(|file| !file.exists()).collect();
+        if !missing.is_empty() {
+            for file in missing {
+                ui::warn(&format!("audio file not found: {}", file.display()));
             }
+            ui::warn(&format!("skipping session '{}'", sess.name));
+            skipped += 1;
+            continue;
         }
 
         // Concat if needed, then transcribe.
-        let audio_path = commands::transcribe::prepare_audio(sess, &tmp_dir).await?;
-        let out = transcribe::transcribe(&audio_path, &campaign.transcripts_dir(), &g, &tx_opts).await?;
-
-        // Clean up temp merged file.
-        if sess.files.len() > 1 { std::fs::remove_file(&audio_path).ok(); }
+        let audio_path = commands::transcribe::prepare_audio(sess, &merge_dir).await?;
+        let mut session_opts = tx_opts.clone();
+        session_opts.source_files = sess.files.clone();
+        let out = transcribe::transcribe(&audio_path, &campaign.transcripts_dir(), &g, &session_opts).await?;
 
         let session_obj = Session::new(&out.txt, &campaign.notes_dir())?;
 
@@ -97,6 +101,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
         };
         pipeline::run_notes(&session_obj, &g, &campaign, &preset, &opts).await?;
         ui::ok(&format!("artifacts in {}", session_obj.notes_dir.display()));
+    }
+    if skipped > 0 {
+        ui::warn(&format!("skipped {skipped} session(s) with missing audio"));
     }
     Ok(())
 }

@@ -1017,11 +1017,15 @@ fn draw_confirm(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
         .map(|l| Line::from(Span::styled(l.to_string(), th.base())))
         .collect();
     lines.push(Line::from(""));
+    let (yes, no) = match app.pending_confirm.as_ref() {
+        Some(super::app::ConfirmAction::Quit) => (" quit", " keep job"),
+        _ => (" re-transcribe", " keep transcript"),
+    };
     lines.push(Line::from(vec![
         Span::styled("Y", th.accent_style().add_modifier(Modifier::BOLD)),
-        Span::styled(" re-transcribe   ", th.muted_style()),
+        Span::styled(format!("{yes}   "), th.muted_style()),
         Span::styled("N", th.accent_style().add_modifier(Modifier::BOLD)),
-        Span::styled(" keep transcript   ", th.muted_style()),
+        Span::styled(format!("{no}   "), th.muted_style()),
         Span::styled("Esc", th.accent_style().add_modifier(Modifier::BOLD)),
         Span::styled(" cancel", th.muted_style()),
     ]));

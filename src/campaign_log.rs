@@ -148,8 +148,8 @@ fn parse_marker_attrs(s: &str) -> (String, String) {
 /// Extract the title from a `## Session N — Title (date)` header line.
 fn parse_title(header: &str) -> String {
     let h = header.trim_start_matches('#').trim();
-    // Prefer the text after an em/en dash.
-    let after = h.split(['—', '-']).nth(1).map(|s| s.trim()).unwrap_or(h);
+    // The em dash is the heading separator; hyphens are valid title text.
+    let after = h.split_once('—').map(|(_, title)| title.trim()).unwrap_or(h);
     // Drop a trailing "(date)".
     let title = if let Some(pos) = after.rfind('(') {
         after[..pos].trim()
@@ -263,5 +263,13 @@ mod tests {
         let parsed = parse(legacy);
         assert_eq!(parsed.blocks.len(), 1);
         assert_eq!(parsed.blocks[0].id, "DnD1");
+    }
+
+    #[test]
+    fn parse_title_preserves_hyphens() {
+        assert_eq!(
+            parse_title("## Session 3 — The Ice-Bell (2026-01-01)"),
+            "The Ice-Bell"
+        );
     }
 }

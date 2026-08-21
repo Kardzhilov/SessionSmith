@@ -99,7 +99,10 @@ pub fn search(campaign: &CampaignConfig, query: &str) -> Result<Vec<SearchHit>> 
 }
 
 fn search_conn(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
-    let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+    let like = format!(
+        "%{}%",
+        query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
     let mut stmt = conn.prepare(
         "SELECT session, kind, path, content FROM artifacts
          WHERE content LIKE ?1 ESCAPE '\\'
@@ -168,5 +171,18 @@ mod tests {
         // Re-recording upserts rather than duplicating.
         record_into(&conn, "session1", dir.path()).unwrap();
         assert_eq!(search_conn(&conn, "tavern").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_treats_backslashes_as_literals() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO artifacts (session, kind, path, content, updated) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["session1", "summary.md", "summary.md", "Found at C:\\notes", 0],
+        )
+        .unwrap();
+
+        assert_eq!(search_conn(&conn, "C:\\notes").unwrap().len(), 1);
     }
 }

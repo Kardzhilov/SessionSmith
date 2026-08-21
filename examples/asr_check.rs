@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         language: "en".to_string(),
         force: true,
         replacements: std::collections::BTreeMap::new(),
+        source_files: vec![audio.clone()],
         diarize: false,
         vad: false,
     };

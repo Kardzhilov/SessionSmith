@@ -55,6 +55,7 @@ pub async fn run() -> Result<()> {
     let mut app = App::new(handle);
     let res = run_loop(&mut terminal, &mut app);
     app.stop_audio();
+    crate::transcribe::kill_current_asr();
     restore();
     res
 }
@@ -76,6 +77,11 @@ fn run_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
 
         if let Some(path) = app.pending_editor.take() {
             open_in_editor(terminal, &path);
+            let scroll = app.viewer_scroll;
+            app.refresh_viewer();
+            app.viewer_scroll = scroll.min(
+                app.viewer_lines.len().saturating_sub(1).min(u16::MAX as usize) as u16,
+            );
         }
         if let Some((title, command)) = app.pending_shell.take() {
             run_shell_suspended(terminal, &title, &command);
@@ -114,6 +120,7 @@ fn restore() {
 fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        crate::transcribe::kill_current_asr();
         restore();
         original(info);
     }));
