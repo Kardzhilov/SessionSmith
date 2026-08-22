@@ -58,6 +58,7 @@ pub struct SessionEntry {
 #[derive(Clone, Copy)]
 pub enum Action {
     NewCampaign,
+    CampaignSettings,
     RunPipeline,
     Transcribe,
     GenerateNotes,
@@ -82,6 +83,7 @@ impl Action {
     pub fn label(self) -> &'static str {
         match self {
             Action::NewCampaign => "New campaign — run setup wizard",
+            Action::CampaignSettings => "Campaign settings — outputs, ASR, preset",
             Action::RunPipeline => "Run pipeline — transcribe + notes",
             Action::Transcribe => "Transcribe audio — audio → transcript",
             Action::GenerateNotes => "Generate notes — transcript → notes",
@@ -105,6 +107,7 @@ impl Action {
     pub fn all() -> &'static [Action] {
         &[
             Action::NewCampaign,
+            Action::CampaignSettings,
             Action::RunPipeline,
             Action::Transcribe,
             Action::GenerateNotes,
@@ -164,12 +167,22 @@ pub struct PickerState {
     pub target: Option<PathBuf>,
 }
 
+pub struct CampaignSettingsState {
+    pub cursor: usize,
+    pub artifacts: Vec<bool>,
+    pub diarize: bool,
+    pub vad: bool,
+    pub presets: Vec<String>,
+    pub preset_index: usize,
+}
+
 pub enum Overlay {
     None,
     Help,
     Palette(PaletteState),
     Search(SearchState),
     Picker(PickerState),
+    CampaignSettings(CampaignSettingsState),
     SpeakerMap(SpeakerMapState),
     /// Theme chooser with live preview. `original` is restored on Esc.
     ThemePicker {
@@ -734,8 +747,6 @@ impl App {
         self.log_selected = false;
         self.viewer_lines.clear();
 
-        self.refresh_asr_labels();
-
         let Some(entry) = self.campaigns.get(self.campaign_idx) else {
             return;
         };
@@ -824,17 +835,23 @@ impl App {
         }
 
         self.campaign = Some(cfg);
+        self.refresh_asr_labels();
     }
 
     fn refresh_asr_labels(&mut self) {
+        let effective = self
+            .campaign
+            .as_ref()
+            .map(|campaign| crate::config::effective(&self.global, campaign))
+            .unwrap_or_else(|| self.global.clone());
         let hardware = crate::hardware::detect();
-        self.asr_model_label = self.global.asr.model.clone().unwrap_or_else(|| {
+        self.asr_model_label = effective.asr.model.clone().unwrap_or_else(|| {
             crate::hardware::recommend(&hardware)
                 .whisper_model
                 .to_string()
         });
         self.asr_device_label = asr_device_label(
-            self.global.asr.device.as_deref(),
+            effective.asr.device.as_deref(),
             hardware.gpu.as_ref().map(|gpu| gpu.vendor.as_str()),
         );
     }
@@ -853,6 +870,13 @@ impl App {
             crate::asr::engine_of(&self.asr_model_label).label(),
             self.asr_device_label
         )
+    }
+
+    pub fn asr_diarize(&self) -> bool {
+        self.campaign
+            .as_ref()
+            .map(|campaign| crate::config::effective(&self.global, campaign).asr.diarize)
+            .unwrap_or(self.global.asr.diarize)
     }
 
     /// If re-running `stem` could change the transcript — i.e. the source audio
@@ -2046,6 +2070,30 @@ fn parse_hms_bracket(line: &str) -> Option<f64> {
         _ => return None,
     };
     Some(secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamps_continue_to_parse_alongside_markdown_links() {
+        assert_eq!(parse_hms_bracket("[01:23] [guide](https://example.test)"), Some(83.0));
+        assert_eq!(parse_hms_bracket("[guide](https://example.test)"), None);
+    }
+
+    #[test]
+    fn campaign_asr_overrides_drive_header_labels() {
+        let mut global = GlobalConfig::default();
+        global.asr.model = Some("base".into());
+        global.asr.diarize = false;
+        let mut campaign = CampaignConfig::default();
+        campaign.asr.model = Some("parakeet-tdt-0.6b-v3".into());
+        campaign.asr.diarize = Some(true);
+        let effective = crate::config::effective(&global, &campaign);
+        assert_eq!(effective.asr.model.as_deref(), Some("parakeet-tdt-0.6b-v3"));
+        assert!(effective.asr.diarize);
+    }
 }
 
 /// Find an audio file in `audio_dir` whose file stem matches `stem` (used to

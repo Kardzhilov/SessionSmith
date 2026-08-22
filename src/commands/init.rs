@@ -76,6 +76,7 @@ pub async fn run(args: InitArgs) -> Result<()> {
     let notes_seed = std::fs::read_to_string("campaign.txt").unwrap_or_default();
 
     let cfg = CampaignConfig {
+        source_path: None,
         campaign: Campaign {
             name: name.clone(),
             gm,

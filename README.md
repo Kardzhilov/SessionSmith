@@ -84,7 +84,7 @@ Fuzzy‑search every action. No menu‑diving required.
 
 #### Theme picker — live preview
 
-Built‑in themes: **midnight**, **solar**, **gruvbox**, **mono** — plus any you
+Built‑in themes: **midnight**, **solar**, **gruvbox**, **mono**, **paper** — plus any you
 drop in `~/.config/sessionsmith/themes/*.toml`.
 
 <p align="center"><img src="docs/screenshots/themes.svg" alt="Theme picker with a live preview panel" width="820"></p>
@@ -108,6 +108,7 @@ drop in `~/.config/sessionsmith/themes/*.toml`.
 | Select mode (native drag‑select) | `s` | click **select** |
 | Open in `$EDITOR` | `e` | — |
 | Change theme · Help · Quit | `T` · `?` · `q` | click footer |
+| Toggle all checkboxes in a picker | `a` | — |
 
 Prefer the classic line‑based prompts? Run `sessionsmith --no-tui`
 (or set `[ui] legacy_menu = true`).
@@ -129,7 +130,7 @@ processes one stable recording at a time and continues after per-file failures.
 ## 🚀 Getting started
 
 ```bash
-# Build (requires Rust 1.75+ and cmake + clang/libclang for the bundled ASR engine)
+# Build (requires the current stable Rust toolchain and cmake + clang/libclang for the bundled ASR engine)
 cargo build --release
 
 # First‑run wizard — detects your GPU, recommends models, scaffolds your campaign
@@ -150,10 +151,10 @@ then run `sessionsmith doctor` to verify everything.
 
 ### Platform support
 
-Linux and macOS are supported for the full local workflow. Windows is covered
-by the `--no-default-features` CI test suite and supports dependency discovery,
-terminal UI, ffplay playback, and process-tree cancellation. The bundled local
-Whisper build on Windows still depends on a working CMake/clang toolchain.
+Linux and macOS are supported for the full local workflow. Windows has portable
+`--no-default-features` CI coverage; runtime validation of local audio tooling
+still depends on a Windows environment with the required tools installed. The
+bundled local Whisper build on Windows requires a working CMake/clang toolchain.
 
 ---
 

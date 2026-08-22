@@ -293,4 +293,24 @@ mod tests {
             vec![path]
         );
     }
+
+    #[test]
+    fn staged_recording_is_processed_once_after_it_stabilizes() {
+        let path = PathBuf::from("session.wav");
+        let make_file = |size_bytes| audio::AudioFile {
+            path: path.clone(),
+            mtime: SystemTime::UNIX_EPOCH,
+            duration_secs: None,
+            size_bytes,
+            already_transcribed: false,
+        };
+        let mut previous = BTreeMap::new();
+        let mut handled = HashSet::new();
+        assert!(stable_new_files(&[make_file(10)], &mut previous, &handled).is_empty());
+        assert!(stable_new_files(&[make_file(20)], &mut previous, &handled).is_empty());
+        let ready = stable_new_files(&[make_file(20)], &mut previous, &handled);
+        assert_eq!(ready, vec![path.clone()]);
+        handled.insert(path.clone());
+        assert!(stable_new_files(&[make_file(20)], &mut previous, &handled).is_empty());
+    }
 }

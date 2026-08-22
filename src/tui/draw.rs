@@ -81,6 +81,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Overlay::Palette(_) => draw_palette(frame, app, &th, area),
         Overlay::Search(_) => draw_search(frame, app, &th, area),
         Overlay::Picker(_) => draw_picker(frame, app, &th, area),
+        Overlay::CampaignSettings(_) => draw_campaign_settings(frame, app, &th, area),
         Overlay::SpeakerMap(_) => draw_speaker_map(frame, app, &th, area),
         Overlay::ThemePicker { .. } => draw_theme_picker(frame, app, area),
     }
@@ -182,9 +183,9 @@ fn header_lines(app: &App, th: &Theme, width: u16) -> Vec<Line<'static>> {
         (
             format!(
                 "· diarize {} ",
-                if app.global.asr.diarize { "on" } else { "off" }
+                if app.asr_diarize() { "on" } else { "off" }
             ),
-            if app.global.asr.diarize {
+            if app.asr_diarize() {
                 th.success_style()
             } else {
                 th.muted_style()
@@ -1223,6 +1224,41 @@ fn draw_picker(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let cursor = p.cursor;
     app.overlay_state
         .select(if empty { None } else { Some(cursor) });
+    app.rects.overlay_list = rect;
+    frame.render_stateful_widget(list, rect, &mut app.overlay_state);
+}
+
+fn draw_campaign_settings(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
+    let Overlay::CampaignSettings(settings) = &app.overlay else {
+        return;
+    };
+    let rect = centered(area, 66, 70);
+    frame.render_widget(Clear, rect);
+    let mut rows = Vec::new();
+    for (index, artifact) in ALL_ARTIFACTS.iter().enumerate() {
+        let selected = settings.artifacts.get(index).copied().unwrap_or(false);
+        rows.push(Line::from(vec![
+            Span::styled(if selected { "[x] " } else { "[ ] " }, if selected { th.success_style() } else { th.muted_style() }),
+            Span::raw(artifact.label()),
+        ]));
+    }
+    rows.push(Line::from(vec![
+        Span::styled(if settings.diarize { "[x] " } else { "[ ] " }, if settings.diarize { th.success_style() } else { th.muted_style() }),
+        Span::raw("Speaker diarization"),
+    ]));
+    rows.push(Line::from(vec![
+        Span::styled(if settings.vad { "[x] " } else { "[ ] " }, if settings.vad { th.success_style() } else { th.muted_style() }),
+        Span::raw("Voice activity detection"),
+    ]));
+    rows.push(Line::from(vec![
+        Span::styled("Preset: ", th.accent_style()),
+        Span::raw(settings.presets.get(settings.preset_index).cloned().unwrap_or_default()),
+    ]));
+    let list = List::new(rows)
+        .block(popup_block("Campaign settings  (Space toggle · ← → preset · Enter save)", th))
+        .highlight_style(th.selection())
+        .highlight_symbol("▸ ");
+    app.overlay_state.select(Some(settings.cursor));
     app.rects.overlay_list = rect;
     frame.render_stateful_widget(list, rect, &mut app.overlay_state);
 }

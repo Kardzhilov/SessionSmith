@@ -1,6 +1,6 @@
 //! Per-campaign SQLite index of sessions and generated artifacts, enabling
 //! cross-session search (`sessionsmith search`). The database is a single file
-//! at `output/<slug>/index.sqlite`; nothing leaves the machine.
+//! in the user cache directory; nothing leaves the machine.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -19,6 +19,31 @@ pub struct SearchHit {
 }
 
 fn db_path(campaign: &CampaignConfig) -> PathBuf {
+    let key = campaign_cache_key(campaign);
+    dirs::cache_dir()
+        .unwrap_or_else(|| campaign.output_root())
+        .join("sessionsmith")
+        .join("indexes")
+        .join(key)
+        .join("index.sqlite")
+}
+
+fn campaign_cache_key(campaign: &CampaignConfig) -> String {
+    let source = campaign
+        .source_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("{}:{}", campaign.campaign.name, campaign.output_root().display()));
+    format!("{}-{:016x}", campaign.slug(), fnv1a64(source.as_bytes()))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+fn legacy_db_path(campaign: &CampaignConfig) -> PathBuf {
     campaign.output_root().join("index.sqlite")
 }
 
@@ -26,6 +51,13 @@ fn open(campaign: &CampaignConfig) -> Result<Connection> {
     let path = db_path(campaign);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    let legacy = legacy_db_path(campaign);
+    if !path.exists() && legacy.exists() {
+        std::fs::rename(&legacy, &path).with_context(|| {
+            format!("migrating legacy index {}", legacy.display())
+        })?;
+        crate::ui::info(&format!("migrated search index to {}", path.display()));
     }
     let conn =
         Connection::open(&path).with_context(|| format!("opening index db {}", path.display()))?;
@@ -324,6 +356,16 @@ mod tests {
         // Re-recording upserts rather than duplicating.
         record_into(&conn, "session1", dir.path()).unwrap();
         assert_eq!(search_conn(&conn, "tavern").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn campaign_cache_keys_do_not_collide_for_same_named_campaigns() {
+        let mut first = CampaignConfig::default();
+        first.campaign.name = "Shared Name".into();
+        first.source_path = Some(PathBuf::from("/tmp/a/campaign.toml"));
+        let mut second = first.clone();
+        second.source_path = Some(PathBuf::from("/tmp/b/campaign.toml"));
+        assert_ne!(campaign_cache_key(&first), campaign_cache_key(&second));
     }
 
     #[test]

@@ -179,7 +179,7 @@ enabled (e.g. for particularly complex narrative synthesis).
 
 When thinking is enabled, the spinner shows progress:
 ```
-⠴ thinking · ~4820 tokens (reasoning…)
+⠴ thinking · 4820 tok
 ```
 
 ### Error handling
@@ -209,9 +209,8 @@ clearly approximate word-based count. Ollama reports tokens only.
   `npcs`, `loot`, `quests`, `locations`, `cliffhanger`) using the backend's
   structured-output mode (Ollama `format`, OpenAI `response_format`).
 - **Search index (`[runtime] index = true`, on by default):** each generated
-  artifact is recorded in a per-campaign SQLite database at
-  `output/<slug>/index.sqlite`. `sessionsmith search <query>` looks across every
-  session's notes.
+  artifact is recorded in a per-campaign SQLite database in the user cache
+  directory. `sessionsmith search <query>` looks across every session's notes.
 
 ---
 

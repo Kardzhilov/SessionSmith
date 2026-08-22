@@ -410,6 +410,9 @@ fn expand_env(input: &str) -> String {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CampaignConfig {
+    /// Source file used only for local cache keys; never serialized into TOML.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     pub campaign: Campaign,
     /// Per-campaign backend settings. Specified fields override global config.
     #[serde(default)]
@@ -633,8 +636,9 @@ impl CampaignConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading campaign config: {}", path.display()))?;
-        let cfg: Self =
+        let mut cfg: Self =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.source_path = std::fs::canonicalize(path).ok().or_else(|| Some(path.to_path_buf()));
         Ok(cfg)
     }
 
@@ -741,6 +745,7 @@ mod tests {
     #[test]
     fn round_trip_campaign() {
         let cfg = CampaignConfig {
+            source_path: None,
             campaign: Campaign {
                 name: "Test".into(),
                 gm: "Alice".into(),
@@ -778,6 +783,7 @@ mod tests {
         global.asr.diarize = false;
 
         let campaign = CampaignConfig {
+            source_path: None,
             campaign: Campaign::default(),
             backend: CampaignBackendConfig {
                 model: Some("campaign-model".into()),

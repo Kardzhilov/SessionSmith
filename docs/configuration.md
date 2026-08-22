@@ -137,7 +137,7 @@ for self-built files only; it is intentionally unsafe for normal downloads.
 | `chunk` | bool | `true` | Split transcripts that exceed the context budget into overlapping windows for the bullets pass, then merge (map-reduce). |
 | `chunk_overlap_chars` | int | `1000` | Character overlap between consecutive transcript chunks. |
 | `structured` | bool | `false` | Also emit a machine-readable `dm-notes.json` (typed NPCs/loot/quests) using the backend's structured-output mode. |
-| `index` | bool | `true` | Maintain a per-campaign SQLite index (`output/<slug>/index.sqlite`) powering `sessionsmith search`. |
+| `index` | bool | `true` | Maintain a per-campaign SQLite index in the user cache directory, powering `sessionsmith search`. |
 
 ### `[ui]` section
 

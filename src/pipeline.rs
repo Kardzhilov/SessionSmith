@@ -36,6 +36,13 @@ pub struct PipelineReport {
     pub usages: Vec<ArtifactUsage>,
 }
 
+struct CampaignLogCall {
+    artifact: &'static str,
+    input: String,
+    output: String,
+    usage: Option<LlmUsage>,
+}
+
 impl PipelineReport {
     fn record(
         &mut self,
@@ -348,8 +355,16 @@ pub async fn run_notes(
         let summary_path = session.notes_dir.join(Artifact::Summary.filename());
         if summary_path.exists() {
             let summary = std::fs::read_to_string(&summary_path)?;
-            if let Err(e) =
-                update_campaign_log(g, campaign, preset, &session.stem, &summary, &chat_opts).await
+            if let Err(e) = update_campaign_log(
+                g,
+                campaign,
+                preset,
+                &session.stem,
+                &summary,
+                &chat_opts,
+                &mut report,
+            )
+            .await
             {
                 crate::ui::warn(&format!("campaign log: {e:#}"));
                 crate::ui::warn("  run `sessionsmith log rebuild` to retry");
@@ -424,6 +439,7 @@ async fn update_campaign_log(
     session_stem: &str,
     summary: &str,
     chat_opts: &ChatOptions,
+    report: &mut PipelineReport,
 ) -> Result<()> {
     let notes_dir = campaign.notes_dir();
     let md_path = crate::campaign_log::md_path(&notes_dir);
@@ -441,7 +457,8 @@ async fn update_campaign_log(
             crate::campaign_log::parse(&text)
         } else {
             crate::ui::info("campaign log: rebuilding to deduplicated format");
-            return rebuild_campaign_log(g, campaign, preset, chat_opts).await;
+            return rebuild_campaign_log_with_report(g, campaign, preset, chat_opts, Some(report))
+                .await;
         }
     } else {
         crate::campaign_log::CampaignLog::default()
@@ -459,7 +476,7 @@ async fn update_campaign_log(
 
     let backend = llm::build(g)?;
     let pb = crate::ui::spinner("campaign log: writing session entry");
-    let (title, body) = generate_session_entry(
+    let (title, body, entry_call) = generate_session_entry(
         backend.as_ref(),
         chat_opts,
         campaign,
@@ -468,9 +485,15 @@ async fn update_campaign_log(
         &date,
     )
     .await?;
+    report.record(
+        entry_call.artifact,
+        &entry_call.input,
+        &entry_call.output,
+        entry_call.usage,
+    );
     log.upsert(session_stem, &date, title, body);
     let latest = log.block_body(session_stem).unwrap_or("").to_string();
-    let threads = generate_threads(
+    let (threads, threads_call) = generate_threads(
         backend.as_ref(),
         chat_opts,
         campaign,
@@ -479,6 +502,12 @@ async fn update_campaign_log(
         &latest,
     )
     .await?;
+    report.record(
+        threads_call.artifact,
+        &threads_call.input,
+        &threads_call.output,
+        threads_call.usage,
+    );
     log.threads = threads;
     pb.finish_and_clear();
 
@@ -506,6 +535,16 @@ pub async fn rebuild_campaign_log(
     campaign: &CampaignConfig,
     preset: &Preset,
     chat_opts: &ChatOptions,
+) -> Result<()> {
+    rebuild_campaign_log_with_report(g, campaign, preset, chat_opts, None).await
+}
+
+async fn rebuild_campaign_log_with_report(
+    g: &GlobalConfig,
+    campaign: &CampaignConfig,
+    preset: &Preset,
+    chat_opts: &ChatOptions,
+    mut report: Option<&mut PipelineReport>,
 ) -> Result<()> {
     let notes_dir = campaign.notes_dir();
     let existing_log = crate::campaign_log::load_json(&notes_dir);
@@ -551,7 +590,7 @@ pub async fn rebuild_campaign_log(
     let total = sessions.len();
     for (i, (stem, date, summary)) in sessions.into_iter().enumerate() {
         let pb = crate::ui::spinner(&format!("campaign log: {}/{} · {stem}", i + 1, total));
-        let (title, body) = generate_session_entry(
+        let (title, body, entry_call) = generate_session_entry(
             backend.as_ref(),
             chat_opts,
             campaign,
@@ -560,9 +599,17 @@ pub async fn rebuild_campaign_log(
             &date,
         )
         .await?;
+        if let Some(report) = report.as_deref_mut() {
+            report.record(
+                entry_call.artifact,
+                &entry_call.input,
+                &entry_call.output,
+                entry_call.usage,
+            );
+        }
         log.upsert(&stem, &date, title, body);
         let latest = log.block_body(&stem).unwrap_or("").to_string();
-        log.threads = generate_threads(
+        let (threads, threads_call) = generate_threads(
             backend.as_ref(),
             chat_opts,
             campaign,
@@ -571,6 +618,15 @@ pub async fn rebuild_campaign_log(
             &latest,
         )
         .await?;
+        if let Some(report) = report.as_deref_mut() {
+            report.record(
+                threads_call.artifact,
+                &threads_call.input,
+                &threads_call.output,
+                threads_call.usage,
+            );
+        }
+        log.threads = threads;
         pb.finish_and_clear();
         crate::ui::ok(&format!("logged {stem}"));
     }
@@ -591,10 +647,10 @@ async fn generate_session_entry(
     preset: &Preset,
     summary: &str,
     date: &str,
-) -> Result<(String, String)> {
+) -> Result<(String, String, CampaignLogCall)> {
     let sys = prompts::session_log_entry_system(campaign, preset);
     let user = prompts::user_session_log_entry(summary, date);
-    let out = llm::collect(
+    let response = llm::collect_with_usage(
         backend,
         vec![
             ChatMessage {
@@ -603,7 +659,7 @@ async fn generate_session_entry(
             },
             ChatMessage {
                 role: Role::User,
-                content: user,
+                content: user.clone(),
             },
         ],
         chat_opts.clone(),
@@ -611,7 +667,7 @@ async fn generate_session_entry(
     )
     .await?;
     // First non-empty line is the title; the rest is the body.
-    let mut lines = out.lines();
+    let mut lines = response.text.lines();
     let mut title = lines
         .by_ref()
         .find(|l| !l.trim().is_empty())
@@ -640,7 +696,16 @@ async fn generate_session_entry(
     } else {
         body
     };
-    Ok((title, body))
+    Ok((
+        title,
+        body,
+        CampaignLogCall {
+            artifact: "campaign-log entry",
+            input: user,
+            output: response.text,
+            usage: response.usage,
+        },
+    ))
 }
 
 /// (Re)generate the ongoing-threads section from the current threads + latest.
@@ -651,10 +716,10 @@ async fn generate_threads(
     preset: &Preset,
     current: &str,
     latest_session: &str,
-) -> Result<String> {
+) -> Result<(String, CampaignLogCall)> {
     let sys = prompts::ongoing_threads_system(campaign, preset);
     let user = prompts::user_ongoing_threads(current, latest_session);
-    let out = llm::collect(
+    let response = llm::collect_with_usage(
         backend,
         vec![
             ChatMessage {
@@ -663,14 +728,22 @@ async fn generate_threads(
             },
             ChatMessage {
                 role: Role::User,
-                content: user,
+                content: user.clone(),
             },
         ],
         chat_opts.clone(),
         None,
     )
     .await?;
-    Ok(out.trim().to_string())
+    Ok((
+        response.text.trim().to_string(),
+        CampaignLogCall {
+            artifact: "campaign-log threads",
+            input: user,
+            output: response.text,
+            usage: response.usage,
+        },
+    ))
 }
 
 pub fn parse_artifacts(spec: &str) -> Result<Vec<Artifact>> {

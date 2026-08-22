@@ -941,6 +941,31 @@ mod tests {
         assert!(!path.exists());
         assert!(!part.exists());
     }
+
+    #[tokio::test]
+    async fn truncated_download_removes_partial_and_sidecar() {
+        let server = MockServer::start().await;
+        mount_head(&server, "v1", 10).await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "v1")
+                    .set_body_bytes(b"short"),
+            )
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("model.bin");
+        let part = temp.path().join("model.bin.part");
+
+        let error = download_hf_file("model", &server.uri(), &path, &part, "")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ended at 5 bytes, expected 10"));
+        assert!(!path.exists());
+        assert!(!part.exists());
+        assert!(!sidecar_path(&part).exists());
+    }
 }
 
 // ---------------------------------------------------------------------------

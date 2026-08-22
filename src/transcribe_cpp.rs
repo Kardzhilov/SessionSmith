@@ -694,8 +694,7 @@ pub fn run_asr(
             duration / 60.0
         ));
         let completed_until = chunks.iter().map(|chunk| chunk.end).fold(0.0, f64::max);
-        let first_pending =
-            ((completed_until / TARGET_CHUNK_SECONDS).floor() as usize).min(total_chunks);
+        let first_pending = first_pending_chunk(completed_until, total_chunks);
         for idx in first_pending..total_chunks {
             crate::ui::step(
                 idx + 1,
@@ -729,6 +728,21 @@ pub fn run_asr(
     }
     let _ = std::fs::remove_file(&wav);
 
+    let (text, srt_body) = render_chunks(chunks)?;
+
+    let txt = PathBuf::from(format!("{}.txt", out_prefix.display()));
+    let srt = PathBuf::from(format!("{}.srt", out_prefix.display()));
+    std::fs::write(&txt, format!("{text}\n"))?;
+    std::fs::write(&srt, srt_body)?;
+    std::fs::remove_file(&checkpoint_file).ok();
+    Ok(())
+}
+
+fn first_pending_chunk(completed_until: f64, total_chunks: usize) -> usize {
+    ((completed_until / TARGET_CHUNK_SECONDS).floor() as usize).min(total_chunks)
+}
+
+fn render_chunks(chunks: Vec<ChunkTranscript>) -> Result<(String, String)> {
     let mut non_empty: Vec<ChunkTranscript> = chunks
         .into_iter()
         .filter(|chunk| !chunk.text.trim().is_empty())
@@ -738,14 +752,12 @@ pub fn run_asr(
     }
     deduplicate_chunk_boundaries(&mut non_empty);
     non_empty.retain(|chunk| !chunk.text.trim().is_empty());
-
     let text = non_empty
         .iter()
         .map(|chunk| chunk.text.trim())
         .collect::<Vec<_>>()
         .join("\n\n");
-
-    let srt_body = non_empty
+    let srt = non_empty
         .iter()
         .enumerate()
         .map(|(idx, chunk)| {
@@ -757,14 +769,8 @@ pub fn run_asr(
                 chunk.text.trim()
             )
         })
-        .collect::<String>();
-
-    let txt = PathBuf::from(format!("{}.txt", out_prefix.display()));
-    let srt = PathBuf::from(format!("{}.srt", out_prefix.display()));
-    std::fs::write(&txt, format!("{text}\n"))?;
-    std::fs::write(&srt, srt_body)?;
-    std::fs::remove_file(&checkpoint_file).ok();
-    Ok(())
+        .collect();
+    Ok((text, srt))
 }
 
 #[cfg(test)]
@@ -845,5 +851,26 @@ mod tests {
         );
         assert!(load_checkpoint(&path, "other.gguf", "fingerprint").is_none());
         assert!(load_checkpoint(&path, "model.gguf", "other").is_none());
+    }
+
+    #[test]
+    fn resumed_segments_render_the_same_srt_as_an_uninterrupted_run() {
+        let all = vec![
+            ChunkTranscript {
+                text: "The party enters the crypt.".into(),
+                start: 0.0,
+                end: 30.0,
+            },
+            ChunkTranscript {
+                text: "The party enters the crypt. They find a bell.".into(),
+                start: 25.0,
+                end: 55.0,
+            },
+        ];
+        let checkpoint = all[..1].to_vec();
+        assert_eq!(first_pending_chunk(checkpoint[0].end, 2), 1);
+        let mut resumed = checkpoint;
+        resumed.extend_from_slice(&all[1..]);
+        assert_eq!(render_chunks(resumed).unwrap(), render_chunks(all).unwrap());
     }
 }

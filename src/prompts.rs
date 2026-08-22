@@ -388,6 +388,7 @@ mod tests {
 
     fn camp() -> CampaignConfig {
         CampaignConfig {
+            source_path: None,
             campaign: Campaign {
                 name: "Test".into(),
                 gm: "Mike".into(),
