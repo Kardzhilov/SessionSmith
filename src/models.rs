@@ -528,6 +528,15 @@ pub struct OllamaModel {
 
 pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
+        display: "qwen3.8",
+        released: "2026-08",
+        options: &[OllamaOption {
+            label: "27b",
+            pull: "qwen3.8:27b",
+            size: 18_000_000_000,
+        }],
+    },
+    OllamaModel {
         display: "qwen3.5",
         released: "2026-03",
         options: &[
@@ -973,6 +982,7 @@ mod tests {
 // the model hasn't been pulled yet and Ollama's registry can't provide info.
 // ---------------------------------------------------------------------------
 pub const OLLAMA_KNOWN_SIZES: &[(&str, u64)] = &[
+    ("qwen3.8:27b", 18_000_000_000),
     ("qwen2.5:0.5b", 397_000_000),
     ("qwen2.5:1.5b", 986_000_000),
     ("qwen2.5:3b", 1_900_000_000),
@@ -998,6 +1008,7 @@ pub const OLLAMA_KNOWN_SIZES: &[(&str, u64)] = &[
 /// Approximate public release date (`YYYY-MM`) per known model, for the model
 /// manager's age column. `"—"` when unknown.
 pub const OLLAMA_RELEASED: &[(&str, &str)] = &[
+    ("qwen3.8:27b", "2026-08"),
     ("qwen2.5:0.5b", "2024-09"),
     ("qwen2.5:1.5b", "2024-09"),
     ("qwen2.5:3b", "2024-09"),
