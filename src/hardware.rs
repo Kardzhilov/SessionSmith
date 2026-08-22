@@ -65,6 +65,7 @@ fn total_ram_bytes() -> u64 {
     0
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_mem_total_kib(contents: &str) -> Option<u64> {
     contents.lines().find_map(|line| {
         let value = line.strip_prefix("MemTotal:")?.split_whitespace().next()?;

@@ -339,6 +339,7 @@ impl GlobalConfig {
     }
 }
 
+#[cfg(unix)]
 fn has_inline_secret(value: Option<&String>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty() && !value.trim_start().starts_with("${"))
 }
