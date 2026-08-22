@@ -351,6 +351,38 @@ impl CampaignFormState {
         }
     }
 
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll
+    }
+
+    pub fn click_row(&mut self, row: usize) -> CampaignFormAction {
+        if self.inline.is_some() {
+            return if row == self.cursor() {
+                self.handle_inline_key(KeyEvent::from(KeyCode::Enter))
+            } else {
+                CampaignFormAction::None
+            };
+        }
+        if !self.rows().get(row).is_some_and(|item| item.selectable) {
+            return CampaignFormAction::None;
+        }
+        self.set_page_cursor(row);
+        self.activate_current()
+    }
+
+    pub fn scroll_by(&mut self, delta: i32) {
+        if self.inline.is_none() {
+            self.move_cursor(delta);
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        if let Some(edit) = &mut self.inline {
+            edit.input.insert_paste(text);
+            self.error = None;
+        }
+    }
+
     pub fn build_config(&self) -> Result<CampaignConfig> {
         if self.inline.is_some() {
             bail!("finish the active field before saving");

@@ -49,6 +49,9 @@ pub struct UiConfig {
     /// Last audio-player volume (0–100). Starts at 50 and persists across runs.
     #[serde(default = "default_volume")]
     pub player_volume: u8,
+    /// Enable terminal mouse capture for the full-screen TUI by default.
+    #[serde(default = "default_mouse")]
+    pub mouse: bool,
     /// Show a desktop notification after a TUI job that ran for at least a minute.
     #[serde(default)]
     pub notify: bool,
@@ -62,6 +65,10 @@ fn default_volume() -> u8 {
     50
 }
 
+fn default_mouse() -> bool {
+    true
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -69,6 +76,7 @@ impl Default for UiConfig {
             legacy_menu: false,
             campaign_order: Vec::new(),
             player_volume: default_volume(),
+            mouse: default_mouse(),
             notify: false,
         }
     }
@@ -817,5 +825,14 @@ mod tests {
             "prefix-secret-suffix"
         );
         assert_eq!(expand_env("plain"), "plain");
+    }
+
+    #[test]
+    fn ui_mouse_defaults_on_and_can_be_disabled() {
+        assert!(GlobalConfig::default().ui.mouse);
+        let inherited: GlobalConfig = toml::from_str("[ui]\ntheme = 'mono'").unwrap();
+        assert!(inherited.ui.mouse);
+        let disabled: GlobalConfig = toml::from_str("[ui]\nmouse = false").unwrap();
+        assert!(!disabled.ui.mouse);
     }
 }

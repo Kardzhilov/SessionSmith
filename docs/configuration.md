@@ -75,6 +75,7 @@ audio_dir  = "audio"                    # where input recordings are read from
 output_dir = "output"                   # where transcripts & notes are written
 
 [ui]
+mouse  = true                             # terminal mouse capture for the full-screen TUI
 notify = false                            # desktop notification after long TUI jobs
 ```
 
@@ -173,6 +174,7 @@ for self-built files only; it is intentionally unsafe for normal downloads.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `mouse` | bool | `true` | Enable terminal mouse capture for the full-screen TUI. Set `false` for terminals with unreliable mouse reporting; `SESSIONSMITH_NO_MOUSE=1` disables it for one launch. Press `s` in the TUI to temporarily release capture for native text selection. |
 | `notify` | bool | `false` | For TUI jobs lasting at least one minute, emit the terminal bell and attempt a desktop notification through `notify-send` (Linux) or `osascript` (macOS). Missing notifier tools are ignored. |
 
 ---

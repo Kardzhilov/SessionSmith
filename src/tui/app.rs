@@ -251,7 +251,7 @@ pub enum ModelKind {
     Asr,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ModelRow {
     /// A non-selectable section header when true.
     pub header: bool,
@@ -296,32 +296,92 @@ impl ModelRow {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct Rects {
-    pub campaigns: Rect,
-    pub sessions: Rect,
-    pub audio: Rect,
-    pub tabs: Rect,
-    pub viewer: Rect,
-    pub overlay_list: Rect,
-    /// Per-artifact-tab horizontal ranges `(start_x, end_x)` for mouse hits.
-    pub tab_ranges: Vec<(u16, u16)>,
-    /// The footer keybar row.
-    pub footer: Rect,
-    /// Clickable footer entries: `(start_x, end_x, row_y, command)`.
-    pub footer_hits: Vec<(u16, u16, u16, FooterCmd)>,
-    /// The live-job log pane.
-    pub job: Rect,
-    /// The clickable progress track in the audio transport bar.
-    pub player_track: Rect,
-    /// The interactive model-manager content pane (inner area).
-    pub models_pane: Rect,
-    /// Clickable model-row buttons: `(x0, x1, row_y, row_index, install)`.
-    pub model_buttons: Vec<(u16, u16, u16, usize, bool)>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HitTarget {
+    CampaignList,
+    CampaignRow(usize),
+    SessionList,
+    SessionRow(usize),
+    AudioList,
+    AudioRow(usize),
+    Viewer,
+    ViewerScrollbar,
+    Job,
+    ModelList,
+    ModelRow(usize),
+    PlayerTrack,
+    Footer(FooterCmd),
+    ArtifactTab(usize),
+    ModelButton { row: usize, install: bool },
+    OverlayBarrier,
+    OverlayDismiss,
+    PaletteItem(usize),
+    SearchItem(usize),
+    PickerItem(usize),
+    PickerConfirm,
+    CampaignFormRow(usize),
+    TextPromptInput,
+    TextPromptSubmit,
+    SpeakerRow(usize),
+    SpeakerPreview,
+    SpeakerSave,
+    ThemeRow(usize),
+    ThemeApply,
+    ConfirmYes,
+    ConfirmNo,
+    ConfirmCancel,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct HitRegion {
+    pub rect: Rect,
+    pub target: HitTarget,
+}
+
+#[derive(Default, Clone, Debug)]
+pub(super) struct HitRegions {
+    regions: Vec<HitRegion>,
+}
+
+impl HitRegions {
+    pub fn clear(&mut self) {
+        self.regions.clear();
+    }
+
+    pub fn push(&mut self, rect: Rect, target: HitTarget) {
+        if rect.width > 0 && rect.height > 0 {
+            self.regions.push(HitRegion { rect, target });
+        }
+    }
+
+    pub fn target_at(&self, col: u16, row: u16) -> Option<HitTarget> {
+        self.regions
+            .iter()
+            .rev()
+            .find(|region| rect_contains(region.rect, col, row))
+            .map(|region| region.target)
+    }
+
+    pub fn rect_for(&self, target: HitTarget) -> Option<Rect> {
+        self.regions
+            .iter()
+            .rev()
+            .find(|region| region.target == target)
+            .map(|region| region.rect)
+    }
+}
+
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    rect.width > 0
+        && rect.height > 0
+        && col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
 }
 
 /// A clickable footer shortcut.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FooterCmd {
     Palette,
     Search,
@@ -427,9 +487,9 @@ pub struct App {
     /// Receives locally-installed Ollama models `(name, size)` to enrich the list.
     pub model_refresh_rx: Option<UnboundedReceiver<Vec<(String, u64)>>>,
 
-    /// Last known mouse position, for hover highlighting.
-    pub hover_col: u16,
-    pub hover_row: u16,
+    pub(super) hover: Option<(u16, u16)>,
+    pub(super) player_dragging: bool,
+    pub(super) viewer_dragging: bool,
     /// Whether mouse capture is currently on. Toggled for native text
     /// selection ("select mode").
     pub mouse_enabled: bool,
@@ -446,7 +506,7 @@ pub struct App {
     pub audio_state: ListState,
     pub overlay_state: ListState,
 
-    pub rects: Rects,
+    pub(super) hit_regions: HitRegions,
 }
 
 impl App {
@@ -465,6 +525,7 @@ impl App {
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         let global = GlobalConfig::load_or_default().unwrap_or_default();
         let (themes, theme_idx) = theme::resolve(&global.ui.theme);
+        let mouse_enabled = global.ui.mouse && std::env::var_os("SESSIONSMITH_NO_MOUSE").is_none();
 
         let mut app = Self {
             handle,
@@ -518,9 +579,10 @@ impl App {
             job_queue: VecDeque::new(),
             models: None,
             model_refresh_rx: None,
-            hover_col: 0,
-            hover_row: 0,
-            mouse_enabled: true,
+            hover: None,
+            player_dragging: false,
+            viewer_dragging: false,
+            mouse_enabled,
             mouse_toggle_pending: false,
             copy_pending: None,
             overlay: Overlay::None,
@@ -529,7 +591,7 @@ impl App {
             sess_state: ListState::default(),
             audio_state: ListState::default(),
             overlay_state: ListState::default(),
-            rects: Rects::default(),
+            hit_regions: HitRegions::default(),
         };
         app.load_campaigns();
         app.load_campaign_data();
@@ -538,6 +600,36 @@ impl App {
 
     pub fn theme(&self) -> &Theme {
         &self.themes[self.theme_idx]
+    }
+
+    pub(super) fn begin_frame(&mut self) {
+        self.hit_regions.clear();
+    }
+
+    pub(super) fn register_hit(&mut self, rect: Rect, target: HitTarget) {
+        self.hit_regions.push(rect, target);
+    }
+
+    pub(super) fn hit_target_at(&self, col: u16, row: u16) -> Option<HitTarget> {
+        self.hit_regions.target_at(col, row)
+    }
+
+    pub(super) fn hit_rect(&self, target: HitTarget) -> Option<Rect> {
+        self.hit_regions.rect_for(target)
+    }
+
+    pub(super) fn set_hover(&mut self, col: u16, row: u16) {
+        self.hover = Some((col, row));
+    }
+
+    pub(super) fn clear_hover(&mut self) {
+        self.hover = None;
+    }
+
+    pub(super) fn is_hovering(&self, target: HitTarget) -> bool {
+        self.hover
+            .and_then(|(col, row)| self.hit_target_at(col, row))
+            .is_some_and(|hovered| hovered == target)
     }
 
     // ---- data loading ----------------------------------------------------

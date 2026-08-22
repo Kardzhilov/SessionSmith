@@ -11,8 +11,8 @@ use crate::prompts::{Artifact, ALL_ARTIFACTS};
 use crate::session::SessionInput;
 
 use super::app::{
-    Action, App, ConfirmAction, FooterCmd, JobRequestBuilder, Overlay, PaletteState, Pane,
-    PickerKind, PickerState, SearchState,
+    Action, App, ConfirmAction, FooterCmd, HitTarget, JobRequestBuilder, Overlay, PaletteState,
+    Pane, PickerKind, PickerState, SearchState,
 };
 use super::fuzzy;
 use super::jobs::JobKind;
@@ -265,14 +265,18 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let name = self.theme().name.clone();
-                self.global.ui.theme = name.clone();
-                self.global.save().ok();
-                self.status = format!("Theme: {name}");
-                self.overlay = Overlay::None;
+                self.apply_theme_picker();
             }
             _ => {}
         }
+    }
+
+    fn apply_theme_picker(&mut self) {
+        let name = self.theme().name.clone();
+        self.global.ui.theme = name.clone();
+        self.global.save().ok();
+        self.status = format!("Theme: {name}");
+        self.overlay = Overlay::None;
     }
 
     fn on_key_text_prompt(&mut self, key: KeyEvent) {
@@ -316,67 +320,114 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Overlay::SpeakerMap(state) = &mut self.overlay {
-                    let Some(label) = state.labels.get(state.cursor).cloned() else {
-                        return;
-                    };
-                    let current = state
-                        .map
-                        .get(&label)
-                        .and_then(|name| state.choices.iter().position(|choice| choice == name));
-                    let next = current
-                        .map(|index| (index + 1) % state.choices.len())
-                        .unwrap_or(0);
-                    let choice = &state.choices[next];
-                    if choice == "Skip" {
-                        state.map.remove(&label);
-                    } else {
-                        state.map.insert(label, choice.clone());
-                    }
-                }
+                let cursor = match &self.overlay {
+                    Overlay::SpeakerMap(state) => state.cursor,
+                    _ => return,
+                };
+                self.cycle_speaker_at(cursor);
             }
             KeyCode::Char('p') => {
-                let preview = if let Overlay::SpeakerMap(state) = &self.overlay {
-                    state.labels.get(state.cursor).and_then(|label| {
-                        state
-                            .preview_offsets
-                            .get(label)
-                            .zip(state.audio.clone())
-                            .map(|(offset, audio)| (audio, label.clone(), *offset))
-                    })
-                } else {
-                    None
+                let cursor = match &self.overlay {
+                    Overlay::SpeakerMap(state) => state.cursor,
+                    _ => return,
                 };
-                if let Some((audio, label, offset)) = preview {
-                    self.start_player(&audio, &label, offset);
-                } else {
-                    self.status =
-                        "No source audio or diarized SRT cue available for preview".into();
-                }
+                self.preview_speaker_at(cursor);
             }
-            KeyCode::Char('w') => {
-                let result = if let (Overlay::SpeakerMap(state), Some(campaign)) =
-                    (&self.overlay, &self.campaign)
-                {
-                    crate::speakers::apply_to_session(
-                        &campaign.transcripts_dir(),
-                        &state.stem,
-                        &state.map,
-                    )
-                } else {
-                    Ok(())
-                };
-                match result {
-                    Ok(()) => {
-                        self.overlay = Overlay::None;
-                        self.load_campaign_data();
-                        self.status = "Speaker mapping saved".into();
-                    }
-                    Err(error) => {
-                        self.message("Could not save mapping", &format!("{error:#}"), true)
-                    }
-                }
+            KeyCode::Char('w') => self.save_speaker_map(),
+            _ => {}
+        }
+    }
+
+    fn cycle_speaker_at(&mut self, index: usize) {
+        let Overlay::SpeakerMap(state) = &mut self.overlay else {
+            return;
+        };
+        let Some(label) = state.labels.get(index).cloned() else {
+            return;
+        };
+        if state.choices.is_empty() {
+            return;
+        }
+        state.cursor = index;
+        let current = state
+            .map
+            .get(&label)
+            .and_then(|name| state.choices.iter().position(|choice| choice == name));
+        let next = current
+            .map(|choice| (choice + 1) % state.choices.len())
+            .unwrap_or(0);
+        let choice = &state.choices[next];
+        if choice == "Skip" {
+            state.map.remove(&label);
+        } else {
+            state.map.insert(label, choice.clone());
+        }
+    }
+
+    fn preview_speaker_at(&mut self, index: usize) {
+        let preview = if let Overlay::SpeakerMap(state) = &mut self.overlay {
+            state.cursor = index;
+            state.labels.get(index).and_then(|label| {
+                state
+                    .preview_offsets
+                    .get(label)
+                    .zip(state.audio.clone())
+                    .map(|(offset, audio)| (audio, label.clone(), *offset))
+            })
+        } else {
+            None
+        };
+        if let Some((audio, label, offset)) = preview {
+            self.start_player(&audio, &label, offset);
+        } else {
+            self.status = "No source audio or diarized SRT cue available for preview".into();
+        }
+    }
+
+    fn save_speaker_map(&mut self) {
+        let result = if let (Overlay::SpeakerMap(state), Some(campaign)) =
+            (&self.overlay, &self.campaign)
+        {
+            crate::speakers::apply_to_session(&campaign.transcripts_dir(), &state.stem, &state.map)
+        } else {
+            Ok(())
+        };
+        match result {
+            Ok(()) => {
+                self.overlay = Overlay::None;
+                self.load_campaign_data();
+                self.status = "Speaker mapping saved".into();
             }
+            Err(error) => self.message("Could not save mapping", &format!("{error:#}"), true),
+        }
+    }
+
+    pub fn on_paste(&mut self, text: String) {
+        let text: String = text
+            .chars()
+            .filter_map(|character| match character {
+                '\n' | '\r' => Some(' '),
+                _ if character.is_control() => None,
+                _ => Some(character),
+            })
+            .collect();
+        if text.is_empty() {
+            return;
+        }
+        match &mut self.overlay {
+            Overlay::Palette(palette) => {
+                palette.query.push_str(&text);
+                self.refilter_palette();
+            }
+            Overlay::Search(search) => {
+                search.query.push_str(&text);
+                self.run_search();
+            }
+            Overlay::TextPrompt(prompt) => {
+                prompt.input.insert_paste(&text);
+                prompt.error = None;
+            }
+            Overlay::CampaignForm(form) => form.paste(&text),
             _ => {}
         }
     }
@@ -1114,48 +1165,260 @@ impl App {
     // ---- mouse -----------------------------------------------------------
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
-        // Track hover position for interactable highlighting.
-        self.hover_col = ev.column;
-        self.hover_row = ev.row;
-
-        // Overlays get their own click/scroll handling.
-        if !matches!(self.overlay, Overlay::None) {
-            match ev.kind {
-                MouseEventKind::Down(MouseButton::Left) => self.on_overlay_click(ev.column, ev.row),
-                MouseEventKind::ScrollDown => self.overlay_scroll(1),
-                MouseEventKind::ScrollUp => self.overlay_scroll(-1),
-                _ => {}
-            }
-            return;
-        }
+        self.set_hover(ev.column, ev.row);
         match ev.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.on_click(ev.column, ev.row),
-            MouseEventKind::ScrollDown => {
-                if self.models.is_some() && rect_contains(self.rects.models_pane, ev.column, ev.row)
-                {
-                    self.models_move(1);
-                } else if rect_contains(self.rects.job, ev.column, ev.row) {
-                    self.job_scroll_by(3);
-                } else if rect_contains(self.rects.viewer, ev.column, ev.row) {
-                    self.scroll_viewer(3);
-                } else {
-                    self.move_selection(1);
+            MouseEventKind::Down(MouseButton::Left) => {
+                let target = self.hit_target_at(ev.column, ev.row);
+                self.player_dragging = matches!(target, Some(HitTarget::PlayerTrack));
+                self.viewer_dragging = matches!(target, Some(HitTarget::ViewerScrollbar));
+                if let Some(target) = target {
+                    self.dispatch_mouse_target(target, ev.column, ev.row);
                 }
             }
-            MouseEventKind::ScrollUp => {
-                if self.models.is_some() && rect_contains(self.rects.models_pane, ev.column, ev.row)
-                {
-                    self.models_move(-1);
-                } else if rect_contains(self.rects.job, ev.column, ev.row) {
-                    self.job_scroll_by(-3);
-                } else if rect_contains(self.rects.viewer, ev.column, ev.row) {
-                    self.scroll_viewer(-3);
-                } else {
-                    self.move_selection(-1);
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.player_dragging {
+                    self.seek_player_at(ev.column);
+                } else if self.viewer_dragging {
+                    self.drag_viewer_scroll(ev.row);
                 }
             }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.player_dragging = false;
+                self.viewer_dragging = false;
+            }
+            MouseEventKind::ScrollDown => self.scroll_mouse_target(ev.column, ev.row, 1),
+            MouseEventKind::ScrollUp => self.scroll_mouse_target(ev.column, ev.row, -1),
             _ => {}
         }
+    }
+
+    fn dispatch_mouse_target(&mut self, target: HitTarget, col: u16, row: u16) {
+        match target {
+            HitTarget::CampaignList => self.pane = Pane::Campaigns,
+            HitTarget::CampaignRow(index) => {
+                if index < self.campaigns.len() {
+                    self.pane = Pane::Campaigns;
+                    self.campaign_idx = index;
+                    self.camp_state.select(Some(index));
+                    self.load_campaign_data();
+                }
+            }
+            HitTarget::SessionList => self.pane = Pane::Sessions,
+            HitTarget::SessionRow(index) => {
+                self.pane = Pane::Sessions;
+                if index == 0 {
+                    self.log_selected = true;
+                    self.sess_state.select(Some(0));
+                    self.open_log();
+                } else if index - 1 < self.sessions.len() {
+                    self.log_selected = false;
+                    self.session_idx = index - 1;
+                    self.sess_state.select(Some(index));
+                    self.open_selected_session();
+                }
+            }
+            HitTarget::AudioList => self.pane = Pane::Audio,
+            HitTarget::AudioRow(index) => {
+                if index < self.audio.len() {
+                    self.pane = Pane::Audio;
+                    self.audio_idx = index;
+                    self.audio_state.select(Some(index));
+                }
+            }
+            HitTarget::Viewer => self.pane = Pane::Content,
+            HitTarget::ViewerScrollbar => self.drag_viewer_scroll(row),
+            HitTarget::Job => self.pane = Pane::Content,
+            HitTarget::ModelList => self.pane = Pane::Content,
+            HitTarget::ModelRow(index) => {
+                self.pane = Pane::Content;
+                let mut expand = false;
+                if let Some(models) = &mut self.models {
+                    if let Some(model) = models.rows.get(index) {
+                        if model.selectable() {
+                            models.cursor = index;
+                            expand = model.family;
+                        }
+                    }
+                }
+                if expand {
+                    self.toggle_models_expand();
+                }
+            }
+            HitTarget::PlayerTrack => self.seek_player_at(col),
+            HitTarget::Footer(command) => self.run_footer_cmd(command),
+            HitTarget::ArtifactTab(index) => {
+                if self.open_session.is_some() {
+                    self.artifact_tab = index;
+                    self.pane = Pane::Content;
+                    self.refresh_viewer();
+                }
+            }
+            HitTarget::ModelButton { row, install } => self.model_action_at(row, install),
+            HitTarget::OverlayBarrier => {}
+            HitTarget::OverlayDismiss => self.on_key(KeyEvent::from(KeyCode::Esc)),
+            HitTarget::PaletteItem(index) => {
+                let action = if let Overlay::Palette(palette) = &self.overlay {
+                    palette
+                        .filtered
+                        .get(index)
+                        .copied()
+                        .map(|item| Action::all()[item])
+                } else {
+                    None
+                };
+                if let Some(action) = action {
+                    self.overlay = Overlay::None;
+                    self.dispatch(action);
+                }
+            }
+            HitTarget::SearchItem(index) => {
+                if let Overlay::Search(search) = &mut self.overlay {
+                    search.cursor = index;
+                }
+                self.open_search_hit();
+            }
+            HitTarget::PickerItem(index) => {
+                if let Overlay::Picker(picker) = &mut self.overlay {
+                    if index < picker.checked.len() {
+                        picker.checked[index] = !picker.checked[index];
+                    }
+                    picker.cursor = index;
+                }
+            }
+            HitTarget::PickerConfirm => self.confirm_picker(),
+            HitTarget::CampaignFormRow(index) => {
+                let action = if let Overlay::CampaignForm(form) = &mut self.overlay {
+                    form.click_row(index)
+                } else {
+                    return;
+                };
+                self.handle_campaign_form_action(action);
+            }
+            HitTarget::TextPromptInput => {}
+            HitTarget::TextPromptSubmit => self.submit_text_prompt(),
+            HitTarget::SpeakerRow(index) => self.cycle_speaker_at(index),
+            HitTarget::SpeakerPreview => {
+                let index = match &self.overlay {
+                    Overlay::SpeakerMap(state) => state.cursor,
+                    _ => return,
+                };
+                self.preview_speaker_at(index);
+            }
+            HitTarget::SpeakerSave => self.save_speaker_map(),
+            HitTarget::ThemeRow(index) => {
+                if index < self.themes.len() {
+                    if let Overlay::ThemePicker { cursor, .. } = &mut self.overlay {
+                        *cursor = index;
+                    }
+                    self.theme_idx = index;
+                }
+            }
+            HitTarget::ThemeApply => self.apply_theme_picker(),
+            HitTarget::ConfirmYes => self.on_key_confirm(KeyEvent::from(KeyCode::Char('y'))),
+            HitTarget::ConfirmNo => self.on_key_confirm(KeyEvent::from(KeyCode::Char('n'))),
+            HitTarget::ConfirmCancel => self.on_key_confirm(KeyEvent::from(KeyCode::Esc)),
+        }
+    }
+
+    fn scroll_mouse_target(&mut self, col: u16, row: u16, delta: i32) {
+        let Some(target) = self.hit_target_at(col, row) else {
+            return;
+        };
+        match target {
+            HitTarget::CampaignList | HitTarget::CampaignRow(_) => self.wheel_campaigns(delta),
+            HitTarget::SessionList | HitTarget::SessionRow(_) => self.wheel_sessions(delta),
+            HitTarget::AudioList | HitTarget::AudioRow(_) => self.wheel_audio(delta),
+            HitTarget::Viewer | HitTarget::ViewerScrollbar => self.scroll_viewer(delta * 3),
+            HitTarget::Job => self.job_scroll_by(delta * 3),
+            HitTarget::ModelList | HitTarget::ModelRow(_) | HitTarget::ModelButton { .. } => {
+                for _ in 0..delta.unsigned_abs() {
+                    self.models_move(delta.signum());
+                }
+            }
+            HitTarget::OverlayBarrier
+            | HitTarget::PaletteItem(_)
+            | HitTarget::SearchItem(_)
+            | HitTarget::PickerItem(_)
+            | HitTarget::PickerConfirm
+            | HitTarget::CampaignFormRow(_)
+            | HitTarget::TextPromptInput
+            | HitTarget::TextPromptSubmit
+            | HitTarget::SpeakerRow(_)
+            | HitTarget::SpeakerPreview
+            | HitTarget::SpeakerSave
+            | HitTarget::ThemeRow(_)
+            | HitTarget::ThemeApply
+            | HitTarget::ConfirmYes
+            | HitTarget::ConfirmNo
+            | HitTarget::ConfirmCancel => self.overlay_scroll(delta),
+            HitTarget::PlayerTrack
+            | HitTarget::Footer(_)
+            | HitTarget::ArtifactTab(_)
+            | HitTarget::OverlayDismiss => {}
+        }
+    }
+
+    fn wheel_campaigns(&mut self, delta: i32) {
+        if self.campaigns.is_empty() {
+            return;
+        }
+        self.pane = Pane::Campaigns;
+        let last = self.campaigns.len().saturating_sub(1) as i32;
+        self.campaign_idx = (self.campaign_idx as i32 + delta).clamp(0, last) as usize;
+        self.camp_state.select(Some(self.campaign_idx));
+    }
+
+    fn wheel_sessions(&mut self, delta: i32) {
+        self.pane = Pane::Sessions;
+        let total = self.sessions.len() + 1;
+        let current = if self.log_selected {
+            0
+        } else {
+            self.session_idx + 1
+        };
+        let index = (current as i32 + delta).clamp(0, total.saturating_sub(1) as i32) as usize;
+        self.log_selected = index == 0;
+        if index > 0 {
+            self.session_idx = index - 1;
+        }
+        self.sess_state.select(Some(index));
+    }
+
+    fn wheel_audio(&mut self, delta: i32) {
+        if self.audio.is_empty() {
+            return;
+        }
+        self.pane = Pane::Audio;
+        let last = self.audio.len().saturating_sub(1) as i32;
+        self.audio_idx = (self.audio_idx as i32 + delta).clamp(0, last) as usize;
+        self.audio_state.select(Some(self.audio_idx));
+    }
+
+    fn seek_player_at(&mut self, col: u16) {
+        let Some(track) = self.hit_rect(HitTarget::PlayerTrack) else {
+            return;
+        };
+        let duration = self
+            .player
+            .as_ref()
+            .map(|player| player.duration())
+            .unwrap_or(0.0);
+        if let Some(position) = track_position(track, col, duration) {
+            self.player_seek_to(position);
+        }
+    }
+
+    fn drag_viewer_scroll(&mut self, row: u16) {
+        let Some(track) = self.hit_rect(HitTarget::ViewerScrollbar) else {
+            return;
+        };
+        let max = self.viewer_lines.len().saturating_sub(1);
+        let relative_row = row
+            .saturating_sub(track.y)
+            .min(track.height.saturating_sub(1)) as usize;
+        let denominator = track.height.saturating_sub(1).max(1) as usize;
+        self.viewer_scroll =
+            (max.saturating_mul(relative_row) / denominator).min(u16::MAX as usize) as u16;
     }
 
     fn job_scroll_by(&mut self, delta: i32) {
@@ -1193,6 +1456,11 @@ impl App {
     fn toggle_select(&mut self) {
         self.mouse_enabled = !self.mouse_enabled;
         self.mouse_toggle_pending = true;
+        if !self.mouse_enabled {
+            self.player_dragging = false;
+            self.viewer_dragging = false;
+            self.clear_hover();
+        }
         self.status = if self.mouse_enabled {
             "Mouse re-enabled".into()
         } else {
@@ -1202,84 +1470,30 @@ impl App {
 
     /// Scroll (move the cursor of) whichever overlay list is active.
     fn overlay_scroll(&mut self, delta: i32) {
-        let code = if delta > 0 {
-            KeyCode::Down
-        } else {
-            KeyCode::Up
-        };
-        self.on_key(KeyEvent::from(code));
-    }
-
-    fn on_overlay_click(&mut self, col: u16, row: u16) {
-        // Simple overlays dismiss on any click.
-        if matches!(self.overlay, Overlay::Help | Overlay::Message { .. }) {
-            self.overlay = Overlay::None;
-            return;
-        }
-
-        let list = self.rects.overlay_list;
-        if !rect_contains(list, col, row) {
-            return;
-        }
-        let offset = self.overlay_state.offset();
-        let len = match &self.overlay {
-            Overlay::Palette(p) => p.filtered.len(),
-            Overlay::Search(s) => s.hits.len(),
-            Overlay::Picker(p) => p.items.len(),
-            Overlay::ThemePicker { .. } => self.themes.len(),
-            _ => 0,
-        };
-        let Some(idx) = list_row(list, row, offset, len) else {
-            return;
-        };
-
-        enum Act {
-            None,
-            PaletteRun(usize),
-            SearchOpen(usize),
-            PickerToggle(usize),
-            ThemePreview(usize),
-        }
-        let act = match &self.overlay {
-            Overlay::Palette(p) => p
-                .filtered
-                .get(idx)
-                .copied()
-                .map(Act::PaletteRun)
-                .unwrap_or(Act::None),
-            Overlay::Search(_) => Act::SearchOpen(idx),
-            Overlay::Picker(_) => Act::PickerToggle(idx),
-            Overlay::ThemePicker { .. } => Act::ThemePreview(idx),
-            _ => Act::None,
-        };
-
-        match act {
-            Act::PaletteRun(ai) => {
-                let action = Action::all()[ai];
-                self.overlay = Overlay::None;
-                self.dispatch(action);
+        let theme_count = self.themes.len();
+        match &mut self.overlay {
+            Overlay::Palette(palette) => {
+                palette.cursor = clamp_index(palette.cursor, delta, palette.filtered.len());
             }
-            Act::SearchOpen(i) => {
-                if let Overlay::Search(s) = &mut self.overlay {
-                    s.cursor = i;
-                }
-                self.open_search_hit();
+            Overlay::Search(search) => {
+                search.cursor = clamp_index(search.cursor, delta, search.hits.len());
             }
-            Act::PickerToggle(i) => {
-                if let Overlay::Picker(p) = &mut self.overlay {
-                    if i < p.checked.len() {
-                        p.checked[i] = !p.checked[i];
-                    }
-                    p.cursor = i;
-                }
+            Overlay::Picker(picker) => {
+                picker.cursor = clamp_index(picker.cursor, delta, picker.items.len());
             }
-            Act::ThemePreview(i) => {
-                if let Overlay::ThemePicker { cursor, .. } = &mut self.overlay {
-                    *cursor = i;
-                }
-                self.theme_idx = i;
+            Overlay::CampaignForm(form) => form.scroll_by(delta),
+            Overlay::SpeakerMap(state) => {
+                state.cursor = clamp_index(state.cursor, delta, state.labels.len());
             }
-            Act::None => {}
+            Overlay::ThemePicker { cursor, .. } => {
+                *cursor = clamp_index(*cursor, delta, theme_count);
+                self.theme_idx = *cursor;
+            }
+            Overlay::None
+            | Overlay::Help
+            | Overlay::TextPrompt(_)
+            | Overlay::Message { .. }
+            | Overlay::Confirm { .. } => {}
         }
     }
 
@@ -1300,107 +1514,6 @@ impl App {
             FooterCmd::Select => self.toggle_select(),
         }
     }
-
-    fn on_click(&mut self, col: u16, row: u16) {
-        let r = self.rects.clone();
-        if rect_contains(r.player_track, col, row) {
-            if let Some(player) = &self.player {
-                if player.duration() > 0.0 {
-                    if let Some(position) = track_position(r.player_track, col, player.duration()) {
-                        self.player_seek_to(position);
-                    }
-                }
-            }
-            return;
-        }
-        // Footer keybar is clickable.
-        if rect_contains(r.footer, col, row) {
-            if let Some((_, _, _, cmd)) = r
-                .footer_hits
-                .iter()
-                .find(|(a, b, ry, _)| row == *ry && col >= *a && col < *b)
-            {
-                self.run_footer_cmd(*cmd);
-            }
-            return;
-        }
-        if rect_contains(r.campaigns, col, row) {
-            self.pane = Pane::Campaigns;
-            if let Some(i) = list_row(
-                r.campaigns,
-                row,
-                self.camp_state.offset(),
-                self.campaigns.len(),
-            ) {
-                self.campaign_idx = i;
-                self.camp_state.select(Some(i));
-                self.load_campaign_data();
-            }
-        } else if rect_contains(r.sessions, col, row) {
-            self.pane = Pane::Sessions;
-            if let Some(i) = list_row(
-                r.sessions,
-                row,
-                self.sess_state.offset(),
-                self.sessions.len() + 1,
-            ) {
-                self.sess_state.select(Some(i));
-                if i == 0 {
-                    self.log_selected = true;
-                    self.open_log();
-                } else {
-                    self.log_selected = false;
-                    self.session_idx = i - 1;
-                    self.open_selected_session();
-                }
-            }
-        } else if rect_contains(r.audio, col, row) {
-            self.pane = Pane::Audio;
-            if let Some(i) = list_row(r.audio, row, self.audio_state.offset(), self.audio.len()) {
-                self.audio_idx = i;
-                self.audio_state.select(Some(i));
-            }
-        } else if rect_contains(r.tabs, col, row) {
-            // Exact hit-testing against the per-tab ranges recorded while drawing.
-            if self.open_session.is_some() {
-                if let Some(idx) = r.tab_ranges.iter().position(|(a, b)| col >= *a && col < *b) {
-                    self.artifact_tab = idx;
-                    self.pane = Pane::Content;
-                    self.refresh_viewer();
-                }
-            }
-        } else if self.models.is_some() && rect_contains(r.models_pane, col, row) {
-            self.pane = Pane::Content;
-            // A per-row [install]/[delete] button?
-            if let Some((_, _, _, ri, install)) = r
-                .model_buttons
-                .iter()
-                .find(|(a, b, by, _, _)| row == *by && col >= *a && col < *b)
-            {
-                self.model_action_at(*ri, *install);
-            } else {
-                // Otherwise select the clicked row; toggle it if it's a family.
-                let inner_top = r.models_pane.y;
-                let mut toggle = false;
-                if let Some(s) = &mut self.models {
-                    if row >= inner_top {
-                        let ri = s.scroll + (row - inner_top) as usize;
-                        if let Some(rw) = s.rows.get(ri) {
-                            if rw.selectable() {
-                                s.cursor = ri;
-                                toggle = rw.family;
-                            }
-                        }
-                    }
-                }
-                if toggle {
-                    self.toggle_models_expand();
-                }
-            }
-        } else if rect_contains(r.viewer, col, row) {
-            self.pane = Pane::Content;
-        }
-    }
 }
 
 fn step_idx(cur: usize, delta: i32, len: usize) -> usize {
@@ -1411,36 +1524,20 @@ fn step_idx(cur: usize, delta: i32, len: usize) -> usize {
     (((cur as i32 + delta) % n + n) % n) as usize
 }
 
-fn rect_contains(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
-    r.width > 0
-        && r.height > 0
-        && col >= r.x
-        && col < r.x + r.width
-        && row >= r.y
-        && row < r.y + r.height
+fn clamp_index(current: usize, delta: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    (current as i32 + delta).clamp(0, len.saturating_sub(1) as i32) as usize
 }
 
 fn track_position(track: ratatui::layout::Rect, col: u16, duration: f64) -> Option<f64> {
-    if track.width < 2 || duration <= 0.0 || !rect_contains(track, col, track.y) {
+    if track.width < 2 || duration <= 0.0 {
         return None;
     }
-    let offset = (col - track.x) as f64;
+    let last_col = track.x.saturating_add(track.width.saturating_sub(1));
+    let offset = col.clamp(track.x, last_col).saturating_sub(track.x) as f64;
     Some((offset / (track.width - 1) as f64 * duration).clamp(0.0, duration))
-}
-
-/// Map a mouse row inside a bordered list `Rect` to an item index.
-fn list_row(r: ratatui::layout::Rect, row: u16, offset: usize, len: usize) -> Option<usize> {
-    // Account for the top border line.
-    let inner_top = r.y + 1;
-    if row < inner_top || row >= r.y + r.height {
-        return None;
-    }
-    let idx = offset + (row - inner_top) as usize;
-    if idx < len {
-        Some(idx)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]

@@ -20,6 +20,16 @@ impl TextInput {
         self.cursor += 1;
     }
 
+    pub fn insert_paste(&mut self, text: &str) {
+        for character in text.chars() {
+            if character == '\n' || character == '\r' {
+                self.insert(' ');
+            } else if !character.is_control() {
+                self.insert(character);
+            }
+        }
+    }
+
     pub fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
@@ -93,5 +103,13 @@ mod tests {
         input.left();
         input.left();
         assert_eq!(input.with_cursor(), "Mö|ss");
+    }
+
+    #[test]
+    fn pastes_text_at_character_boundaries() {
+        let mut input = TextInput::new("Möss");
+        input.left();
+        input.insert_paste(" and\nDice");
+        assert_eq!(input.value, "Mös and Dices");
     }
 }

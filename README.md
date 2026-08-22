@@ -106,13 +106,20 @@ drop in `~/.config/sessionsmith/themes/*.toml`.
 | Run / transcribe / notes | `r` / `t` / `n` | click footer |
 | Manage models (install/delete/default) | `m` | palette |
 | Copy current view (OSC 52) | `y` | click **copy** |
-| Select mode (native drag‑select) | `s` | click **select** |
+| Select mode (native drag-select) | `s` | click **select** |
+| Scrub playing audio | `,` / `.` | drag the progress track |
 | Open in `$EDITOR` | `e` | — |
 | Change theme · Help · Quit | `T` · `?` · `q` | click footer |
 | Toggle all checkboxes in a picker | `a` | — |
 
 Prefer the classic line‑based prompts? Run `sessionsmith --no-tui`
 (or set `[ui] legacy_menu = true`).
+
+Mouse capture is enabled by default. Set `[ui] mouse = false` or launch with
+`SESSIONSMITH_NO_MOUSE=1` for terminals with unreliable mouse reporting. Press
+`s` to temporarily release capture for native text selection; in tmux, use
+`set -g mouse on` for TUI interactions and `Shift`+drag when your terminal
+requires it to select text.
 
 ### Candidate notes
 
@@ -218,6 +225,7 @@ model = "large-v3-turbo"
 [ui]
 theme       = "midnight"         # midnight | solar | gruvbox | mono | <your theme>
 legacy_menu = false              # true → classic line‑based menu instead of the TUI
+mouse       = true               # false → disable terminal mouse capture
 ```
 
 See [docs/configuration.md](docs/configuration.md) for the full reference,
