@@ -216,7 +216,7 @@ pub struct SpeakerMapState {
     pub map: BTreeMap<String, String>,
     pub choices: Vec<String>,
     pub cursor: usize,
-    pub preview_offsets: BTreeMap<String, f64>,
+    pub preview_samples: BTreeMap<String, crate::speakers::TimedSpeakerSample>,
     pub audio: Option<PathBuf>,
 }
 
@@ -1080,23 +1080,11 @@ impl App {
             );
             return;
         }
-        let mut samples = BTreeMap::new();
-        for sample in crate::speakers::detect_samples(&text) {
-            samples
-                .entry(sample.label)
-                .or_insert_with(Vec::new)
-                .push(sample.text);
-        }
         let mut map = crate::meta::load(&campaign.transcripts_dir(), &session.stem)
             .and_then(|meta| meta.speaker_map)
             .unwrap_or_else(|| campaign.transcription.speakers.clone());
         map.retain(|label, _| labels.contains(label));
         let mut choices = roster_names(campaign);
-        for name in map.values() {
-            if !choices.contains(name) {
-                choices.push(name.clone());
-            }
-        }
         choices.push("Skip".into());
         let raw_srt = campaign
             .transcripts_dir()
@@ -1108,9 +1096,25 @@ impl App {
                 .transcripts_dir()
                 .join(format!("{}.srt", session.stem))
         };
-        let preview_offsets = std::fs::read_to_string(srt)
-            .map(|srt| crate::speakers::preview_offsets(&srt))
+        let timed_samples = std::fs::read_to_string(srt)
+            .map(|srt| crate::speakers::detect_timed_samples(&srt))
             .unwrap_or_default();
+        let mut samples = BTreeMap::new();
+        let mut preview_samples = BTreeMap::new();
+        for sample in timed_samples {
+            let label = sample.label.clone();
+            samples
+                .entry(label.clone())
+                .or_insert_with(Vec::new)
+                .push(sample.text.clone());
+            preview_samples.entry(label).or_insert(sample);
+        }
+        for sample in crate::speakers::detect_samples(&text) {
+            let entries = samples.entry(sample.label).or_insert_with(Vec::new);
+            if !entries.contains(&sample.text) {
+                entries.push(sample.text);
+            }
+        }
         self.overlay = Overlay::SpeakerMap(SpeakerMapState {
             stem: session.stem.clone(),
             labels,
@@ -1118,7 +1122,7 @@ impl App {
             map,
             choices,
             cursor: 0,
-            preview_offsets,
+            preview_samples,
             audio: self.session_source_audio(),
         });
     }
@@ -1536,6 +1540,29 @@ impl App {
                 self.player = Some(p);
             }
             Err(e) => self.status = format!("audio player unavailable: {e}"),
+        }
+    }
+
+    /// Play one diarized source-audio cue, stopping at the cue boundary.
+    pub(super) fn start_player_sample(
+        &mut self,
+        file: &std::path::Path,
+        label: &str,
+        start: f64,
+        end: f64,
+    ) {
+        let vol = self.global.ui.player_volume;
+        let display_label = format!("{label} sample");
+        match super::player::Player::start_clip(file, &display_label, start, end, vol) {
+            Ok(player) => {
+                self.status = format!(
+                    "▶ {display_label} {}–{} · space pause · S stop",
+                    super::player::fmt_time(start),
+                    super::player::fmt_time(end)
+                );
+                self.player = Some(player);
+            }
+            Err(error) => self.status = format!("audio sample unavailable: {error}"),
         }
     }
 
@@ -2556,14 +2583,46 @@ mod audio_probe_tests {
 
 fn roster_names(campaign: &CampaignConfig) -> Vec<String> {
     let mut names = Vec::new();
+    if !campaign.campaign.gm.trim().is_empty() {
+        names.push(campaign.campaign.gm.clone());
+    }
     for player in &campaign.players {
-        for name in [&player.character, &player.player] {
-            if !name.is_empty() && !names.contains(name) {
-                names.push(name.clone());
-            }
+        let name = player.player.trim();
+        if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
         }
     }
     names
+}
+
+#[cfg(test)]
+mod roster_tests {
+    use super::*;
+
+    #[test]
+    fn speaker_mapping_choices_use_people_and_include_the_gm() {
+        let mut campaign = CampaignConfig::default();
+        campaign.campaign.gm = "Michael".into();
+        campaign.players = vec![
+            crate::config::Player {
+                player: "Ravn".into(),
+                character: "Jan Simen".into(),
+                ..Default::default()
+            },
+            crate::config::Player {
+                player: "Emilie".into(),
+                character: "Fatethrial".into(),
+                ..Default::default()
+            },
+            crate::config::Player {
+                player: "Ravn".into(),
+                character: "A different character".into(),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(roster_names(&campaign), vec!["Michael", "Ravn", "Emilie"]);
+    }
 }
 
 /// The platform command that installs/updates Ollama, or `None` if we can't

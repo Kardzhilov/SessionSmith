@@ -31,6 +31,8 @@ pub struct Player {
     paused_at: f64,
     /// Playback volume 0–100.
     pub volume: u8,
+    /// Optional inclusive source-audio interval for a short preview.
+    clip_range: Option<(f64, f64)>,
     child: Option<Child>,
     backend: &'static str,
 }
@@ -39,6 +41,34 @@ impl Player {
     /// Start playing `file` (labelled `label`) from `offset` seconds at
     /// `volume` (0–100).
     pub fn start(file: &Path, label: &str, offset: f64, volume: u8) -> io::Result<Player> {
+        Self::start_with_clip(file, label, offset, None, volume)
+    }
+
+    /// Start a bounded source-audio preview from `start` through `end`.
+    pub fn start_clip(
+        file: &Path,
+        label: &str,
+        start: f64,
+        end: f64,
+        volume: u8,
+    ) -> io::Result<Player> {
+        let start = start.max(0.0);
+        if !start.is_finite() || !end.is_finite() || end <= start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sample end must be after its start",
+            ));
+        }
+        Self::start_with_clip(file, label, start, Some((start, end)), volume)
+    }
+
+    fn start_with_clip(
+        file: &Path,
+        label: &str,
+        offset: f64,
+        clip_range: Option<(f64, f64)>,
+        volume: u8,
+    ) -> io::Result<Player> {
         let backend = pick_backend().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -56,6 +86,7 @@ impl Player {
             paused: false,
             paused_at: 0.0,
             volume: volume.min(100),
+            clip_range,
             child: None,
             backend,
         };
@@ -65,7 +96,20 @@ impl Player {
 
     fn spawn_at(&mut self, offset: f64) -> io::Result<()> {
         self.kill();
-        self.child = Some(spawn_cmd(self.backend, &self.file, offset, self.volume)?);
+        let remaining = self.clip_range.map(|(_, end)| end - offset);
+        if matches!(remaining, Some(duration) if duration <= 0.0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sample seek position is past its end",
+            ));
+        }
+        self.child = Some(spawn_cmd(
+            self.backend,
+            &self.file,
+            offset,
+            remaining,
+            self.volume,
+        )?);
         self.base_offset = offset;
         self.started = Instant::now();
         self.paused = false;
@@ -112,7 +156,19 @@ impl Player {
     /// Seek to an absolute position in seconds, restarting playback there when
     /// necessary.
     pub fn seek_to(&mut self, position: f64) {
-        let target = clamp_seek_target(position, self.duration());
+        let duration = self.duration();
+        let (minimum, maximum) = match self.clip_range {
+            Some((start, end)) => {
+                let maximum = if duration > 0.0 {
+                    end.min(duration)
+                } else {
+                    end
+                };
+                (start.min(maximum), maximum)
+            }
+            None => (0.0, duration),
+        };
+        let target = clamp_seek_target_in_range(position, minimum, maximum);
         if self.paused {
             self.paused_at = target;
         } else {
@@ -169,30 +225,33 @@ fn bin_exists(bin: &str) -> bool {
     crate::util::find_in_path(bin).is_some()
 }
 
-fn spawn_cmd(backend: &str, file: &Path, offset: f64, volume: u8) -> io::Result<Child> {
+fn spawn_cmd(
+    backend: &str,
+    file: &Path,
+    offset: f64,
+    duration: Option<f64>,
+    volume: u8,
+) -> io::Result<Child> {
     let seek = format!("{offset:.3}");
     let vol = volume.min(100);
     let mut cmd = if backend == "mpv" {
         let mut c = Command::new("mpv");
-        c.args([
-            "--no-video",
-            "--really-quiet",
-            &format!("--start={seek}"),
-            &format!("--volume={vol}"),
-        ]);
+        c.args(["--no-video", "--really-quiet"])
+            .arg(format!("--start={seek}"))
+            .arg(format!("--volume={vol}"));
+        if let Some(duration) = duration {
+            c.arg(format!("--length={duration:.3}"));
+        }
         c
     } else {
         let mut c = Command::new("ffplay");
-        c.args([
-            "-nodisp",
-            "-autoexit",
-            "-loglevel",
-            "quiet",
-            "-ss",
-            &seek,
-            "-volume",
-            &vol.to_string(),
-        ]);
+        c.args(["-nodisp", "-autoexit", "-loglevel", "quiet", "-ss"])
+            .arg(&seek)
+            .arg("-volume")
+            .arg(vol.to_string());
+        if let Some(duration) = duration {
+            c.arg("-t").arg(format!("{duration:.3}"));
+        }
         c
     };
     cmd.arg(file)
@@ -304,10 +363,13 @@ pub fn fmt_time(secs: f64) -> String {
     }
 }
 
-fn clamp_seek_target(position: f64, duration: f64) -> f64 {
-    let target = position.max(0.0);
-    if duration > 0.0 {
-        target.min((duration - 0.2).max(0.0))
+fn clamp_seek_target_in_range(position: f64, minimum: f64, maximum: f64) -> f64 {
+    let minimum = minimum.max(0.0);
+    let target = position.max(minimum);
+    if maximum > minimum {
+        target.min((maximum - 0.2).max(minimum))
+    } else if maximum > 0.0 {
+        minimum
     } else {
         target
     }
@@ -319,8 +381,14 @@ mod tests {
 
     #[test]
     fn clamp_seek_target_stays_within_known_duration() {
-        assert_eq!(clamp_seek_target(-1.0, 30.0), 0.0);
-        assert_eq!(clamp_seek_target(30.0, 30.0), 29.8);
-        assert_eq!(clamp_seek_target(12.0, 0.0), 12.0);
+        assert_eq!(clamp_seek_target_in_range(-1.0, 0.0, 30.0), 0.0);
+        assert_eq!(clamp_seek_target_in_range(30.0, 0.0, 30.0), 29.8);
+        assert_eq!(clamp_seek_target_in_range(12.0, 0.0, 0.0), 12.0);
+    }
+
+    #[test]
+    fn clamp_seek_target_stays_inside_a_preview_interval() {
+        assert_eq!(clamp_seek_target_in_range(1.0, 4.5, 8.25), 4.5);
+        assert!((clamp_seek_target_in_range(20.0, 4.5, 8.25) - 8.05).abs() < f64::EPSILON);
     }
 }

@@ -369,18 +369,20 @@ impl App {
             state.cursor = index;
             state.labels.get(index).and_then(|label| {
                 state
-                    .preview_offsets
+                    .preview_samples
                     .get(label)
                     .zip(state.audio.clone())
-                    .map(|(offset, audio)| (audio, label.clone(), *offset))
+                    .map(|(sample, audio)| (audio, label.clone(), sample.start, sample.end))
             })
         } else {
             None
         };
-        if let Some((audio, label, offset)) = preview {
-            self.start_player(&audio, &label, offset);
+        if let Some((audio, label, start, end)) = preview {
+            self.start_player_sample(&audio, &label, start, end);
         } else {
-            self.status = "No source audio or diarized SRT cue available for preview".into();
+            self.status =
+                "No source audio or timed diarized subtitle cue available for sample playback"
+                    .into();
         }
     }
 

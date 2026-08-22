@@ -964,7 +964,7 @@ mod tests {
             map: std::collections::BTreeMap::new(),
             choices: vec!["Alice".into(), "Skip".into()],
             cursor: 0,
-            preview_offsets: std::collections::BTreeMap::new(),
+            preview_samples: std::collections::BTreeMap::new(),
             audio: None,
         });
         let _ = render_to_buffer(&mut app, 110, 32);

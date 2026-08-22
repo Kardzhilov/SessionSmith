@@ -6,13 +6,24 @@ use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const SPEAKER_PATTERN: &str = r"\bSPEAKER_\d+\b";
+// WhisperX emits `SPEAKER_00`; MOSS emits bracketed labels such as `[S01]`.
+const SPEAKER_PATTERN: &str = r"(?:\bSPEAKER_\d+\b|\[S\d+\])";
 
 /// A representative line attributed to a diarization label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeakerSample {
     pub label: String,
     pub text: String,
+}
+
+/// A representative diarized subtitle cue with the interval to play from the
+/// source audio.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimedSpeakerSample {
+    pub label: String,
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
 }
 
 /// Discover diarization labels and retain up to three of their longest lines.
@@ -39,6 +50,62 @@ pub fn detect_samples(text: &str) -> Vec<SpeakerSample> {
                 label: label.clone(),
                 text,
             })
+        })
+        .collect()
+}
+
+/// Discover up to three of each speaker's longest subtitle cues, retaining
+/// their source-audio interval for preview playback.
+pub fn detect_timed_samples(srt: &str) -> Vec<TimedSpeakerSample> {
+    let pattern = Regex::new(SPEAKER_PATTERN).expect("valid speaker label regex");
+    let mut samples: BTreeMap<String, Vec<TimedSpeakerSample>> = BTreeMap::new();
+    let normalized = srt.replace("\r\n", "\n");
+    for cue in normalized.split("\n\n") {
+        let mut lines = cue.lines();
+        let _ = lines.next();
+        let Some(timing) = lines.next() else {
+            continue;
+        };
+        let Some((start, end)) = timing.split_once(" --> ") else {
+            continue;
+        };
+        let Some(start) = parse_srt_time(start.trim()) else {
+            continue;
+        };
+        let Some(end) = end.split_whitespace().next().and_then(parse_srt_time) else {
+            continue;
+        };
+        let text = lines.collect::<Vec<_>>().join(" ");
+        let labels: Vec<(usize, usize, String)> = pattern
+            .find_iter(&text)
+            .map(|found| (found.start(), found.end(), found.as_str().to_string()))
+            .collect();
+        for (index, (_, label_end, label)) in labels.iter().enumerate() {
+            let next_start = labels
+                .get(index + 1)
+                .map(|(start, _, _)| *start)
+                .unwrap_or(text.len());
+            let sample = text[*label_end..next_start]
+                .trim_start_matches([':', '-', ' '])
+                .trim();
+            if !sample.is_empty() {
+                samples
+                    .entry(label.clone())
+                    .or_default()
+                    .push(TimedSpeakerSample {
+                        label: label.clone(),
+                        text: sample.to_string(),
+                        start,
+                        end: end.max(start),
+                    });
+            }
+        }
+    }
+    samples
+        .into_iter()
+        .flat_map(|(_, mut cues)| {
+            cues.sort_by_key(|cue| std::cmp::Reverse(cue.text.chars().count()));
+            cues.into_iter().take(3)
         })
         .collect()
 }
@@ -229,6 +296,48 @@ mod tests {
             apply_map(raw, &map),
             "Alice: Hi\nSPEAKER_01: The raven is watching the road\nAlice: Longer line here\n"
         );
+    }
+
+    #[test]
+    fn recognizes_and_maps_moss_bracketed_labels() {
+        let raw = "[S01] Hi\n[S02] The raven is watching the road\n[S01] Longer line here\n";
+        let samples = detect_samples(raw);
+        assert_eq!(
+            samples[0],
+            SpeakerSample {
+                label: "[S01]".into(),
+                text: "Longer line here".into()
+            }
+        );
+        assert_eq!(labels(raw), vec!["[S01]", "[S02]"]);
+        let map = BTreeMap::from([("[S01]".into(), "Alice".into())]);
+        assert_eq!(
+            apply_map(raw, &map),
+            "Alice Hi\n[S02] The raven is watching the road\nAlice Longer line here\n"
+        );
+        assert_eq!(
+            parse_mapping("[S01]=Alice").unwrap(),
+            ("[S01]".into(), "Alice".into())
+        );
+        let offsets = preview_offsets(
+            "1\n00:00:12,500 --> 00:00:15,000\n[S01] First line\n\n2\n00:00:20,000 --> 00:00:22,000\n[S02] Hi\n",
+        );
+        assert_eq!(offsets.get("[S01]"), Some(&12.5));
+        assert_eq!(offsets.get("[S02]"), Some(&20.0));
+    }
+
+    #[test]
+    fn retains_the_audio_interval_for_moss_samples() {
+        let srt = "1\n00:00:02,000 --> 00:00:03,000\n[S01] Hi\n\n2\n00:00:04,500 --> 00:00:08,250\n[S01] A longer sample to identify this speaker\n\n3\n00:00:10,000 --> 00:00:12,000\n[S02] Another speaker\n";
+        let samples = detect_timed_samples(srt);
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].label, "[S01]");
+        assert_eq!(samples[0].text, "A longer sample to identify this speaker");
+        assert_eq!(samples[0].start, 4.5);
+        assert_eq!(samples[0].end, 8.25);
+        assert_eq!(samples[2].label, "[S02]");
+        assert_eq!(samples[2].start, 10.0);
+        assert_eq!(samples[2].end, 12.0);
     }
 
     #[test]

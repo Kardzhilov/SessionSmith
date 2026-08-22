@@ -1503,7 +1503,7 @@ fn draw_speaker_map(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     frame.render_widget(Clear, rect);
     app.register_hit(rect, HitTarget::OverlayBarrier);
     let block = popup_block(
-        "Map speakers  Enter cycle · p preview · w write · Esc cancel",
+        "Map speakers  Enter cycle · p play sample · w write · Esc cancel",
         th,
     );
     let inner = block.inner(rect);
@@ -1520,7 +1520,8 @@ fn draw_speaker_map(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     );
     let offset = app.overlay_state.offset();
     register_multiline_list_rows(app, parts[0], offset, labels_len, 2, HitTarget::SpeakerRow);
-    let preview_width = 12.min(parts[1].width);
+    let preview_label = " Play sample ";
+    let preview_width = (preview_label.chars().count() as u16).min(parts[1].width);
     app.register_hit(
         Rect::new(parts[1].x, parts[1].y, preview_width, parts[1].height),
         HitTarget::SpeakerPreview,
@@ -1582,7 +1583,7 @@ fn draw_speaker_map(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" Preview ", preview_style),
+            Span::styled(preview_label, preview_style),
             Span::styled("  Save mapping", save_style),
         ]))
         .style(th.base()),

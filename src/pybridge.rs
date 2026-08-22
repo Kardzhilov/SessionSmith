@@ -523,7 +523,10 @@ def load_audio_16k_mono(path):
             data = np.interp(x_new, x_old, data).astype("float32")
     return data
 
-def chunk_indices(total_samples, sr, window_s=540.0, overlap_s=2.0):
+# Short windows are required for faithfulness: on long windows the small LLM
+# decoder silently condenses/skips content (measured: 66 deleted words at 540s
+# vs 7 at 30s on a 4-min read).
+def chunk_indices(total_samples, sr, window_s=30.0, overlap_s=2.0):
     win = int(window_s * sr); overlap = int(overlap_s * sr)
     step = max(win - overlap, 1)
     start = 0
@@ -532,6 +535,16 @@ def chunk_indices(total_samples, sr, window_s=540.0, overlap_s=2.0):
         if start + win >= total_samples:
             break
         start += step
+
+def dedup_overlap(prev_text, next_text, max_words=12):
+    # Trim words re-transcribed from the 2s chunk overlap off the next chunk.
+    def key(word):
+        return "".join(ch for ch in word.lower() if ch.isalnum())
+    prev, nxt = prev_text.split(), next_text.split()
+    for n in range(min(max_words, len(prev), len(nxt)), 1, -1):
+        if [key(w) for w in prev[-n:]] == [key(w) for w in nxt[:n]]:
+            return " ".join(nxt[n:])
+    return next_text
 
 def transcription_prompt(initial_prompt):
     glossary = initial_prompt.strip()
@@ -580,6 +593,8 @@ def main():
         if end - start < int(0.5 * sr):
             continue
         text = transcribe_chunk(model, processor, tokenizer, data[start:end], prompt, device)
+        if text and segments:
+            text = dedup_overlap(segments[-1][2], text)
         if text:
             segments.append((start / sr, end / sr, text))
         if device.type == "cuda":
