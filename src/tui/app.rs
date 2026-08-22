@@ -18,6 +18,8 @@ use crate::prompts::{Artifact, ALL_ARTIFACTS};
 use crate::session::SessionInput;
 use crate::ui::UiEvent;
 
+use super::campaign_form::{CampaignField, CampaignFormAction, CampaignFormState};
+use super::form::TextInput;
 use super::jobs::{self, JobKind, JobRequest, ModelJob};
 use super::theme::{self, Theme};
 
@@ -59,6 +61,7 @@ pub struct SessionEntry {
 pub enum Action {
     NewCampaign,
     CampaignSettings,
+    ForkCampaign,
     RunPipeline,
     Transcribe,
     GenerateNotes,
@@ -82,8 +85,9 @@ pub enum Action {
 impl Action {
     pub fn label(self) -> &'static str {
         match self {
-            Action::NewCampaign => "New campaign — run setup wizard",
-            Action::CampaignSettings => "Campaign settings — outputs, ASR, preset",
+            Action::NewCampaign => "New campaign — create in app",
+            Action::CampaignSettings => "Edit campaign — settings, players, prompts",
+            Action::ForkCampaign => "Fork campaign — copy config and content",
             Action::RunPipeline => "Run pipeline — transcribe + notes",
             Action::Transcribe => "Transcribe audio — audio → transcript",
             Action::GenerateNotes => "Generate notes — transcript → notes",
@@ -108,6 +112,7 @@ impl Action {
         &[
             Action::NewCampaign,
             Action::CampaignSettings,
+            Action::ForkCampaign,
             Action::RunPipeline,
             Action::Transcribe,
             Action::GenerateNotes,
@@ -167,22 +172,25 @@ pub struct PickerState {
     pub target: Option<PathBuf>,
 }
 
-pub struct CampaignSettingsState {
-    pub cursor: usize,
-    pub artifacts: Vec<bool>,
-    pub diarize: bool,
-    pub vad: bool,
-    pub presets: Vec<String>,
-    pub preset_index: usize,
+pub(super) enum TextPromptAction {
+    ForkCampaign,
 }
 
-pub enum Overlay {
+pub(super) struct TextPromptState {
+    pub title: String,
+    pub input: TextInput,
+    pub error: Option<String>,
+    pub action: TextPromptAction,
+}
+
+pub(super) enum Overlay {
     None,
     Help,
     Palette(PaletteState),
     Search(SearchState),
     Picker(PickerState),
-    CampaignSettings(CampaignSettingsState),
+    CampaignForm(CampaignFormState),
+    TextPrompt(TextPromptState),
     SpeakerMap(SpeakerMapState),
     /// Theme chooser with live preview. `original` is restored on Esc.
     ThemePicker {
@@ -212,9 +220,24 @@ pub struct SpeakerMapState {
     pub audio: Option<PathBuf>,
 }
 
-pub enum ConfirmAction {
+pub(super) enum ConfirmAction {
     Rerun(PathBuf, Vec<Artifact>, bool),
     Quit,
+    DiscardCampaignForm,
+    SaveCampaignRename,
+}
+
+pub(super) enum EditorReturn {
+    Viewer,
+    CampaignLongText(CampaignField),
+}
+
+struct PendingCampaignSave {
+    form: CampaignFormState,
+    config: CampaignConfig,
+    path: PathBuf,
+    old_root: PathBuf,
+    new_root: PathBuf,
 }
 
 /// Which family a model row belongs to.
@@ -304,6 +327,9 @@ pub enum FooterCmd {
     Search,
     Help,
     Quit,
+    NewCampaign,
+    EditCampaign,
+    ForkCampaign,
     Editor,
     Run,
     Transcribe,
@@ -320,18 +346,19 @@ pub struct App {
 
     pub should_quit: bool,
     pub pending_editor: Option<PathBuf>,
+    editor_return: EditorReturn,
     /// A shell command to run with the TUI suspended (e.g. the Ollama updater):
     /// `(title, command)`.
     pub pending_shell: Option<(String, String)>,
-    /// Campaign paths present before the setup wizard was launched.
-    pub pending_campaign_reload: Option<Vec<PathBuf>>,
     /// Reload the selected campaign after an external interactive action exits.
     pub pending_data_reload: bool,
     /// Active audio player (quote playback / audio scrubbing), if any.
     pub player: Option<super::player::Player>,
 
     /// Action awaiting confirmation while `Overlay::Confirm` is open.
-    pub pending_confirm: Option<ConfirmAction>,
+    pub(super) pending_confirm: Option<ConfirmAction>,
+    pending_campaign_form: Option<CampaignFormState>,
+    pending_campaign_save: Option<PendingCampaignSave>,
 
     pub campaigns: Vec<CampaignEntry>,
     pub campaign_idx: usize,
@@ -411,7 +438,7 @@ pub struct App {
     /// Text queued to be copied to the system clipboard (via OSC 52).
     pub copy_pending: Option<String>,
 
-    pub overlay: Overlay,
+    pub(super) overlay: Overlay,
     pub status: String,
 
     pub camp_state: ListState,
@@ -445,11 +472,13 @@ impl App {
             theme_idx,
             should_quit: false,
             pending_editor: None,
+            editor_return: EditorReturn::Viewer,
             pending_shell: None,
-            pending_campaign_reload: None,
             pending_data_reload: false,
             player: None,
             pending_confirm: None,
+            pending_campaign_form: None,
+            pending_campaign_save: None,
             campaigns: Vec::new(),
             campaign_idx: 0,
             campaign: None,
@@ -574,49 +603,348 @@ impl App {
         });
     }
 
-    /// Reload campaigns after the external setup wizard exits and select its
-    /// newly created campaign when one was added.
-    pub fn reload_campaigns_after_wizard(&mut self) {
-        let previous = self.pending_campaign_reload.take().unwrap_or_default();
-        self.load_campaigns();
-        if let Some(index) = self
+    fn campaign_presets(&self) -> Vec<String> {
+        let mut presets: Vec<String> = std::fs::read_dir("presets")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|extension| extension.to_str()) == Some("toml"))
+                    .then(|| path.file_stem()?.to_str().map(str::to_string))
+                    .flatten()
+            })
+            .collect();
+        presets.sort();
+        presets.dedup();
+        presets
+    }
+
+    fn can_mutate_campaigns(&mut self) -> bool {
+        if self.job_running {
+            self.message(
+                "Campaign busy",
+                "Wait for the active job to finish before changing campaign files or output.",
+                true,
+            );
+            false
+        } else {
+            true
+        }
+    }
+
+    pub(super) fn open_new_campaign_form(&mut self) {
+        if !self.can_mutate_campaigns() {
+            return;
+        }
+        self.overlay = Overlay::CampaignForm(CampaignFormState::create(self.campaign_presets()));
+        self.overlay_state.select(Some(0));
+    }
+
+    pub(super) fn open_campaign_editor(&mut self) {
+        if !self.can_mutate_campaigns() {
+            return;
+        }
+        let Some(path) = self
             .campaigns
-            .iter()
-            .position(|entry| !previous.contains(&entry.path))
-        {
+            .get(self.campaign_idx)
+            .map(|entry| entry.path.clone())
+        else {
+            self.message("No campaign", "Select a campaign before editing it.", true);
+            return;
+        };
+        let Some(campaign) = self.campaign.as_ref() else {
+            self.message(
+                "Could not load campaign",
+                "The selected campaign configuration is invalid.",
+                true,
+            );
+            return;
+        };
+        self.overlay = Overlay::CampaignForm(CampaignFormState::edit(
+            campaign,
+            path,
+            self.campaign_presets(),
+        ));
+        self.overlay_state.select(Some(0));
+    }
+
+    pub(super) fn request_fork_campaign(&mut self) {
+        if !self.can_mutate_campaigns() {
+            return;
+        }
+        let Some(campaign) = self.campaign.as_ref() else {
+            self.message("No campaign", "Select a campaign before forking it.", true);
+            return;
+        };
+        self.overlay = Overlay::TextPrompt(TextPromptState {
+            title: "Fork campaign - new name".into(),
+            input: TextInput::new(format!("{} fork", campaign.campaign.name)),
+            error: None,
+            action: TextPromptAction::ForkCampaign,
+        });
+    }
+
+    pub(super) fn handle_campaign_form_action(&mut self, action: CampaignFormAction) {
+        match action {
+            CampaignFormAction::None => {}
+            CampaignFormAction::Close => self.overlay = Overlay::None,
+            CampaignFormAction::RequestDiscard => self.confirm_discard_campaign_form(),
+            CampaignFormAction::OpenLongText(field) => self.open_campaign_long_text_editor(field),
+            CampaignFormAction::Save => self.save_campaign_form(),
+        }
+    }
+
+    fn confirm_discard_campaign_form(&mut self) {
+        let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
+        let Overlay::CampaignForm(form) = overlay else {
+            self.overlay = overlay;
+            return;
+        };
+        self.pending_campaign_form = Some(form);
+        self.pending_confirm = Some(ConfirmAction::DiscardCampaignForm);
+        self.overlay = Overlay::Confirm {
+            title: "Discard campaign changes?".into(),
+            body: "Unsaved campaign edits will be lost.".into(),
+        };
+    }
+
+    fn open_campaign_long_text_editor(&mut self, field: CampaignField) {
+        let content = match &self.overlay {
+            Overlay::CampaignForm(form) => form.take_long_text(field),
+            _ => None,
+        };
+        let Some(content) = content else {
+            return;
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join(format!(
+            "sessionsmith-campaign-{}-{unique}.txt",
+            std::process::id()
+        ));
+        if let Err(error) = std::fs::write(&path, content) {
+            self.message(
+                "Could not open editor",
+                &format!("could not prepare temporary campaign field: {error}"),
+                true,
+            );
+            return;
+        }
+        self.editor_return = EditorReturn::CampaignLongText(field);
+        self.pending_editor = Some(path);
+    }
+
+    pub(super) fn finish_editor(&mut self, path: &std::path::Path) {
+        match std::mem::replace(&mut self.editor_return, EditorReturn::Viewer) {
+            EditorReturn::Viewer => {
+                let scroll = self.viewer_scroll;
+                self.refresh_viewer();
+                self.viewer_scroll = scroll.min(
+                    self.viewer_lines
+                        .len()
+                        .saturating_sub(1)
+                        .min(u16::MAX as usize) as u16,
+                );
+            }
+            EditorReturn::CampaignLongText(field) => {
+                let result = std::fs::read_to_string(path);
+                let _ = std::fs::remove_file(path);
+                match result {
+                    Ok(value) => {
+                        if let Overlay::CampaignForm(form) = &mut self.overlay {
+                            form.apply_long_text(field, value);
+                        }
+                    }
+                    Err(error) => self.message(
+                        "Could not read editor changes",
+                        &format!("could not read temporary campaign field: {error}"),
+                        true,
+                    ),
+                }
+            }
+        }
+    }
+
+    pub(super) fn submit_text_prompt(&mut self) {
+        let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
+        let Overlay::TextPrompt(mut prompt) = overlay else {
+            self.overlay = overlay;
+            return;
+        };
+        match prompt.action {
+            TextPromptAction::ForkCampaign => {
+                let Some(source) = self.campaign.clone() else {
+                    self.message("No campaign", "Select a campaign before forking it.", true);
+                    return;
+                };
+                let outcome = crate::campaign_ops::fork_campaign(
+                    std::path::Path::new("campaigns"),
+                    &crate::config::output_dir(),
+                    &source,
+                    &prompt.input.value,
+                );
+                match outcome {
+                    Ok(outcome) => {
+                        let index_result = CampaignConfig::load(&outcome.config_path)
+                            .and_then(|campaign| crate::campaign_ops::reindex_campaign(&campaign));
+                        self.reload_select_campaign(&outcome.config_path);
+                        self.status = match index_result {
+                            Ok(indexed) => format!(
+                                "Forked {} - {} files copied, {indexed} sessions indexed",
+                                prompt.input.value.trim(),
+                                outcome.files_copied
+                            ),
+                            Err(error) => format!(
+                                "Forked {} - {} files copied; search index needs rebuild: {error}",
+                                prompt.input.value.trim(),
+                                outcome.files_copied
+                            ),
+                        };
+                    }
+                    Err(error) => {
+                        prompt.error = Some(error.to_string());
+                        self.overlay = Overlay::TextPrompt(prompt);
+                    }
+                }
+            }
+        }
+    }
+
+    fn save_campaign_form(&mut self) {
+        let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
+        let Overlay::CampaignForm(mut form) = overlay else {
+            self.overlay = overlay;
+            return;
+        };
+        let config = match form.build_config() {
+            Ok(config) => config,
+            Err(error) => {
+                form.set_error(error.to_string());
+                self.overlay = Overlay::CampaignForm(form);
+                return;
+            }
+        };
+
+        let Some(path) = form.edit_path().map(std::path::Path::to_path_buf) else {
+            match crate::campaign_ops::create_campaign(
+                std::path::Path::new("campaigns"),
+                &crate::config::output_dir(),
+                &config,
+            ) {
+                Ok(path) => {
+                    self.reload_select_campaign(&path);
+                    self.status = format!("Campaign created: {}", config.campaign.name);
+                }
+                Err(error) => {
+                    form.set_error(error.to_string());
+                    self.overlay = Overlay::CampaignForm(form);
+                }
+            }
+            return;
+        };
+
+        let old_root = form.original.output_root();
+        let new_root = config.output_root();
+        if form.changed_slug(&config) && new_root.exists() && old_root != new_root {
+            form.set_error(format!(
+                "output already exists at {}; choose another name or move it first",
+                new_root.display()
+            ));
+            self.overlay = Overlay::CampaignForm(form);
+            return;
+        }
+        if form.changed_slug(&config) && old_root.exists() {
+            self.pending_campaign_save = Some(PendingCampaignSave {
+                form,
+                config,
+                path,
+                old_root: old_root.clone(),
+                new_root: new_root.clone(),
+            });
+            self.pending_confirm = Some(ConfirmAction::SaveCampaignRename);
+            self.overlay = Overlay::Confirm {
+                title: "Move campaign output?".into(),
+                body: format!(
+                    "Renaming this campaign moves:\n{}\nto:\n{}",
+                    old_root.display(),
+                    new_root.display()
+                ),
+            };
+            return;
+        }
+        self.commit_campaign_edit(form, config, path, None);
+    }
+
+    pub(super) fn commit_pending_campaign_rename(&mut self) {
+        let Some(pending) = self.pending_campaign_save.take() else {
+            return;
+        };
+        self.commit_campaign_edit(
+            pending.form,
+            pending.config,
+            pending.path,
+            Some((pending.old_root, pending.new_root)),
+        );
+    }
+
+    fn commit_campaign_edit(
+        &mut self,
+        mut form: CampaignFormState,
+        config: CampaignConfig,
+        path: PathBuf,
+        output_move: Option<(PathBuf, PathBuf)>,
+    ) {
+        let mut moved = None;
+        if let Some((old_root, new_root)) = output_move {
+            if let Err(error) = crate::campaign_ops::migrate_output_root(&old_root, &new_root) {
+                form.set_error(error.to_string());
+                self.overlay = Overlay::CampaignForm(form);
+                return;
+            }
+            moved = Some((old_root, new_root));
+        }
+        if let Err(error) = config.save(&path) {
+            if let Some((old_root, new_root)) = moved {
+                let _ = crate::campaign_ops::migrate_output_root(&new_root, &old_root);
+            }
+            form.set_error(format!("could not save campaign: {error}"));
+            self.overlay = Overlay::CampaignForm(form);
+            return;
+        }
+        let index_result = crate::campaign_ops::reindex_campaign(&config);
+        self.reload_select_campaign(&path);
+        self.status = match index_result {
+            Ok(indexed) => format!("Campaign saved - {indexed} sessions indexed"),
+            Err(error) => format!("Campaign saved; search index needs rebuild: {error}"),
+        };
+    }
+
+    fn reload_select_campaign(&mut self, path: &std::path::Path) {
+        self.load_campaigns();
+        if let Some(index) = self.campaigns.iter().position(|entry| entry.path == path) {
             self.campaign_idx = index;
             self.camp_state.select(Some(index));
         }
         self.load_campaign_data();
-        self.status = self
-            .campaigns
-            .get(self.campaign_idx)
-            .map(|campaign| format!("Campaign ready: {}", campaign.name))
-            .unwrap_or_else(|| "Campaign wizard finished".into());
     }
 
-    pub(super) fn request_new_campaign(&mut self) {
-        let executable = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(error) => {
-                self.message(
-                    "Cannot start wizard",
-                    &format!("could not locate SessionSmith: {error}"),
-                    true,
-                );
-                return;
-            }
-        };
-        self.pending_campaign_reload = Some(
-            self.campaigns
-                .iter()
-                .map(|entry| entry.path.clone())
-                .collect(),
-        );
-        self.pending_shell = Some((
-            "New campaign".into(),
-            format!("{} init", shell_quote(&executable.display().to_string())),
-        ));
+    pub(super) fn restore_pending_campaign_form(&mut self) {
+        if let Some(form) = self.pending_campaign_form.take() {
+            self.overlay = Overlay::CampaignForm(form);
+        }
+    }
+
+    pub(super) fn restore_pending_campaign_save(&mut self) {
+        if let Some(pending) = self.pending_campaign_save.take() {
+            self.overlay = Overlay::CampaignForm(pending.form);
+        }
+    }
+
+    pub(super) fn discard_pending_campaign_form(&mut self) {
+        self.pending_campaign_form = None;
     }
 
     pub(super) fn request_speaker_mapping(&mut self) {

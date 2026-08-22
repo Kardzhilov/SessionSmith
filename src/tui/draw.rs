@@ -81,7 +81,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Overlay::Palette(_) => draw_palette(frame, app, &th, area),
         Overlay::Search(_) => draw_search(frame, app, &th, area),
         Overlay::Picker(_) => draw_picker(frame, app, &th, area),
-        Overlay::CampaignSettings(_) => draw_campaign_settings(frame, app, &th, area),
+        Overlay::CampaignForm(_) => draw_campaign_form(frame, app, &th, area),
+        Overlay::TextPrompt(_) => draw_text_prompt(frame, app, &th, area),
         Overlay::SpeakerMap(_) => draw_speaker_map(frame, app, &th, area),
         Overlay::ThemePicker { .. } => draw_theme_picker(frame, app, area),
     }
@@ -247,6 +248,9 @@ fn footer_hints(pane: Pane) -> Vec<FTok> {
             mk("↑↓", "move", None),
             mk("⇧↑↓", "reorder", None),
             mk("⏎", "switch", None),
+            mk("N", "new", Some(F::NewCampaign)),
+            mk("E", "edit", Some(F::EditCampaign)),
+            mk("F", "fork", Some(F::ForkCampaign)),
             mk("r", "run", Some(F::Run)),
             mk(":", "palette", Some(F::Palette)),
             mk("/", "search", Some(F::Search)),
@@ -368,7 +372,7 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         .collect();
     if camp_items.is_empty() {
         camp_items
-            .push(ListItem::new("no campaigns — run: sessionsmith init").style(th.muted_style()));
+            .push(ListItem::new("no campaigns - press N to create one").style(th.muted_style()));
     }
     let camp_list = List::new(camp_items)
         .block(section_block("Campaigns", th, app.pane == Pane::Campaigns))
@@ -1232,69 +1236,115 @@ fn draw_picker(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     frame.render_stateful_widget(list, rect, &mut app.overlay_state);
 }
 
-fn draw_campaign_settings(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
-    let Overlay::CampaignSettings(settings) = &app.overlay else {
+fn draw_campaign_form(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
+    let rect = centered(area, 88, 90);
+    frame.render_widget(Clear, rect);
+    let (title, rows, cursor, error) = {
+        let Overlay::CampaignForm(form) = &mut app.overlay else {
+            return;
+        };
+        let visible = rect.height.saturating_sub(5) as usize;
+        form.ensure_cursor_visible(visible);
+        (form.title(), form.rows(), form.cursor(), form.error.clone())
+    };
+    let block = popup_block(&title, th);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+    let label_width = rows
+        .iter()
+        .filter(|row| row.selectable)
+        .map(|row| row.label.chars().count())
+        .max()
+        .unwrap_or(10)
+        .clamp(10, 24);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if !row.selectable {
+                return ListItem::new(Line::from(Span::styled(
+                    format!(" {} ", row.label),
+                    th.accent_style().add_modifier(Modifier::BOLD),
+                )));
+            }
+            let selected = index == cursor;
+            let label: String = row.label.chars().take(label_width).collect();
+            let value: String = row.value.chars().take(72).collect();
+            let label_style = if selected { th.selection() } else { th.base() };
+            let value_style = if selected {
+                th.selection()
+            } else {
+                th.muted_style()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {label:<label_width$} "), label_style),
+                Span::styled(value, value_style),
+            ]))
+        })
+        .collect();
+    let list = List::new(items)
+        .highlight_style(th.selection())
+        .highlight_symbol("▸");
+    app.overlay_state.select(Some(cursor));
+    app.rects.overlay_list = parts[0];
+    frame.render_stateful_widget(list, parts[0], &mut app.overlay_state);
+
+    let hint = if let Some(error) = error {
+        Line::from(Span::styled(error, th.error_style()))
+    } else {
+        Line::from(vec![
+            Span::styled("Enter", th.accent_style()),
+            Span::styled(" edit/toggle  ", th.muted_style()),
+            Span::styled("Space", th.accent_style()),
+            Span::styled(" cycle  ", th.muted_style()),
+            Span::styled("a/x", th.accent_style()),
+            Span::styled(" add/remove  ", th.muted_style()),
+            Span::styled("Ctrl+S", th.accent_style()),
+            Span::styled(" save  ", th.muted_style()),
+            Span::styled("Esc", th.accent_style()),
+            Span::styled(" back", th.muted_style()),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(hint)
+            .style(th.base())
+            .wrap(Wrap { trim: true }),
+        parts[1],
+    );
+}
+
+fn draw_text_prompt(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
+    let Overlay::TextPrompt(prompt) = &app.overlay else {
         return;
     };
-    let rect = centered(area, 66, 70);
+    let rect = centered(area, 62, 28);
     frame.render_widget(Clear, rect);
-    let mut rows = Vec::new();
-    for (index, artifact) in ALL_ARTIFACTS.iter().enumerate() {
-        let selected = settings.artifacts.get(index).copied().unwrap_or(false);
-        rows.push(Line::from(vec![
-            Span::styled(
-                if selected { "[x] " } else { "[ ] " },
-                if selected {
-                    th.success_style()
-                } else {
-                    th.muted_style()
-                },
-            ),
-            Span::raw(artifact.label()),
-        ]));
+    let mut lines = vec![Line::from(Span::styled(
+        prompt.input.with_cursor(),
+        th.base(),
+    ))];
+    if let Some(error) = &prompt.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(error.clone(), th.error_style())));
     }
-    rows.push(Line::from(vec![
-        Span::styled(
-            if settings.diarize { "[x] " } else { "[ ] " },
-            if settings.diarize {
-                th.success_style()
-            } else {
-                th.muted_style()
-            },
-        ),
-        Span::raw("Speaker diarization"),
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Enter", th.accent_style()),
+        Span::styled(" fork  ", th.muted_style()),
+        Span::styled("Esc", th.accent_style()),
+        Span::styled(" cancel", th.muted_style()),
     ]));
-    rows.push(Line::from(vec![
-        Span::styled(
-            if settings.vad { "[x] " } else { "[ ] " },
-            if settings.vad {
-                th.success_style()
-            } else {
-                th.muted_style()
-            },
-        ),
-        Span::raw("Voice activity detection"),
-    ]));
-    rows.push(Line::from(vec![
-        Span::styled("Preset: ", th.accent_style()),
-        Span::raw(
-            settings
-                .presets
-                .get(settings.preset_index)
-                .cloned()
-                .unwrap_or_default(),
-        ),
-    ]));
-    let list = List::new(rows)
-        .block(popup_block(
-            "Campaign settings  (Space toggle · ← → preset · Enter save)",
-            th,
-        ))
-        .highlight_style(th.selection())
-        .highlight_symbol("▸ ");
-    app.overlay_state.select(Some(settings.cursor));
-    app.rects.overlay_list = rect;
-    frame.render_stateful_widget(list, rect, &mut app.overlay_state);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(popup_block(&prompt.title, th))
+            .style(th.base())
+            .wrap(Wrap { trim: true }),
+        rect,
+    );
 }
 
 fn draw_speaker_map(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
@@ -1381,6 +1431,8 @@ fn draw_confirm(frame: &mut Frame, app: &App, th: &Theme, area: Rect) {
     lines.push(Line::from(""));
     let (yes, no) = match app.pending_confirm.as_ref() {
         Some(super::app::ConfirmAction::Quit) => (" quit", " keep job"),
+        Some(super::app::ConfirmAction::DiscardCampaignForm) => (" discard", " keep editing"),
+        Some(super::app::ConfirmAction::SaveCampaignRename) => (" move and save", " keep editing"),
         _ => (" re-transcribe", " keep transcript"),
     };
     lines.push(Line::from(vec![
@@ -1750,6 +1802,7 @@ fn draw_help(frame: &mut Frame, th: &Theme, area: Rect) {
         ("← →  /  h l  /  1-6", "switch artifact tab"),
         ("Enter", "open session · switch campaign"),
         ("Shift+↑↓  /  K J", "reorder campaigns (saved)"),
+        ("N / E / F", "new campaign · edit campaign · fork campaign"),
         ("r / t / n", "run pipeline · transcribe · notes"),
         ("R", "re-run this session (palette: keep-both to compare)"),
         ("e", "open current artifact in $EDITOR"),

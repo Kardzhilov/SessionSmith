@@ -1,13 +1,9 @@
 use anyhow::Result;
 use inquire::{Confirm, Select, Text};
-use std::path::PathBuf;
 
 use crate::cli::InitArgs;
-use crate::config::{
-    Campaign, CampaignConfig, GlobalConfig, OutputsConfig, Player, PromptOverrides, SystemRef,
-    TranscriptionConfig,
-};
-use crate::{commands, deps, hardware, models, presets, ui};
+use crate::config::{GlobalConfig, Player};
+use crate::{campaign_ops, deps, hardware, models, presets, ui};
 
 pub async fn run(args: InitArgs) -> Result<()> {
     ui::header("SessionSmith · init");
@@ -61,8 +57,9 @@ pub async fn run(args: InitArgs) -> Result<()> {
         });
     }
 
-    let slug = commands::slugify(&name);
-    let campaign_path = PathBuf::from("campaigns").join(format!("{slug}.toml"));
+    let cfg = campaign_ops::new_campaign_config(name, gm, setting, players, preset_id);
+    let campaign_path =
+        campaign_ops::campaign_path(std::path::Path::new("campaigns"), &cfg.campaign.name);
 
     if campaign_path.exists() && !args.force {
         ui::warn(&format!(
@@ -72,28 +69,6 @@ pub async fn run(args: InitArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Seed notes from legacy campaign.txt if present.
-    let notes_seed = std::fs::read_to_string("campaign.txt").unwrap_or_default();
-
-    let cfg = CampaignConfig {
-        source_path: None,
-        campaign: Campaign {
-            name: name.clone(),
-            gm,
-            setting,
-            notes: notes_seed,
-        },
-        backend: Default::default(),
-        asr: Default::default(),
-        players,
-        transcription: TranscriptionConfig::default(),
-        system: SystemRef {
-            preset: preset_id,
-            overrides: String::new(),
-        },
-        outputs: OutputsConfig::default(),
-        prompts: PromptOverrides::default(),
-    };
     cfg.save(&campaign_path)?;
     ui::ok(&format!("wrote {}", campaign_path.display()));
 

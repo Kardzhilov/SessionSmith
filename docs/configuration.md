@@ -7,6 +7,36 @@ SessionSmith uses two levels of configuration:
 
 ---
 
+## Campaign management in the TUI
+
+The Campaigns pane can create, edit, and fork campaigns without leaving the
+TUI:
+
+- `N` creates a campaign in `campaigns/<slug>.toml`.
+- `E` edits the selected campaign, including campaign details, players,
+	system options, output artifacts, backend and ASR overrides, transcription
+	vocabulary/corrections/speaker labels, and every prompt override.
+- `F` forks the selected campaign into a new name. The fork gets a new config
+	and copies its transcripts, notes, campaign log, and session metadata. Audio
+	stays in the shared input directory and is not duplicated.
+
+Long campaign notes, system overrides, and prompt overrides open in `$EDITOR`
+and return to the TUI form when the editor exits. Backend API keys and Hugging
+Face tokens are masked in the form; `${ENV_VAR}` values remain literal and are
+not resolved or displayed.
+
+Changing a campaign name changes its output slug. When generated output exists,
+SessionSmith asks before moving `output/<old-slug>/` to
+`output/<new-slug>/`, then rebuilds the campaign search index. Create, rename,
+and fork never overwrite an existing config or output directory; choose a new
+name or move the conflicting directory first.
+
+Campaign saves use TOML serialization, so hand-written comments and formatting
+in a campaign file are not preserved. `sessionsmith init` remains available for
+the command-line first-run workflow and global hardware/model setup.
+
+---
+
 ## Global config
 
 **Location:** `~/.config/sessionsmith/config.toml`  

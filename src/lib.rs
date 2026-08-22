@@ -5,6 +5,7 @@
 pub mod asr;
 pub mod audio;
 pub mod campaign_log;
+pub mod campaign_ops;
 pub mod cli;
 pub mod commands;
 pub mod config;

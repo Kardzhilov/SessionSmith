@@ -3,7 +3,9 @@
 //! subcommands remain available for scripting.
 
 mod app;
+mod campaign_form;
 mod draw;
+mod form;
 mod fuzzy;
 mod input;
 mod jobs;
@@ -75,20 +77,11 @@ fn run_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
 
         if let Some(path) = app.pending_editor.take() {
             open_in_editor(terminal, &path);
-            let scroll = app.viewer_scroll;
-            app.refresh_viewer();
-            app.viewer_scroll = scroll.min(
-                app.viewer_lines
-                    .len()
-                    .saturating_sub(1)
-                    .min(u16::MAX as usize) as u16,
-            );
+            app.finish_editor(&path);
         }
         if let Some((title, command)) = app.pending_shell.take() {
             run_shell_suspended(terminal, &title, &command);
-            if app.pending_campaign_reload.is_some() {
-                app.reload_campaigns_after_wizard();
-            } else if app.pending_data_reload {
+            if app.pending_data_reload {
                 app.pending_data_reload = false;
                 app.load_campaign_data();
             }
@@ -312,6 +305,32 @@ mod tests {
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw::draw(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn campaign_management_stays_inside_the_tui() {
+        let (_rt, mut app) = new_app();
+
+        app.on_key(KeyEvent::from(KeyCode::Char('N')));
+        assert!(matches!(&app.overlay, super::app::Overlay::CampaignForm(_)));
+        assert!(app.pending_shell.is_none());
+        let buffer = render_to_buffer(&mut app, 110, 32);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("New campaign"));
+        let _ = render_to_buffer(&mut app, 46, 16);
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+
+        app.on_key(KeyEvent::from(KeyCode::Char('E')));
+        assert!(matches!(&app.overlay, super::app::Overlay::CampaignForm(_)));
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+
+        app.on_key(KeyEvent::from(KeyCode::Char('F')));
+        assert!(matches!(&app.overlay, super::app::Overlay::TextPrompt(_)));
+        assert!(app.pending_shell.is_none());
     }
 
     #[test]

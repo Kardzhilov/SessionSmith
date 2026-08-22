@@ -52,8 +52,13 @@ impl App {
                 self.on_key_picker(key);
                 return;
             }
-            Overlay::CampaignSettings(_) => {
-                self.on_key_campaign_settings(key);
+            Overlay::CampaignForm(form) => {
+                let action = form.handle_key(key);
+                self.handle_campaign_form_action(action);
+                return;
+            }
+            Overlay::TextPrompt(_) => {
+                self.on_key_text_prompt(key);
                 return;
             }
             Overlay::SpeakerMap(_) => {
@@ -90,6 +95,18 @@ impl App {
         if matches!(self.pane, Pane::Campaigns) {
             let shift = key.modifiers.contains(KeyModifiers::SHIFT);
             match key.code {
+                KeyCode::Char('N') => {
+                    self.dispatch(Action::NewCampaign);
+                    return;
+                }
+                KeyCode::Char('E') => {
+                    self.dispatch(Action::CampaignSettings);
+                    return;
+                }
+                KeyCode::Char('F') => {
+                    self.dispatch(Action::ForkCampaign);
+                    return;
+                }
                 KeyCode::Char('K') => {
                     self.move_campaign(-1);
                     return;
@@ -258,6 +275,33 @@ impl App {
         }
     }
 
+    fn on_key_text_prompt(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.overlay = Overlay::None;
+            return;
+        }
+        if key.code == KeyCode::Enter {
+            self.submit_text_prompt();
+            return;
+        }
+        let Overlay::TextPrompt(prompt) = &mut self.overlay else {
+            return;
+        };
+        match key.code {
+            KeyCode::Backspace => prompt.input.backspace(),
+            KeyCode::Delete => prompt.input.delete(),
+            KeyCode::Left => prompt.input.left(),
+            KeyCode::Right => prompt.input.right(),
+            KeyCode::Home => prompt.input.home(),
+            KeyCode::End => prompt.input.end(),
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                prompt.input.insert(character)
+            }
+            _ => {}
+        }
+        prompt.error = None;
+    }
+
     fn on_key_speaker_map(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.overlay = Overlay::None,
@@ -347,6 +391,12 @@ impl App {
                         self.start_rerun(target, artifacts, candidate, true);
                     }
                     Some(ConfirmAction::Quit) => self.should_quit = true,
+                    Some(ConfirmAction::DiscardCampaignForm) => {
+                        self.discard_pending_campaign_form()
+                    }
+                    Some(ConfirmAction::SaveCampaignRename) => {
+                        self.commit_pending_campaign_rename()
+                    }
                     None => {}
                 }
             }
@@ -356,12 +406,22 @@ impl App {
                     Some(ConfirmAction::Rerun(target, artifacts, candidate)) => {
                         self.start_rerun(target, artifacts, candidate, false);
                     }
+                    Some(ConfirmAction::DiscardCampaignForm) => {
+                        self.restore_pending_campaign_form()
+                    }
+                    Some(ConfirmAction::SaveCampaignRename) => self.restore_pending_campaign_save(),
                     Some(ConfirmAction::Quit) | None => {}
                 }
             }
             KeyCode::Esc => {
                 self.overlay = Overlay::None;
-                self.pending_confirm = None;
+                match self.pending_confirm.take() {
+                    Some(ConfirmAction::DiscardCampaignForm) => {
+                        self.restore_pending_campaign_form()
+                    }
+                    Some(ConfirmAction::SaveCampaignRename) => self.restore_pending_campaign_save(),
+                    _ => {}
+                }
             }
             _ => {}
         }
@@ -596,131 +656,6 @@ impl App {
             cursor: 0,
             target: None,
         });
-    }
-
-    fn open_campaign_settings(&mut self) {
-        let Some(campaign) = self.campaign.as_ref() else {
-            self.message(
-                "No campaign",
-                "Select a campaign before opening settings.",
-                true,
-            );
-            return;
-        };
-        let mut presets: Vec<String> = std::fs::read_dir("presets")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
-                    .then(|| path.file_stem()?.to_str().map(str::to_string))
-                    .flatten()
-            })
-            .collect();
-        presets.sort();
-        if !presets.contains(&campaign.system.preset) {
-            presets.push(campaign.system.preset.clone());
-            presets.sort();
-        }
-        let preset_index = presets
-            .iter()
-            .position(|preset| preset == &campaign.system.preset)
-            .unwrap_or(0);
-        self.overlay = Overlay::CampaignSettings(super::app::CampaignSettingsState {
-            cursor: 0,
-            artifacts: ALL_ARTIFACTS
-                .iter()
-                .map(|artifact| {
-                    campaign
-                        .outputs
-                        .default
-                        .iter()
-                        .any(|id| id == artifact.id())
-                })
-                .collect(),
-            diarize: campaign.asr.diarize.unwrap_or(self.global.asr.diarize),
-            vad: campaign.asr.vad.unwrap_or(self.global.asr.vad),
-            presets,
-            preset_index,
-        });
-    }
-
-    fn on_key_campaign_settings(&mut self, key: KeyEvent) {
-        let row_count = ALL_ARTIFACTS.len() + 3;
-        match key.code {
-            KeyCode::Esc => self.overlay = Overlay::None,
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Overlay::CampaignSettings(settings) = &mut self.overlay {
-                    settings.cursor = settings.cursor.saturating_sub(1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Overlay::CampaignSettings(settings) = &mut self.overlay {
-                    settings.cursor = (settings.cursor + 1).min(row_count - 1);
-                }
-            }
-            KeyCode::Left | KeyCode::Char('h') => self.cycle_settings_preset(-1),
-            KeyCode::Right | KeyCode::Char('l') => self.cycle_settings_preset(1),
-            KeyCode::Char(' ') => {
-                if let Overlay::CampaignSettings(settings) = &mut self.overlay {
-                    match settings.cursor {
-                        index if index < settings.artifacts.len() => {
-                            settings.artifacts[index] = !settings.artifacts[index];
-                        }
-                        index if index == ALL_ARTIFACTS.len() => {
-                            settings.diarize = !settings.diarize
-                        }
-                        index if index == ALL_ARTIFACTS.len() + 1 => settings.vad = !settings.vad,
-                        _ => self.cycle_settings_preset(1),
-                    }
-                }
-            }
-            KeyCode::Enter => self.save_campaign_settings(),
-            _ => {}
-        }
-    }
-
-    fn cycle_settings_preset(&mut self, delta: i32) {
-        if let Overlay::CampaignSettings(settings) = &mut self.overlay {
-            settings.preset_index = step_idx(settings.preset_index, delta, settings.presets.len());
-        }
-    }
-
-    fn save_campaign_settings(&mut self) {
-        let Overlay::CampaignSettings(settings) = &self.overlay else {
-            return;
-        };
-        let Some(path) = self
-            .campaigns
-            .get(self.campaign_idx)
-            .map(|entry| entry.path.clone())
-        else {
-            return;
-        };
-        let Some(mut campaign) = self.campaign.clone() else {
-            return;
-        };
-        campaign.outputs.default = ALL_ARTIFACTS
-            .iter()
-            .zip(&settings.artifacts)
-            .filter(|(_, selected)| **selected)
-            .map(|(artifact, _)| artifact.id().to_string())
-            .collect();
-        campaign.asr.diarize = Some(settings.diarize);
-        campaign.asr.vad = Some(settings.vad);
-        if let Some(preset) = settings.presets.get(settings.preset_index) {
-            campaign.system.preset = preset.clone();
-        }
-        match campaign.save(&path) {
-            Ok(()) => {
-                self.campaign = Some(campaign);
-                self.load_campaign_data();
-                self.status = "Campaign settings saved".into();
-                self.overlay = Overlay::None;
-            }
-            Err(error) => self.message("Could not save settings", &error.to_string(), true),
-        }
     }
 
     fn open_artifact_picker(&mut self) {
@@ -1113,8 +1048,9 @@ impl App {
 
     pub fn dispatch(&mut self, action: Action) {
         match action {
-            Action::NewCampaign => self.request_new_campaign(),
-            Action::CampaignSettings => self.open_campaign_settings(),
+            Action::NewCampaign => self.open_new_campaign_form(),
+            Action::CampaignSettings => self.open_campaign_editor(),
+            Action::ForkCampaign => self.request_fork_campaign(),
             Action::RunPipeline => self.open_audio_picker(PickerKind::AudioRun),
             Action::Transcribe => self.open_audio_picker(PickerKind::AudioTranscribe),
             Action::GenerateNotes => self.open_artifact_picker(),
@@ -1353,6 +1289,9 @@ impl App {
             FooterCmd::Search => self.open_search(),
             FooterCmd::Help => self.overlay = Overlay::Help,
             FooterCmd::Quit => self.request_quit(),
+            FooterCmd::NewCampaign => self.dispatch(Action::NewCampaign),
+            FooterCmd::EditCampaign => self.dispatch(Action::CampaignSettings),
+            FooterCmd::ForkCampaign => self.dispatch(Action::ForkCampaign),
             FooterCmd::Editor => self.dispatch(Action::OpenInEditor),
             FooterCmd::Run => self.dispatch(Action::RunPipeline),
             FooterCmd::Transcribe => self.dispatch(Action::Transcribe),
