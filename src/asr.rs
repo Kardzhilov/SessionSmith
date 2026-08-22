@@ -2,10 +2,11 @@
 //!
 //! SessionSmith supports several transcription engines. Whisper `ggml` models
 //! run in-process via `whisper-rs` (or the `whisper-cli` binary). The newer,
-//! more accurate models (NVIDIA Parakeet / Canary, Mistral Voxtral, and the
-//! CTranslate2 `faster-whisper` builds) run through a small Python bridge that
-//! is executed with [`uv`](https://docs.astral.sh/uv/), so their dependencies
-//! and weights are fetched lazily on first use — no manual `pip install`.
+//! more accurate models (NVIDIA Parakeet / Canary, Mistral Voxtral, IBM Granite
+//! Speech, MOSS Transcribe-Diarize, and the CTranslate2 `faster-whisper` builds)
+//! run through a small Python bridge that is executed with
+//! [`uv`](https://docs.astral.sh/uv/), so their dependencies and weights are
+//! fetched lazily on first use — no manual `pip install`.
 //!
 //! The active transcription model is selected purely by its `id` (the
 //! `[asr] model` config value or `--asr-model` flag); the catalog maps that id
@@ -24,6 +25,10 @@ pub enum AsrEngine {
     CanaryQwen,
     /// Mistral Voxtral audio LLM (Python bridge, CUDA).
     Voxtral,
+    /// IBM Granite Speech speech-language model (Python bridge).
+    GraniteSpeech,
+    /// MOSS joint transcription and speaker diarization model (Python bridge).
+    MossTranscribeDiarize,
     /// Local GGUF ASR models run by transcribe.cpp.
     TranscribeCpp,
 }
@@ -42,6 +47,8 @@ impl AsrEngine {
             AsrEngine::Parakeet => "NeMo Parakeet",
             AsrEngine::CanaryQwen => "NeMo Canary-Qwen",
             AsrEngine::Voxtral => "Voxtral",
+            AsrEngine::GraniteSpeech => "IBM Granite Speech",
+            AsrEngine::MossTranscribeDiarize => "MOSS Transcribe-Diarize",
             AsrEngine::TranscribeCpp => "transcribe.cpp",
         }
     }
@@ -202,6 +209,30 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         license: "Apache-2.0",
         note: "audio LLM: transcription + understanding; ~9.5GB VRAM",
     },
+    // --- IBM Granite Speech (speech-language model) --------------------
+    AsrModelSpec {
+        id: "granite-speech-4.1-2b",
+        display: "IBM Granite Speech 4.1 2B",
+        engine: AsrEngine::GraniteSpeech,
+        model_ref: "ibm-granite/granite-speech-4.1-2b",
+        size: 4_000_000_000,
+        released: "2026-04",
+        langs: "EN, FR, DE, ES, PT, JA",
+        license: "Apache-2.0",
+        note: "far-field accuracy + keyword biasing; GPU recommended",
+    },
+    // --- MOSS (joint ASR + diarization) --------------------------------
+    AsrModelSpec {
+        id: "moss-transcribe-diarize-0.9b",
+        display: "MOSS Transcribe-Diarize 0.9B",
+        engine: AsrEngine::MossTranscribeDiarize,
+        model_ref: "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        size: 1_800_000_000,
+        released: "2026-07",
+        langs: "50+ langs",
+        license: "Apache-2.0",
+        note: "speaker labels, timestamps, and hotword prompting; CUDA recommended",
+    },
     // --- transcribe.cpp GGUF ASR (local) ----------------------------------
     AsrModelSpec {
         id: "cohere-transcribe-03-2026",
@@ -225,6 +256,23 @@ pub fn find(id: &str) -> Option<&'static AsrModelSpec> {
 /// is an unknown/legacy whisper size like `tiny`/`small`).
 pub fn engine_of(id: &str) -> AsrEngine {
     find(id).map(|m| m.engine).unwrap_or(AsrEngine::WhisperCpp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn granite_and_moss_are_routed_to_their_bridge_engines() {
+        let granite = find("granite-speech-4.1-2b").expect("Granite Speech is cataloged");
+        assert_eq!(granite.engine, AsrEngine::GraniteSpeech);
+        assert_eq!(granite.model_ref, "ibm-granite/granite-speech-4.1-2b");
+
+        let moss = find("moss-transcribe-diarize-0.9b").expect("MOSS is cataloged");
+        assert_eq!(moss.engine, AsrEngine::MossTranscribeDiarize);
+        assert_eq!(moss.model_ref, "OpenMOSS-Team/MOSS-Transcribe-Diarize");
+        assert!(moss.engine.is_bridge());
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -37,9 +37,9 @@ SessionSmith processes audio through a two-phase pipeline:
 
 ### Campaign vocabulary prompting
 
-Supported Whisper engines receive a short `Glossary:` prompt built from player
-and character names, replacement values, preset terminology, and optional
-campaign terms:
+Supported engines receive a short `Glossary:` prompt built from player and
+character names, replacement values, preset terminology, and optional campaign
+terms:
 
 ```toml
 [transcription]
@@ -48,17 +48,21 @@ vocab_prompt = true # default; set false to disable prompt biasing
 ```
 
 The prompt is capped at roughly 180 tokens and only whole terms are included.
-Local Whisper, `whisper-cli`, and faster-whisper support it. WhisperX is probed
-once at startup and receives the prompt only when its installed CLI advertises
-`--initial_prompt`; engines without an initial-prompt API report that they
-skipped it.
+Local Whisper, `whisper-cli`, and faster-whisper use it directly. Granite
+Speech translates it into its trained `Keywords:` biasing prompt, and MOSS adds
+it as `Hotwords:`. WhisperX is probed once at startup and receives the prompt
+only when its installed CLI advertises `--initial_prompt`; engines without a
+prompt API report that they skipped it.
 
 ### Engine selection
 
 SessionSmith first checks whether `[asr] model` is a modern bridge model such as
 `faster-large-v3-turbo`, `parakeet-v3`, `voxtral-mini`, or
-`cohere-transcribe-03-2026`. Python-family models run through the `uv` bridge;
-GGUF models run locally through `transcribe.cpp`.
+`cohere-transcribe-03-2026`. `granite-speech-4.1-2b` and
+`moss-transcribe-diarize-0.9b` also run through the `uv` bridge; GGUF models
+run locally through `transcribe.cpp`. When `[asr] diarize = true`, MOSS emits
+its native speaker-labelled, timestamped segments instead of switching to
+WhisperX.
 
 For legacy Whisper models, `engine = "local"` selects the in-process engine,
 and `engine = "whisper-cli"` or `"whisperx"` selects that external engine.

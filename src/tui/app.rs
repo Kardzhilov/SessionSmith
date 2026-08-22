@@ -1955,6 +1955,10 @@ impl App {
             .and_then(|s| s.rows.get(s.cursor))
             .map(|r| r.installed)
             .unwrap_or(false);
+        if !install && !already_installed {
+            self.status = format!("{id} is not installed");
+            return;
+        }
         let job = match (kind, install) {
             (ModelKind::Whisper, true) => ModelJob::PullWhisper(id.clone()),
             (ModelKind::Whisper, false) => ModelJob::DeleteWhisper(id.clone()),

@@ -315,6 +315,38 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_models_have_no_delete_button_or_action() {
+        let (_rt, mut app) = new_app();
+        app.pane = super::app::Pane::Content;
+        app.models = Some(super::app::ModelsState {
+            rows: vec![super::app::ModelRow {
+                kind: super::app::ModelKind::Whisper,
+                id: "base".into(),
+                display: "Whisper base".into(),
+                released: "2022-09".into(),
+                ..Default::default()
+            }],
+            cursor: 0,
+            scroll: 0,
+            expanded: std::collections::HashSet::new(),
+            installed: std::collections::HashMap::new(),
+        });
+
+        let _ = render_to_buffer(&mut app, 110, 32);
+        assert_eq!(app.rects.model_buttons.len(), 1);
+        assert!(app
+            .rects
+            .model_buttons
+            .iter()
+            .all(|(_, _, _, _, install)| *install));
+
+        app.model_action(false);
+        assert!(!app.job_running);
+        assert!(app.job_queue.is_empty());
+        assert_eq!(app.status, "base is not installed");
+    }
+
+    #[test]
     fn narrow_terminals_wrap_bars() {
         let (_rt, mut app) = new_app();
         for (w, h) in [(56u16, 20u16), (46, 16), (72, 24), (120, 30)] {

@@ -74,7 +74,7 @@ enum AsrBackend {
     #[cfg(feature = "local-whisper")]
     Local,
     /// A modern engine run through the `uv` Python bridge (faster-whisper,
-    /// NVIDIA Parakeet / Canary, Voxtral). Carries the
+    /// NVIDIA Parakeet / Canary, Voxtral, Granite, MOSS). Carries the
     /// engine and its backend model reference (HF / NeMo id).
     Bridge(AsrEngine, String),
     /// Local GGUF ASR through transcribe.cpp.
@@ -105,7 +105,7 @@ pub struct TranscribeOpts {
     pub initial_prompt: Option<String>,
     /// Optional ISO session date supplied by the user.
     pub session_date: Option<String>,
-    /// Enable speaker diarization (whisperX only). Off by default.
+    /// Enable speaker diarization (whisperX or MOSS). Off by default.
     pub diarize: bool,
     /// Run an ffmpeg silence-removal (VAD) pre-pass before ASR.
     pub vad: bool,
@@ -448,16 +448,19 @@ pub async fn transcribe(
             engine.label(),
             model_ref
         ));
-        let bridge_prompt = if *engine == AsrEngine::FasterWhisper {
-            opts.initial_prompt.as_deref()
-        } else {
-            if opts.initial_prompt.is_some() {
-                crate::ui::info(&format!(
-                    "ASR vocabulary prompting is not supported by {}",
-                    engine.label()
-                ));
+        let bridge_prompt = match *engine {
+            AsrEngine::FasterWhisper
+            | AsrEngine::GraniteSpeech
+            | AsrEngine::MossTranscribeDiarize => opts.initial_prompt.as_deref(),
+            _ => {
+                if opts.initial_prompt.is_some() {
+                    crate::ui::info(&format!(
+                        "ASR vocabulary prompting is not supported by {}",
+                        engine.label()
+                    ));
+                }
+                None
             }
-            None
         };
         let res = crate::pybridge::run_asr(
             *engine,
@@ -467,6 +470,7 @@ pub async fn transcribe(
             &device,
             &opts.language,
             bridge_prompt,
+            opts.diarize,
         );
         pb.finish_and_clear();
         if let Some(tmp) = &vad_temp {
@@ -475,6 +479,9 @@ pub async fn transcribe(
         res?;
         finalize_transcript(&out_txt, &out_srt, &opts.replacements, &vad_spans)?;
         crate::ui::info(&format!("ASR engine: {}", engine.label()));
+        if *engine == AsrEngine::MossTranscribeDiarize && opts.diarize {
+            crate::ui::info("diarization enabled (MOSS native speaker labels)");
+        }
         crate::ui::ok(&format!("wrote {}", out_txt.display()));
         if out_srt.exists() {
             crate::ui::ok(&format!("wrote {}", out_srt.display()));
@@ -987,8 +994,11 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
 /// - Unset / `"auto"` prefers the in-process engine when compiled in, then
 ///   falls back to an external binary.
 fn resolve_asr_backend(g: &GlobalConfig, opts: &TranscribeOpts) -> Result<AsrBackend> {
-    // Diarization is a whisperX-only capability.
-    if opts.diarize {
+    let engine = crate::asr::engine_of(&opts.model);
+
+    // MOSS performs speaker-attributed transcription itself; other engines use
+    // the existing WhisperX + pyannote path when diarization is requested.
+    if opts.diarize && engine != AsrEngine::MossTranscribeDiarize {
         return resolve_whisperx(g).ok_or_else(|| {
             anyhow!(
                 "diarization requires whisperX (pyannote community-1).\n  \
@@ -1002,7 +1012,6 @@ fn resolve_asr_backend(g: &GlobalConfig, opts: &TranscribeOpts) -> Result<AsrBac
 
     // Modern engines are selected by model id. Python-ecosystem engines run
     // through the `uv` bridge; GGUF ASR models run through transcribe.cpp.
-    let engine = crate::asr::engine_of(&opts.model);
     if engine == AsrEngine::TranscribeCpp {
         return Ok(AsrBackend::TranscribeCpp(opts.model.clone()));
     }
@@ -1175,6 +1184,25 @@ mod tests {
             concat_list_entry(Path::new("Bob's session.wav")),
             "file 'Bob'\\''s session.wav'\n"
         );
+    }
+
+    #[test]
+    fn moss_uses_its_native_bridge_when_diarization_is_enabled() {
+        let global = GlobalConfig::default();
+        let mut opts = TranscribeOpts::from_config(
+            "moss-transcribe-diarize-0.9b".into(),
+            "auto".into(),
+            false,
+            &global,
+        );
+        opts.diarize = true;
+
+        let backend = resolve_asr_backend(&global, &opts).unwrap();
+        assert!(matches!(
+            backend,
+            AsrBackend::Bridge(AsrEngine::MossTranscribeDiarize, model_ref)
+                if model_ref == "OpenMOSS-Team/MOSS-Transcribe-Diarize"
+        ));
     }
 
     fn vocabulary_fixture() -> (CampaignConfig, Preset) {

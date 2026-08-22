@@ -43,7 +43,7 @@ pub fn check_ffprobe() -> DepStatus {
 }
 
 /// `uv` powers the modern ASR engines (faster-whisper, Parakeet, Canary,
-/// Voxtral) and auto-installed diarization. Not fatal —
+/// Voxtral, Granite, MOSS) and auto-installed diarization. Not fatal —
 /// whisper.cpp works without it — but required to use those models.
 pub fn check_uv() -> DepStatus {
     match crate::pybridge::uv_path() {
@@ -55,7 +55,7 @@ pub fn check_uv() -> DepStatus {
         None => DepStatus {
             name: "uv (advanced ASR engines)".into(),
             ok: false,
-            detail: "optional; enables Parakeet/Canary/Voxtral/faster-whisper — \
+            detail: "optional; enables Parakeet/Canary/Voxtral/Granite/MOSS/faster-whisper — \
                      curl -LsSf https://astral.sh/uv/install.sh | sh"
                 .into(),
         },

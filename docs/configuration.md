@@ -212,6 +212,12 @@ Campaign files may contain optional `[backend]` and `[asr]` sections using the
 same keys as the global sections. Any keys supplied there override the global
 configuration only for that campaign; command-line flags still take precedence.
 
+`granite-speech-4.1-2b` uses campaign vocabulary as trained `Keywords:`
+biasing for names and jargon. `moss-transcribe-diarize-0.9b` uses it as
+hotwords and, with `[asr] diarize = true`, produces native speaker-labelled
+timestamped segments. Both are prepared on first use through `uv`, or with
+`sessionsmith models pull <model-id>`.
+
 ### `[[players]]` section (repeatable)
 
 | Key | Required | Description |

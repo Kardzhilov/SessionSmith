@@ -62,9 +62,11 @@ fn bridge_model_cache(engine: AsrEngine, model_ref: &str) -> Option<PathBuf> {
         AsrEngine::FasterWhisper => {
             hf_cache_model_dir(&format!("Systran/faster-whisper-{model_ref}"))
         }
-        AsrEngine::Parakeet | AsrEngine::CanaryQwen | AsrEngine::Voxtral => {
-            hf_cache_model_dir(model_ref)
-        }
+        AsrEngine::Parakeet
+        | AsrEngine::CanaryQwen
+        | AsrEngine::Voxtral
+        | AsrEngine::GraniteSpeech
+        | AsrEngine::MossTranscribeDiarize => hf_cache_model_dir(model_ref),
         AsrEngine::TranscribeCpp | AsrEngine::WhisperCpp => None,
     }
 }
@@ -106,6 +108,10 @@ fn script_for(engine: AsrEngine) -> Result<(&'static str, String)> {
         AsrEngine::FasterWhisper => ("asr_faster_whisper.py", FASTER_WHISPER_PY),
         AsrEngine::Parakeet | AsrEngine::CanaryQwen => ("asr_nemo.py", NEMO_PY),
         AsrEngine::Voxtral => ("asr_voxtral.py", VOXTRAL_PY),
+        AsrEngine::GraniteSpeech => ("asr_granite_speech.py", GRANITE_SPEECH_PY),
+        AsrEngine::MossTranscribeDiarize => {
+            ("asr_moss_transcribe_diarize.py", MOSS_TRANSCRIBE_DIARIZE_PY)
+        }
         AsrEngine::TranscribeCpp => bail!("transcribe.cpp does not use the Python bridge"),
         AsrEngine::WhisperCpp => bail!("whisper.cpp does not use the Python bridge"),
     };
@@ -124,16 +130,20 @@ pub fn run_asr(
     device: &str,
     language: &str,
     initial_prompt: Option<&str>,
+    diarize: bool,
 ) -> Result<()> {
     let (name, contents) = script_for(engine)?;
     let script = write_script(name, &contents)?;
     let uv = require_uv(engine)?;
 
-    // NeMo (lhotse) and Voxtral are fragile about input formats — they expect a
-    // decodable 16 kHz mono WAV. Normalise via ffmpeg first; faster-whisper
-    // decodes internally so it keeps the original file.
+    // Most speech-language bridges expect a decodable 16 kHz mono WAV.
+    // faster-whisper decodes internally, so it keeps the original file.
     let temp_wav = match engine {
-        AsrEngine::Parakeet | AsrEngine::CanaryQwen | AsrEngine::Voxtral => normalize_audio(audio),
+        AsrEngine::Parakeet
+        | AsrEngine::CanaryQwen
+        | AsrEngine::Voxtral
+        | AsrEngine::GraniteSpeech
+        | AsrEngine::MossTranscribeDiarize => normalize_audio(audio),
         AsrEngine::FasterWhisper | AsrEngine::TranscribeCpp | AsrEngine::WhisperCpp => None,
     };
     let effective_audio = temp_wav.as_deref().unwrap_or(audio);
@@ -145,10 +155,16 @@ pub fn run_asr(
     cmd.args(["--model", model_ref]);
     cmd.args(["--device", device]);
     cmd.args(["--language", language]);
-    if engine == AsrEngine::FasterWhisper {
+    if matches!(
+        engine,
+        AsrEngine::FasterWhisper | AsrEngine::GraniteSpeech | AsrEngine::MossTranscribeDiarize
+    ) {
         if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.is_empty()) {
             cmd.args(["--initial-prompt", prompt]);
         }
+    }
+    if diarize {
+        cmd.arg("--diarize");
     }
     if let Some(arch) = arch_of(engine) {
         cmd.args(["--arch", arch]);
@@ -303,12 +319,22 @@ fn stream_uv(engine: AsrEngine, cmd: &mut Command) -> Result<()> {
             "oom",
             "out of memory",
         ];
-        let mut highlights: Vec<&str> = stderr_text
-            .lines()
-            .filter(|l| {
-                let low = l.to_ascii_lowercase();
-                keywords.iter().any(|k| low.contains(k)) && !l.trim_start().starts_with("frame #")
+        let lines: Vec<&str> = stderr_text.lines().collect();
+        let mut highlights: Vec<&str> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let low = line.to_ascii_lowercase();
+                if keywords.iter().any(|k| low.contains(k))
+                    && !line.trim_start().starts_with("frame #")
+                {
+                    Some(index)
+                } else {
+                    None
+                }
             })
+            .flat_map(|index| lines[index..lines.len().min(index + 3)].iter().copied())
+            .filter(|line| !line.trim_start().starts_with("frame #"))
             .collect();
         // De-dupe consecutive repeats and cap length.
         highlights.dedup();
@@ -358,6 +384,7 @@ def parse_args():
     ap.add_argument("--language", default="auto")
     ap.add_argument("--initial-prompt", default="")
     ap.add_argument("--arch", default="")
+    ap.add_argument("--diarize", action="store_true")
     # Prepare mode: create the environment and download the model weights, then
     # exit without transcribing (used by the in-app "prepare" action).
     ap.add_argument("--prepare", action="store_true")
@@ -467,6 +494,207 @@ def main():
             raise
     write_outputs(args.out, out)
     emit(round(total, 2), round(total, 2), "done")
+
+if __name__ == "__main__":
+    main()
+"#;
+
+/// IBM Granite Speech bridge. The model supports keyword list biasing through
+/// its transcription prompt; SessionSmith's `Glossary:` prompt is translated to
+/// its documented `Keywords:` syntax here.
+const GRANITE_SPEECH_PY: &str = r#"# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = ["transformers>=4.52.1", "torch", "torchaudio", "soundfile", "numpy", "accelerate"]
+# ///
+import sys
+COMMON
+
+def load_audio_16k_mono(path):
+    import soundfile as sf
+    import numpy as np
+    data, sr = sf.read(path, dtype="float32", always_2d=False)
+    if getattr(data, "ndim", 1) > 1:
+        data = data.mean(axis=1)
+    if sr != 16000:
+        n = int(round(len(data) * 16000 / sr))
+        if n > 0:
+            x_old = np.linspace(0, 1, num=len(data), endpoint=False)
+            x_new = np.linspace(0, 1, num=n, endpoint=False)
+            data = np.interp(x_new, x_old, data).astype("float32")
+    return data
+
+def chunk_indices(total_samples, sr, window_s=540.0, overlap_s=2.0):
+    win = int(window_s * sr); overlap = int(overlap_s * sr)
+    step = max(win - overlap, 1)
+    start = 0
+    while start < total_samples:
+        yield start, min(start + win, total_samples)
+        if start + win >= total_samples:
+            break
+        start += step
+
+def transcription_prompt(initial_prompt):
+    glossary = initial_prompt.strip()
+    if glossary.lower().startswith("glossary:"):
+        terms = glossary.split(":", 1)[1].strip().rstrip(".").strip()
+        if terms:
+            return "transcribe the speech to text with proper punctuation and capitalization. Keywords: " + terms
+    return "transcribe the speech with proper punctuation and capitalization."
+
+def transcribe_chunk(model, processor, tokenizer, audio, prompt, device):
+    import torch
+    chat = [{"role": "user", "content": "<|audio|>" + prompt}]
+    rendered = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+    wav = torch.from_numpy(audio).unsqueeze(0)
+    inputs = processor(rendered, wav, device=str(device), return_tensors="pt").to(device)
+    outputs = model.generate(**inputs, max_new_tokens=4096, do_sample=False, num_beams=1)
+    input_count = inputs["input_ids"].shape[-1]
+    generated = outputs[0, input_count:].unsqueeze(0)
+    decoded = tokenizer.batch_decode(generated, add_special_tokens=False, skip_special_tokens=True)
+    return decoded[0].strip() if decoded else ""
+
+def main():
+    args = parse_args()
+    import torch
+    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+    requested = args.device
+    device = torch.device("cuda:0" if requested in ("auto", "cuda", "") and torch.cuda.is_available() else "cpu")
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    emit(0, 0, f"loading {args.model} on {device}")
+    processor = AutoProcessor.from_pretrained(args.model)
+    tokenizer = processor.tokenizer
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(args.model, torch_dtype=dtype)
+    model.to(device).eval()
+    if args.prepare:
+        emit(1, 1, "ready")
+        return
+
+    data = load_audio_16k_mono(args.audio)
+    sr = 16000
+    windows = list(chunk_indices(len(data), sr))
+    prompt = transcription_prompt(args.initial_prompt)
+    segments = []
+    for index, (start, end) in enumerate(windows):
+        emit(index, len(windows), "transcribing (granite)")
+        if end - start < int(0.5 * sr):
+            continue
+        text = transcribe_chunk(model, processor, tokenizer, data[start:end], prompt, device)
+        if text:
+            segments.append((start / sr, end / sr, text))
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    write_outputs(args.out, segments)
+    emit(len(windows), len(windows), "done")
+
+if __name__ == "__main__":
+    main()
+"#;
+
+/// MOSS jointly generates transcript text, timestamps, and speaker labels. Its
+/// helper package turns the native segment format into the shared SRT contract.
+const MOSS_TRANSCRIBE_DIARIZE_PY: &str = r#"# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = ["moss-transcribe-diarize @ git+https://github.com/OpenMOSS/MOSS-Transcribe-Diarize.git", "torch", "transformers", "soundfile", "numpy", "accelerate"]
+# ///
+import shutil, tempfile
+COMMON
+
+DEFAULT_PROMPT = "Transcribe the audio. For each segment, start with the timestamp and speaker ID ([S01], [S02], [S03], ...), then the spoken text, and end with the segment timestamp."
+PLAIN_PROMPT = "Transcribe the audio as text."
+
+def transcription_prompt(initial_prompt, diarize):
+    prompt = DEFAULT_PROMPT if diarize else PLAIN_PROMPT
+    glossary = initial_prompt.strip()
+    if glossary.lower().startswith("glossary:"):
+        terms = glossary.split(":", 1)[1].strip().rstrip(".").strip()
+        if terms:
+            return prompt + " Hotwords: " + terms
+    return prompt
+
+def chunk_indices(total_samples, sr, window_s=4800.0, overlap_s=2.0):
+    win = int(window_s * sr); overlap = int(overlap_s * sr)
+    step = max(win - overlap, 1)
+    start = 0
+    while start < total_samples:
+        yield start, min(start + win, total_samples)
+        if start + win >= total_samples:
+            break
+        start += step
+
+def speaker_text(segment):
+    label = str(getattr(segment, "speaker", "")).strip()
+    text = str(getattr(segment, "text", "")).strip()
+    if label and not label.startswith("["):
+        label = "[" + label + "]"
+    return (label + " " + text).strip()
+
+def parse_segments(text, offset, duration, parse_transcript, diarize):
+    if not diarize:
+        return [(offset, offset + duration, text.strip())]
+    try:
+        parsed = parse_transcript(text)
+    except Exception:
+        parsed = []
+    segments = []
+    for segment in parsed:
+        start = float(getattr(segment, "start", getattr(segment, "start_time", 0)))
+        end = float(getattr(segment, "end", getattr(segment, "end_time", start)))
+        rendered = speaker_text(segment)
+        if rendered:
+            segments.append((offset + start, offset + max(end, start), rendered))
+    return segments or [(offset, offset + duration, text.strip())]
+
+def main():
+    args = parse_args()
+    import torch, soundfile as sf
+    from transformers import AutoModelForCausalLM, AutoProcessor
+    from moss_transcribe_diarize import parse_transcript
+    from moss_transcribe_diarize.inference_utils import build_transcription_messages, generate_transcription
+
+    requested = args.device
+    device = torch.device("cuda:0" if requested in ("auto", "cuda", "") and torch.cuda.is_available() else "cpu")
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    emit(0, 0, f"loading {args.model} on {device}")
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, trust_remote_code=True, torch_dtype=dtype
+    ).to(device).eval()
+    processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
+    if args.prepare:
+        emit(1, 1, "ready")
+        return
+
+    data, sr = sf.read(args.audio, dtype="float32", always_2d=False)
+    if getattr(data, "ndim", 1) > 1:
+        data = data.mean(axis=1)
+    windows = list(chunk_indices(len(data), sr))
+    prompt = transcription_prompt(args.initial_prompt, args.diarize)
+    temp_dir = tempfile.mkdtemp(prefix="ss_moss_")
+    segments = []
+    try:
+        for index, (start, end) in enumerate(windows):
+            emit(index, len(windows), "transcribing (moss)")
+            if end - start < int(0.5 * sr):
+                continue
+            clip = f"{temp_dir}/m{index}.wav"
+            sf.write(clip, data[start:end], sr)
+            messages = build_transcription_messages(clip, prompt=prompt)
+            result = generate_transcription(
+                model, processor, messages, max_new_tokens=65536,
+                do_sample=False, device=device, dtype=dtype,
+            )
+            raw_text = result.get("text", "")
+            segments.extend(
+                parse_segments(
+                    raw_text, start / sr, (end - start) / sr, parse_transcript, args.diarize
+                )
+            )
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    write_outputs(args.out, segments)
+    emit(len(windows), len(windows), "done")
 
 if __name__ == "__main__":
     main()

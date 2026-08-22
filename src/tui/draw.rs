@@ -1463,12 +1463,12 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
     let queued = app.job_queue.len();
     let title = if queued > 0 {
         format!(
-            "Models (catalog {}) — {queued} queued · ⏎ default · i check · d delete · g CUDA · u Ollama · Esc",
+            "Models (catalog {}) — {queued} queued · ⏎ default · i check · d delete installed · g CUDA · u Ollama · Esc",
             crate::models::OLLAMA_CATALOG_UPDATED
         )
     } else {
         format!(
-            "Models (catalog {}) — ⏎ default · i check · d delete · g CUDA · u Ollama · Esc",
+            "Models (catalog {}) — ⏎ default · i check · d delete installed · g CUDA · u Ollama · Esc",
             crate::models::OLLAMA_CATALOG_UPDATED
         )
     };
@@ -1674,16 +1674,18 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
                 spans.push(Span::styled(label.to_string(), st));
                 buttons.push((x, x + lw, y, ri, true));
                 x += lw;
-                spans.push(Span::raw(" "));
-                x += 1;
-                let del_label = "[ delete ]";
-                let dw = del_label.chars().count() as u16;
-                let mut del_style = th.error_style();
-                if hr == y && hc >= x && hc < x + dw {
-                    del_style = del_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+                if r.installed {
+                    spans.push(Span::raw(" "));
+                    x += 1;
+                    let del_label = "[ delete ]";
+                    let dw = del_label.chars().count() as u16;
+                    let mut del_style = th.error_style();
+                    if hr == y && hc >= x && hc < x + dw {
+                        del_style = del_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+                    }
+                    spans.push(Span::styled(del_label.to_string(), del_style));
+                    buttons.push((x, x + dw, y, ri, false));
                 }
-                spans.push(Span::styled(del_label.to_string(), del_style));
-                buttons.push((x, x + dw, y, ri, false));
                 let tag = crate::asr::find(&r.id)
                     .map(|m| format!("  via {}", m.engine.label()))
                     .unwrap_or_else(|| "  via uv".to_string());
@@ -1707,18 +1709,18 @@ fn draw_models_pane(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
             spans.push(Span::styled(inst_label.to_string(), inst_style));
             buttons.push((x, x + iw, y, ri, true));
             x += iw;
-            spans.push(Span::raw(" "));
-            x += 1;
-
-            // [delete] button.
-            let del_label = "[ delete ]";
-            let dw = del_label.chars().count() as u16;
-            let mut del_style = th.error_style();
-            if hr == y && hc >= x && hc < x + dw {
-                del_style = del_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            if r.installed {
+                spans.push(Span::raw(" "));
+                x += 1;
+                let del_label = "[ delete ]";
+                let dw = del_label.chars().count() as u16;
+                let mut del_style = th.error_style();
+                if hr == y && hc >= x && hc < x + dw {
+                    del_style = del_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+                }
+                spans.push(Span::styled(del_label.to_string(), del_style));
+                buttons.push((x, x + dw, y, ri, false));
             }
-            spans.push(Span::styled(del_label.to_string(), del_style));
-            buttons.push((x, x + dw, y, ri, false));
 
             lines.push(Line::from(spans));
         }
