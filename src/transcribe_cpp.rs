@@ -693,38 +693,42 @@ pub fn run_asr(
             "audio is {:.1} min; splitting into {total_chunks} transcribe.cpp chunks",
             duration / 60.0
         ));
-        let completed_until = chunks.iter().map(|chunk| chunk.end).fold(0.0, f64::max);
-        let first_pending = first_pending_chunk(completed_until, total_chunks);
-        for idx in first_pending..total_chunks {
-            crate::ui::step(
-                idx + 1,
-                total_chunks,
-                &format!("transcribe.cpp chunk {}/{}", idx + 1, total_chunks),
-            );
-            let start = idx as f64 * TARGET_CHUNK_SECONDS;
-            let end = (start + TARGET_CHUNK_SECONDS).min(duration);
-            let label = format!("chunk {}/{}", idx + 1, total_chunks);
-            chunks.extend(transcribe_span(SpanJob {
-                binary: &binary,
-                model_path,
-                wav: &wav,
-                language,
-                backend,
-                start,
-                end,
-                label: &label,
-            })?);
-            write_checkpoint(
-                &checkpoint_file,
-                &Checkpoint {
-                    model: model_id.clone(),
-                    audio_sha1_first_mb: audio_sha1.clone(),
-                    chunk_s: TARGET_CHUNK_SECONDS,
-                    overlap_s: CHUNK_OVERLAP_SECONDS,
-                    segments: chunks.clone(),
-                },
-            )?;
-        }
+        run_chunk_sequence(
+            &mut chunks,
+            total_chunks,
+            |idx| {
+                crate::ui::step(
+                    idx + 1,
+                    total_chunks,
+                    &format!("transcribe.cpp chunk {}/{}", idx + 1, total_chunks),
+                );
+                let start = idx as f64 * TARGET_CHUNK_SECONDS;
+                let end = (start + TARGET_CHUNK_SECONDS).min(duration);
+                let label = format!("chunk {}/{}", idx + 1, total_chunks);
+                transcribe_span(SpanJob {
+                    binary: &binary,
+                    model_path,
+                    wav: &wav,
+                    language,
+                    backend,
+                    start,
+                    end,
+                    label: &label,
+                })
+            },
+            |segments| {
+                write_checkpoint(
+                    &checkpoint_file,
+                    &Checkpoint {
+                        model: model_id.clone(),
+                        audio_sha1_first_mb: audio_sha1.clone(),
+                        chunk_s: TARGET_CHUNK_SECONDS,
+                        overlap_s: CHUNK_OVERLAP_SECONDS,
+                        segments: segments.to_vec(),
+                    },
+                )
+            },
+        )?;
     }
     let _ = std::fs::remove_file(&wav);
 
@@ -740,6 +744,25 @@ pub fn run_asr(
 
 fn first_pending_chunk(completed_until: f64, total_chunks: usize) -> usize {
     ((completed_until / TARGET_CHUNK_SECONDS).floor() as usize).min(total_chunks)
+}
+
+fn run_chunk_sequence<F, C>(
+    chunks: &mut Vec<ChunkTranscript>,
+    total_chunks: usize,
+    mut transcribe: F,
+    mut checkpoint: C,
+) -> Result<()>
+where
+    F: FnMut(usize) -> Result<Vec<ChunkTranscript>>,
+    C: FnMut(&[ChunkTranscript]) -> Result<()>,
+{
+    let completed_until = chunks.iter().map(|chunk| chunk.end).fold(0.0, f64::max);
+    let first_pending = first_pending_chunk(completed_until, total_chunks);
+    for idx in first_pending..total_chunks {
+        chunks.extend(transcribe(idx)?);
+        checkpoint(chunks)?;
+    }
+    Ok(())
 }
 
 fn render_chunks(chunks: Vec<ChunkTranscript>) -> Result<(String, String)> {
@@ -872,5 +895,53 @@ mod tests {
         let mut resumed = checkpoint;
         resumed.extend_from_slice(&all[1..]);
         assert_eq!(render_chunks(resumed).unwrap(), render_chunks(all).unwrap());
+    }
+
+    #[test]
+    fn interrupted_chunk_sequence_persists_then_resumes_from_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint_file = temp.path().join("session.progress.json");
+        let checkpoint = |segments: &[ChunkTranscript]| {
+            write_checkpoint(
+                &checkpoint_file,
+                &Checkpoint {
+                    model: "model.gguf".into(),
+                    audio_sha1_first_mb: "audio".into(),
+                    chunk_s: TARGET_CHUNK_SECONDS,
+                    overlap_s: CHUNK_OVERLAP_SECONDS,
+                    segments: segments.to_vec(),
+                },
+            )
+        };
+        let first = ChunkTranscript {
+            text: "The party enters the crypt.".into(),
+            start: 0.0,
+            end: TARGET_CHUNK_SECONDS,
+        };
+        let second = ChunkTranscript {
+            text: "The party enters the crypt. They find a bell.".into(),
+            start: TARGET_CHUNK_SECONDS - CHUNK_OVERLAP_SECONDS,
+            end: TARGET_CHUNK_SECONDS * 2.0 - CHUNK_OVERLAP_SECONDS,
+        };
+
+        let mut interrupted = Vec::new();
+        assert!(run_chunk_sequence(
+            &mut interrupted,
+            2,
+            |idx| if idx == 0 {
+                Ok(vec![first.clone()])
+            } else {
+                Err(anyhow!("simulated interruption"))
+            },
+            checkpoint,
+        )
+        .is_err());
+        let mut resumed = load_checkpoint(&checkpoint_file, "model.gguf", "audio").unwrap();
+        run_chunk_sequence(&mut resumed, 2, |_| Ok(vec![second.clone()]), checkpoint).unwrap();
+
+        assert_eq!(
+            render_chunks(resumed).unwrap(),
+            render_chunks(vec![first, second]).unwrap()
+        );
     }
 }

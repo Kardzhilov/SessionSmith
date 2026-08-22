@@ -323,6 +323,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn narrow_header_keeps_asr_runtime_token_visible() {
+        let (_rt, mut app) = new_app();
+        let buffer = render_to_buffer(&mut app, 46, 16);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("asr"));
+        assert!(text.contains(&app.asr_model_label()));
+    }
+
+    #[test]
+    fn empty_sidebar_hints_render_without_selecting_audio_or_campaigns() {
+        let (_rt, mut app) = new_app();
+        app.campaigns.clear();
+        app.sessions.clear();
+        app.audio.clear();
+        app.camp_state.select(None);
+        app.audio_state.select(None);
+        let buffer = render_to_buffer(&mut app, 110, 32);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("no campaigns"));
+        assert!(text.contains("no sessions yet"));
+        assert!(text.contains("drop recordings"));
+        let audio_hint = app.rects.audio;
+        click(&mut app, audio_hint.x + 2, audio_hint.y + 2);
+        assert_eq!(app.audio_idx, 0);
+        assert_eq!(app.audio_state.selected(), None);
+    }
+
     fn click(app: &mut App, col: u16, row: u16) {
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -421,8 +457,24 @@ mod tests {
         ];
         app.job_progress = Some(("transcribing".into(), 45, 600, None));
         app.job_log.push((LogLevel::Step, "Notes".into()));
+        app.job_queue.push_back((
+            super::jobs::ModelJob::PullWhisper("large-v3".into()),
+            "Install large-v3".into(),
+        ));
+        app.job_queue.push_back((
+            super::jobs::ModelJob::DeleteWhisper("base".into()),
+            "Delete base".into(),
+        ));
         for w in [40u16, 70, 110] {
-            let _ = render_to_buffer(&mut app, w, 24);
+            let buffer = render_to_buffer(&mut app, w, 24);
+            let text = buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            if w >= 70 {
+                assert!(text.contains("queued:"));
+            }
         }
 
         // Indeterminate (pulse) bar + byte-sized download counter.

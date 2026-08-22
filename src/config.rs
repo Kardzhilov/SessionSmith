@@ -638,7 +638,9 @@ impl CampaignConfig {
             .with_context(|| format!("reading campaign config: {}", path.display()))?;
         let mut cfg: Self =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        cfg.source_path = std::fs::canonicalize(path).ok().or_else(|| Some(path.to_path_buf()));
+        cfg.source_path = std::fs::canonicalize(path)
+            .ok()
+            .or_else(|| Some(path.to_path_buf()));
         Ok(cfg)
     }
 

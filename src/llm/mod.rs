@@ -363,9 +363,9 @@ pub async fn collect_with_usage(
                 if let Some(n) = message.strip_prefix("thinking:") {
                     let tokens = n.trim().parse().unwrap_or(0);
                     if let Some(pb) = spinner {
-                        pb.set_message(format!("thinking · {tokens} tok"));
+                        pb.set_message(thinking_progress_label(tokens));
                     }
-                    crate::ui::progress("thinking", tokens, 0);
+                    crate::ui::progress("thinking", tokens as u64, 0);
                 }
             }
             StreamEvent::Usage(next) => {
@@ -387,7 +387,7 @@ pub async fn collect_with_usage(
                 }
                 // A half-second cadence keeps both the TUI and CLI responsive without
                 // flooding their progress channels.
-                if now.duration_since(last_emit) >= Duration::from_millis(500) {
+                if should_emit_progress(last_emit, now) {
                     last_emit = now;
                     let rate = rolling_token_rate(&samples);
                     if let Some(pb) = spinner {
@@ -399,6 +399,14 @@ pub async fn collect_with_usage(
         }
     }
     Ok(CollectedResponse { text: out, usage })
+}
+
+fn thinking_progress_label(tokens: usize) -> String {
+    format!("thinking · {tokens} tok")
+}
+
+fn should_emit_progress(last_emit: Instant, now: Instant) -> bool {
+    now.duration_since(last_emit) >= Duration::from_millis(500)
 }
 
 fn rolling_token_rate(samples: &VecDeque<(Instant, usize)>) -> f64 {
@@ -413,5 +421,35 @@ fn rolling_token_rate(samples: &VecDeque<(Instant, usize)>) -> f64 {
         last_tokens.saturating_sub(*first_tokens) as f64 / elapsed
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn rolling_rate_uses_elapsed_sample_window() {
+        let start = Instant::now();
+        let samples = VecDeque::from([(start, 10), (start + Duration::from_secs(5), 35)]);
+        assert!((rolling_token_rate(&samples) - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_emission_is_throttled_to_half_seconds() {
+        let start = Instant::now();
+        assert!(!should_emit_progress(
+            start,
+            start + Duration::from_millis(499)
+        ));
+        assert!(should_emit_progress(
+            start,
+            start + Duration::from_millis(500)
+        ));
+    }
+
+    #[test]
+    fn thinking_progress_has_a_distinct_label() {
+        assert_eq!(thinking_progress_label(42), "thinking · 42 tok");
     }
 }

@@ -32,6 +32,9 @@ jobs:
         run: cargo clippy --no-default-features --all-targets -- -D warnings
       - name: Test
         run: cargo test --no-default-features --all-targets --locked
+      - name: Doctor smoke test
+        if: matrix.os == 'windows-latest'
+        run: cargo run --no-default-features --locked -- doctor
 
   local-whisper:
     name: Local Whisper build and test

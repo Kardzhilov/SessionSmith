@@ -107,9 +107,9 @@ model   = "claude-sonnet-4-20250514"
 |---|---|---|---|
 | `model` | string | auto-detected | ASR model id. Built-in examples: `large-v3-turbo`, `faster-large-v3-turbo`, `parakeet-v3`, `voxtral-mini`, `cohere-transcribe-03-2026`. |
 | `engine` | string | `auto` | ASR engine: `local` (in-process whisper-rs), `whisper-cli`, `whisperx`, or `auto`. `auto` prefers the in-process engine when compiled in, else an external binary. |
-| `binary` | path | auto-detected | Path to ASR binary. Usually not needed. |
-| `model_dir` | path | platform default | Where to store downloaded ggml models (whisper-cli only) |
-| `threads` | int | system cores | CPU threads for whisper-cli |
+| `binary` | path | auto-detected | Path to an external ASR binary. With the default build, set `engine = "whisper-cli"` or `"whisperx"` for this to take effect; `auto` prefers the built-in local engine. |
+| `model_dir` | path | platform default | Where to store downloaded ggml models for the local or whisper-cli engine. |
+| `threads` | int | system cores | CPU threads for the local or whisper-cli engine. |
 | `diarize` | bool | `false` | Speaker diarization (whisperX only). **Off by default** — current local models often confuse the GM with players, causing more harm than help. Kept as an opt-in for future, better models. |
 | `hf_token` | string | — | Hugging Face token for the pyannote diarization models. Supports `${ENV_VAR}`. Pre-download the models to stay fully offline. |
 | `vad` | bool | `false` | Run an ffmpeg silence-removal pre-pass before ASR to skip long gaps in the recording. |

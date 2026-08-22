@@ -173,7 +173,8 @@ After init, drop audio files in the `audio/` directory and run:
 
 This checks:
 - ffmpeg/ffprobe availability
-- ASR engine (whisperx or whisper-cli) and model presence
+- selected ASR engine (built-in local Whisper, whisper-cli, whisperx, bridge,
+  or transcribe.cpp) and model presence
 - LLM backend connectivity and configured model
 - CUDA/GPU detection
 

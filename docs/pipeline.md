@@ -60,11 +60,11 @@ SessionSmith first checks whether `[asr] model` is a modern bridge model such as
 `cohere-transcribe-03-2026`. Python-family models run through the `uv` bridge;
 GGUF models run locally through `transcribe.cpp`.
 
-For legacy Whisper models, SessionSmith checks for ASR engines in this order:
-
-1. `.venv/bin/whisperx` — project-local virtualenv (preferred)
-2. `whisperx` on `$PATH`
-3. Configured `asr.binary` path (whisper-cli)
+For legacy Whisper models, `engine = "local"` selects the in-process engine,
+and `engine = "whisper-cli"` or `"whisperx"` selects that external engine.
+With the default `engine = "auto"`, SessionSmith prefers the in-process engine
+when it was compiled in; builds without `local-whisper` fall back to a configured
+or discoverable external engine.
 
 ### GPU handling
 

@@ -247,7 +247,7 @@ A custom preset is a single TOML file — see [docs/presets.md](docs/presets.md)
 
 | Dependency | Role |
 |---|---|
-| Rust 1.75+ | Build the binary |
+| Current stable Rust (see `rust-toolchain.toml`) | Build the binary |
 | C toolchain + `cmake` + `clang`/`libclang` | Build‑time only: compiles the bundled whisper.cpp engine |
 | `ffmpeg` + `ffprobe` | Audio decoding & duration detection |
 | An LLM backend | Ollama (local), OpenAI‑compatible, or Anthropic |

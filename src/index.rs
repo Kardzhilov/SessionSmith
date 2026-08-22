@@ -33,7 +33,13 @@ fn campaign_cache_key(campaign: &CampaignConfig) -> String {
         .source_path
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| format!("{}:{}", campaign.campaign.name, campaign.output_root().display()));
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}",
+                campaign.campaign.name,
+                campaign.output_root().display()
+            )
+        });
     format!("{}-{:016x}", campaign.slug(), fnv1a64(source.as_bytes()))
 }
 
@@ -54,15 +60,27 @@ fn open(campaign: &CampaignConfig) -> Result<Connection> {
     }
     let legacy = legacy_db_path(campaign);
     if !path.exists() && legacy.exists() {
-        std::fs::rename(&legacy, &path).with_context(|| {
-            format!("migrating legacy index {}", legacy.display())
-        })?;
+        migrate_legacy_db(&legacy, &path)?;
         crate::ui::info(&format!("migrated search index to {}", path.display()));
     }
     let conn =
         Connection::open(&path).with_context(|| format!("opening index db {}", path.display()))?;
     init_schema(&conn)?;
     Ok(conn)
+}
+
+fn migrate_legacy_db(legacy: &Path, destination: &Path) -> Result<()> {
+    std::fs::rename(legacy, destination)
+        .with_context(|| format!("migrating legacy index {}", legacy.display()))?;
+    for suffix in ["-wal", "-shm"] {
+        let from = PathBuf::from(format!("{}{}", legacy.display(), suffix));
+        if from.exists() {
+            let to = PathBuf::from(format!("{}{}", destination.display(), suffix));
+            std::fs::rename(&from, &to)
+                .with_context(|| format!("migrating legacy index sidecar {}", from.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn init_schema(conn: &Connection) -> Result<()> {
@@ -366,6 +384,28 @@ mod tests {
         let mut second = first.clone();
         second.source_path = Some(PathBuf::from("/tmp/b/campaign.toml"));
         assert_ne!(campaign_cache_key(&first), campaign_cache_key(&second));
+    }
+
+    #[test]
+    fn legacy_database_migration_preserves_searchable_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("output/index.sqlite");
+        let destination = temp.path().join("cache/index.sqlite");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let conn = Connection::open(&legacy).unwrap();
+        init_schema(&conn).unwrap();
+        let notes = temp.path().join("notes");
+        std::fs::create_dir(&notes).unwrap();
+        std::fs::write(notes.join("summary.md"), "The legacy basilisk is awake.").unwrap();
+        record_into(&conn, "session1", &notes).unwrap();
+        drop(conn);
+
+        migrate_legacy_db(&legacy, &destination).unwrap();
+        assert!(!legacy.exists());
+        assert!(destination.exists());
+        let migrated = Connection::open(destination).unwrap();
+        assert_eq!(search_conn(&migrated, "legacy basilisk").unwrap().len(), 1);
     }
 
     #[test]

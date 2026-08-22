@@ -2078,7 +2078,10 @@ mod tests {
 
     #[test]
     fn timestamps_continue_to_parse_alongside_markdown_links() {
-        assert_eq!(parse_hms_bracket("[01:23] [guide](https://example.test)"), Some(83.0));
+        assert_eq!(
+            parse_hms_bracket("[01:23] [guide](https://example.test)"),
+            Some(83.0)
+        );
         assert_eq!(parse_hms_bracket("[guide](https://example.test)"), None);
     }
 
@@ -2101,6 +2104,30 @@ mod tests {
 /// existed). Searches common audio extensions.
 fn find_audio_by_stem(audio_dir: &std::path::Path, stem: &str) -> Option<PathBuf> {
     audio::find_by_stem(audio_dir, stem)
+}
+
+#[cfg(test)]
+mod audio_probe_tests {
+    use super::*;
+
+    #[test]
+    fn stale_audio_duration_results_cannot_mutate_current_campaign() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut app = App::new(runtime.handle().clone());
+        app.audio = vec![AudioFile {
+            path: PathBuf::from("current.wav"),
+            mtime: SystemTime::UNIX_EPOCH,
+            duration_secs: None,
+            size_bytes: 1,
+            already_transcribed: false,
+        }];
+        app.audio_probe_generation = 2;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.audio_probe_rx = Some(rx);
+        tx.send((1, 0, Some(99.0))).unwrap();
+        app.drain_audio_duration_probes();
+        assert_eq!(app.audio[0].duration_secs, None);
+    }
 }
 
 fn roster_names(campaign: &CampaignConfig) -> Vec<String> {

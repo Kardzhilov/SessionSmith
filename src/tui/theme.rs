@@ -261,4 +261,47 @@ mod tests {
         let paper = builtins().into_iter().find(|theme| theme.name == "paper");
         assert!(paper.is_some());
     }
+
+    #[test]
+    fn paper_text_colours_meet_white_background_contrast() {
+        let paper = builtins()
+            .into_iter()
+            .find(|theme| theme.name == "paper")
+            .unwrap();
+        for color in [
+            paper.fg,
+            paper.primary,
+            paper.accent,
+            paper.success,
+            paper.warn,
+            paper.error,
+            paper.muted,
+        ] {
+            assert!(contrast_ratio(color, Color::Rgb(255, 255, 255)) >= 4.5);
+        }
+        assert!(contrast_ratio(paper.selection_fg, paper.selection_bg) >= 4.5);
+    }
+
+    fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+        let luminance = |color: Color| -> f64 {
+            match color {
+                Color::Rgb(red, green, blue) => [red, green, blue]
+                    .map(|channel| {
+                        let value = f64::from(channel) / 255.0;
+                        if value <= 0.04045 {
+                            value / 12.92
+                        } else {
+                            ((value + 0.055) / 1.055).powf(2.4)
+                        }
+                    })
+                    .into_iter()
+                    .zip([0.2126, 0.7152, 0.0722])
+                    .map(|(value, weight)| value * weight)
+                    .sum(),
+                _ => panic!("paper theme colours must be RGB"),
+            }
+        };
+        let (lighter, darker): (f64, f64) = (luminance(foreground), luminance(background));
+        (lighter.max(darker) + 0.05) / (lighter.min(darker) + 0.05)
+    }
 }

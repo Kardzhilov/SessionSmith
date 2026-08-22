@@ -600,7 +600,11 @@ impl App {
 
     fn open_campaign_settings(&mut self) {
         let Some(campaign) = self.campaign.as_ref() else {
-            self.message("No campaign", "Select a campaign before opening settings.", true);
+            self.message(
+                "No campaign",
+                "Select a campaign before opening settings.",
+                true,
+            );
             return;
         };
         let mut presets: Vec<String> = std::fs::read_dir("presets")
@@ -627,7 +631,13 @@ impl App {
             cursor: 0,
             artifacts: ALL_ARTIFACTS
                 .iter()
-                .map(|artifact| campaign.outputs.default.iter().any(|id| id == artifact.id()))
+                .map(|artifact| {
+                    campaign
+                        .outputs
+                        .default
+                        .iter()
+                        .any(|id| id == artifact.id())
+                })
                 .collect(),
             diarize: campaign.asr.diarize.unwrap_or(self.global.asr.diarize),
             vad: campaign.asr.vad.unwrap_or(self.global.asr.vad),
@@ -658,7 +668,9 @@ impl App {
                         index if index < settings.artifacts.len() => {
                             settings.artifacts[index] = !settings.artifacts[index];
                         }
-                        index if index == ALL_ARTIFACTS.len() => settings.diarize = !settings.diarize,
+                        index if index == ALL_ARTIFACTS.len() => {
+                            settings.diarize = !settings.diarize
+                        }
                         index if index == ALL_ARTIFACTS.len() + 1 => settings.vad = !settings.vad,
                         _ => self.cycle_settings_preset(1),
                     }
@@ -679,7 +691,11 @@ impl App {
         let Overlay::CampaignSettings(settings) = &self.overlay else {
             return;
         };
-        let Some(path) = self.campaigns.get(self.campaign_idx).map(|entry| entry.path.clone()) else {
+        let Some(path) = self
+            .campaigns
+            .get(self.campaign_idx)
+            .map(|entry| entry.path.clone())
+        else {
             return;
         };
         let Some(mut campaign) = self.campaign.clone() else {
@@ -688,7 +704,8 @@ impl App {
         campaign.outputs.default = ALL_ARTIFACTS
             .iter()
             .zip(&settings.artifacts)
-            .filter_map(|(artifact, selected)| selected.then(|| artifact.id().to_string()))
+            .filter(|(_, selected)| **selected)
+            .map(|(artifact, _)| artifact.id().to_string())
             .collect();
         campaign.asr.diarize = Some(settings.diarize);
         campaign.asr.vad = Some(settings.vad);

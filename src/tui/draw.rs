@@ -868,7 +868,7 @@ fn stage_timeline(app: &App, th: &Theme, width: usize) -> Paragraph<'static> {
                 }
             })
             .unwrap_or(*started);
-        let duration = human_time(end.saturating_duration_since(*started).as_secs());
+        let duration = stage_duration(*started, end);
         segs.push(Seg {
             sym,
             sym_style,
@@ -907,6 +907,10 @@ fn stage_timeline(app: &App, th: &Theme, width: usize) -> Paragraph<'static> {
         spans.push(Span::styled(s.name, s.name_style));
     }
     Paragraph::new(Line::from(spans)).style(th.base())
+}
+
+fn stage_duration(start: std::time::Instant, end: std::time::Instant) -> String {
+    human_time(end.saturating_duration_since(start).as_secs())
 }
 
 /// An indeterminate progress row: a bright block gliding over a dim track,
@@ -1238,24 +1242,54 @@ fn draw_campaign_settings(frame: &mut Frame, app: &mut App, th: &Theme, area: Re
     for (index, artifact) in ALL_ARTIFACTS.iter().enumerate() {
         let selected = settings.artifacts.get(index).copied().unwrap_or(false);
         rows.push(Line::from(vec![
-            Span::styled(if selected { "[x] " } else { "[ ] " }, if selected { th.success_style() } else { th.muted_style() }),
+            Span::styled(
+                if selected { "[x] " } else { "[ ] " },
+                if selected {
+                    th.success_style()
+                } else {
+                    th.muted_style()
+                },
+            ),
             Span::raw(artifact.label()),
         ]));
     }
     rows.push(Line::from(vec![
-        Span::styled(if settings.diarize { "[x] " } else { "[ ] " }, if settings.diarize { th.success_style() } else { th.muted_style() }),
+        Span::styled(
+            if settings.diarize { "[x] " } else { "[ ] " },
+            if settings.diarize {
+                th.success_style()
+            } else {
+                th.muted_style()
+            },
+        ),
         Span::raw("Speaker diarization"),
     ]));
     rows.push(Line::from(vec![
-        Span::styled(if settings.vad { "[x] " } else { "[ ] " }, if settings.vad { th.success_style() } else { th.muted_style() }),
+        Span::styled(
+            if settings.vad { "[x] " } else { "[ ] " },
+            if settings.vad {
+                th.success_style()
+            } else {
+                th.muted_style()
+            },
+        ),
         Span::raw("Voice activity detection"),
     ]));
     rows.push(Line::from(vec![
         Span::styled("Preset: ", th.accent_style()),
-        Span::raw(settings.presets.get(settings.preset_index).cloned().unwrap_or_default()),
+        Span::raw(
+            settings
+                .presets
+                .get(settings.preset_index)
+                .cloned()
+                .unwrap_or_default(),
+        ),
     ]));
     let list = List::new(rows)
-        .block(popup_block("Campaign settings  (Space toggle · ← → preset · Enter save)", th))
+        .block(popup_block(
+            "Campaign settings  (Space toggle · ← → preset · Enter save)",
+            th,
+        ))
         .highlight_style(th.selection())
         .highlight_symbol("▸ ");
     app.overlay_state.select(Some(settings.cursor));
@@ -1842,4 +1876,26 @@ fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
             Constraint::Percentage((100 - pct_w) / 2),
         ])
         .split(v[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_duration_uses_its_supplied_completion_anchor() {
+        let start = std::time::Instant::now();
+        assert_eq!(
+            stage_duration(start, start + std::time::Duration::from_secs(65)),
+            "1:05"
+        );
+    }
+
+    #[test]
+    fn queued_titles_middle_truncate_at_narrow_widths() {
+        let truncated = middle_truncate("queued: Install large-v3 → Delete base", 16);
+        assert!(truncated.contains('…'));
+        assert!(truncated.starts_with("queued:"));
+        assert!(truncated.ends_with("base"));
+    }
 }

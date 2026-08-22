@@ -157,6 +157,17 @@ pub async fn run_notes(
     opts: &PipelineOpts,
 ) -> Result<PipelineReport> {
     let backend = llm::build(g)?;
+    run_notes_with_backend(session, g, campaign, preset, opts, backend.as_ref()).await
+}
+
+async fn run_notes_with_backend(
+    session: &Session,
+    g: &GlobalConfig,
+    campaign: &CampaignConfig,
+    preset: &Preset,
+    opts: &PipelineOpts,
+    backend: &dyn LlmBackend,
+) -> Result<PipelineReport> {
     let model = opts.model_override.clone()
         .or_else(|| g.backend.model.clone())
         .ok_or_else(|| anyhow!("no LLM model configured (set in ~/.config/sessionsmith/config.toml or pass --model)"))?;
@@ -196,7 +207,7 @@ pub async fn run_notes(
             std::fs::read_to_string(&bullets_real)?
         } else {
             let sys = prompts::system_for(Artifact::Bullets, campaign, preset);
-            let text = generate_bullets(backend.as_ref(), &chat_opts, sys, &transcript, g).await?;
+            let text = generate_bullets(backend, &chat_opts, sys, &transcript, g).await?;
             std::fs::write(&bullets_out, &text)?;
             report.record(Artifact::Bullets.label(), &transcript, &text, None);
             crate::ui::ok(&format!("wrote {}", bullets_out.display()));
@@ -210,7 +221,7 @@ pub async fn run_notes(
         } else {
             crate::ui::phase("Outline");
             let sys = prompts::system_for(Artifact::Bullets, campaign, preset);
-            let text = generate_bullets(backend.as_ref(), &chat_opts, sys, &transcript, g).await?;
+            let text = generate_bullets(backend, &chat_opts, sys, &transcript, g).await?;
             std::fs::write(&bullets_real, &text)?;
             report.record(Artifact::Bullets.label(), &transcript, &text, None);
             crate::ui::ok(&format!("wrote {}", bullets_real.display()));
@@ -274,7 +285,7 @@ pub async fn run_notes(
                 let sys = prompts::system_for(a, campaign, preset);
                 let user = prompts::user_from_bullets(&bullets);
                 let usage_input = user.clone();
-                match call_one_with_usage(backend.as_ref(), &chat_opts, a, sys, user).await {
+                match call_one_with_usage(backend, &chat_opts, a, sys, user).await {
                     Ok(response) => {
                         std::fs::write(&out, &response.text)?;
                         report.record(a.label(), &usage_input, &response.text, response.usage);
@@ -302,7 +313,7 @@ pub async fn run_notes(
         } else {
             let ts = timestamped_transcript(session);
             let sys = prompts::system_for(Artifact::Quotes, campaign, preset);
-            match generate_quotes(backend.as_ref(), &chat_opts, sys, &ts, g).await {
+            match generate_quotes(backend, &chat_opts, sys, &ts, g).await {
                 Ok(text) => {
                     // Grounding: drop any quote not found verbatim in the
                     // transcript, and pin each timestamp to where it occurs.
@@ -329,8 +340,7 @@ pub async fn run_notes(
             let sys = prompts::dm_notes_structured_system(campaign, preset);
             let user = prompts::user_from_bullets(&bullets);
             let usage_input = user.clone();
-            match call_one_with_usage(backend.as_ref(), &sopts, Artifact::DmNotes, sys, user).await
-            {
+            match call_one_with_usage(backend, &sopts, Artifact::DmNotes, sys, user).await {
                 Ok(response) => {
                     let text = response.text;
                     // Best-effort pretty-print; write raw if not valid JSON.
@@ -1119,6 +1129,51 @@ fn chunk_text(text: &str, max_chars: usize, overlap: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct UsageBackend(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl LlmBackend for UsageBackend {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn stream_chat(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _opts: ChatOptions,
+        ) -> Result<tokio::sync::mpsc::Receiver<Result<llm::StreamEvent>>> {
+            let (tx, rx) = tokio::sync::mpsc::channel(3);
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                tx.send(Ok(llm::StreamEvent::Text(
+                    "The Bell\nA warning echoes.".into(),
+                )))
+                .await
+                .unwrap();
+                tx.send(Ok(llm::StreamEvent::Usage(LlmUsage {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                })))
+                .await
+                .unwrap();
+            } else {
+                tx.send(Ok(llm::StreamEvent::Text(
+                    "- The bell remains unresolved.".into(),
+                )))
+                .await
+                .unwrap();
+                tx.send(Ok(llm::StreamEvent::Usage(LlmUsage {
+                    input_tokens: 13,
+                    output_tokens: 17,
+                })))
+                .await
+                .unwrap();
+            }
+            Ok(rx)
+        }
+    }
 
     #[test]
     fn char_budget_scales_with_ctx() {
@@ -1233,5 +1288,105 @@ mod tests {
         assert!(estimated_cost("gpt-4o-mini", 1_000_000, 1_000_000).unwrap() > 0.0);
         assert!(estimated_cost("claude-sonnet-4", 1, 1).is_some());
         assert!(estimated_cost("qwen3.5:27b", 1, 1).is_none());
+    }
+
+    #[tokio::test]
+    async fn campaign_log_calls_record_provider_usage_in_pipeline_report() {
+        let backend = UsageBackend(AtomicUsize::new(0));
+        let mut campaign = CampaignConfig::default();
+        campaign.campaign.name = "Test Campaign".into();
+        let preset = crate::presets::load("generic").unwrap();
+        let options = ChatOptions::new(
+            "mock-model".into(),
+            None,
+            None,
+            Duration::from_secs(1),
+            false,
+        );
+        let (_, _, entry) = generate_session_entry(
+            &backend,
+            &options,
+            &campaign,
+            &preset,
+            "The group heard a bell.",
+            "2026-08-22",
+        )
+        .await
+        .unwrap();
+        let (_, threads) =
+            generate_threads(&backend, &options, &campaign, &preset, "", &entry.output)
+                .await
+                .unwrap();
+
+        let mut report = PipelineReport {
+            model: "mock-model".into(),
+            usages: Vec::new(),
+        };
+        report.record(entry.artifact, &entry.input, &entry.output, entry.usage);
+        report.record(
+            threads.artifact,
+            &threads.input,
+            &threads.output,
+            threads.usage,
+        );
+        assert_eq!(report.usages.len(), 2);
+        assert_eq!(report.usages[0].artifact, "campaign-log entry");
+        assert_eq!(report.usages[0].input_tokens, 7);
+        assert_eq!(report.usages[0].output_tokens, 11);
+        assert_eq!(report.usages[1].artifact, "campaign-log threads");
+        assert_eq!(report.usages[1].input_tokens, 13);
+        assert_eq!(report.usages[1].output_tokens, 17);
+    }
+
+    #[tokio::test]
+    async fn mocked_notes_pipeline_writes_candidates_and_reuses_resumed_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("session.txt");
+        std::fs::write(&transcript, "The party heard the bell beneath the crypt.").unwrap();
+        let session = Session::new(&transcript, temp.path().join("notes").as_path()).unwrap();
+        let mut global = GlobalConfig::default();
+        global.backend.model = Some("mock-model".into());
+        global.runtime.index = false;
+        let mut campaign = CampaignConfig::default();
+        campaign.campaign.name = "Fixture Campaign".into();
+        let preset = crate::presets::load("generic").unwrap();
+        let backend = UsageBackend(AtomicUsize::new(0));
+        let options = PipelineOpts {
+            artifacts: vec![Artifact::Bullets],
+            resume: false,
+            force: true,
+            update_log: false,
+            model_override: None,
+            candidate: false,
+        };
+
+        let first =
+            run_notes_with_backend(&session, &global, &campaign, &preset, &options, &backend)
+                .await
+                .unwrap();
+        assert_eq!(first.usages.len(), 1);
+        assert!(session.notes_dir.join("bullets.md").exists());
+
+        let candidate = PipelineOpts {
+            candidate: true,
+            ..options.clone()
+        };
+        run_notes_with_backend(&session, &global, &campaign, &preset, &candidate, &backend)
+            .await
+            .unwrap();
+        assert!(session.notes_dir.join("bullets.candidate.md").exists());
+
+        let calls_before_resume = backend.0.load(Ordering::SeqCst);
+        let resumed = PipelineOpts {
+            resume: true,
+            force: false,
+            ..options
+        };
+        let report =
+            run_notes_with_backend(&session, &global, &campaign, &preset, &resumed, &backend)
+                .await
+                .unwrap();
+        assert!(report.usages.is_empty());
+        assert_eq!(backend.0.load(Ordering::SeqCst), calls_before_resume);
     }
 }
