@@ -526,8 +526,8 @@ function toggleSetValue<T>(values: Set<T>, value: T) {
 }
 
 function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) {
-    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${Math.max(1, Math.round(bytes / (1024 * 1024)))} MB`;
   }
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
