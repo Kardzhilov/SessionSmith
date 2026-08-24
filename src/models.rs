@@ -177,6 +177,7 @@ async fn download_hf_file(
     tmp: &Path,
     sha256: &str,
 ) -> Result<PathBuf> {
+    ensure_download_not_cancelled()?;
     let client = reqwest::Client::builder()
         .user_agent("sessionsmith/0.1")
         .build()?;
@@ -242,6 +243,7 @@ async fn download_hf_file(
         request = request.header(RANGE, format!("bytes={offset}-"));
         crate::ui::info(&format!("resuming {label} at {offset} bytes"));
     }
+    ensure_download_not_cancelled()?;
     let mut resp = request.send().await.with_context(|| format!("GET {url}"))?;
     if offset > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         let expected = read_hf_meta_file(&part_meta_path).and_then(|meta| meta.etag);
@@ -254,6 +256,7 @@ async fn download_hf_file(
             std::fs::remove_file(tmp).ok();
             std::fs::remove_file(&part_meta_path).ok();
             offset = 0;
+            ensure_download_not_cancelled()?;
             resp = client
                 .get(url)
                 .send()
@@ -276,6 +279,7 @@ async fn download_hf_file(
         if let Some(remote) = &remote {
             write_hf_meta_file(&part_meta_path, remote)?;
         }
+        ensure_download_not_cancelled()?;
         resp = client
             .get(url)
             .send()
@@ -309,6 +313,7 @@ async fn download_hf_file(
     let mut last_emit = offset;
     let progress_label = format!("downloading {label}");
     while let Some(chunk) = stream.next().await {
+        ensure_download_not_cancelled()?;
         let chunk = chunk?;
         file.write_all(&chunk).await?;
         received += chunk.len() as u64;
@@ -318,6 +323,7 @@ async fn download_hf_file(
             crate::ui::progress(&progress_label, received, total);
         }
     }
+    ensure_download_not_cancelled()?;
     file.flush().await?;
     drop(file);
     pb.finish_and_clear();
@@ -352,6 +358,13 @@ async fn download_hf_file(
 
     crate::ui::ok(&format!("saved {}", path.display()));
     Ok(path.to_path_buf())
+}
+
+fn ensure_download_not_cancelled() -> Result<()> {
+    if crate::ui::cancellation_requested() {
+        bail!("cancelled");
+    }
+    Ok(())
 }
 
 pub struct GgufAsrModel {
@@ -790,38 +803,60 @@ pub async fn ollama_local_names(base_url: &str) -> Vec<String> {
 
 /// Locally-installed Ollama models with their on-disk size (via `/api/tags`).
 pub async fn ollama_local_models(base_url: &str) -> Vec<(String, u64)> {
-    let client = match reqwest::Client::builder()
+    ollama_local_models_checked(base_url)
+        .await
+        .unwrap_or_default()
+}
+
+/// Locally-installed Ollama models with their on-disk size (via `/api/tags`).
+/// Unlike [`ollama_local_models`], this preserves a connectivity or protocol
+/// failure so interactive hosts can show a useful service status.
+pub async fn ollama_local_models_checked(base_url: &str) -> Result<Vec<(String, u64)>> {
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+        .build()?;
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let mut out = Vec::new();
-    if let Ok(resp) = client.get(&url).send().await {
-        if let Ok(v) = resp.json::<serde_json::Value>().await {
-            if let Some(arr) = v.get("models").and_then(|m| m.as_array()) {
-                for m in arr {
-                    if let Some(n) = m.get("name").and_then(|n| n.as_str()) {
-                        let size = m.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
-                        out.push((n.to_string(), size));
-                    }
-                }
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url} (is Ollama running?)"))?;
+    if !response.status().is_success() {
+        bail!("Ollama returned HTTP {}", response.status());
+    }
+    let value = response
+        .json::<serde_json::Value>()
+        .await
+        .with_context(|| format!("decoding {url}"))?;
+    let mut models = Vec::new();
+    if let Some(items) = value.get("models").and_then(|models| models.as_array()) {
+        for item in items {
+            if let Some(name) = item.get("name").and_then(|name| name.as_str()) {
+                let size = item.get("size").and_then(|size| size.as_u64()).unwrap_or(0);
+                models.push((name.to_string(), size));
             }
         }
     }
-    out
+    Ok(models)
 }
 
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        sync::Notify,
+    };
+    use tokio_util::sync::CancellationToken;
     use wiremock::{
         matchers::{header, method},
         Mock, MockServer, ResponseTemplate,
     };
+
+    use crate::jobs::report::ChannelReporter;
 
     #[test]
     fn every_catalog_model_has_a_sha256_pin() {
@@ -974,6 +1009,107 @@ mod tests {
         assert!(!path.exists());
         assert!(!part.exists());
         assert!(!sidecar_path(&part).exists());
+    }
+
+    #[tokio::test]
+    async fn cancelled_download_keeps_a_resumable_partial_file() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind");
+        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
+        let first_chunk_sent = Arc::new(Notify::new());
+        let finish_response = Arc::new(Notify::new());
+        let server_first_chunk_sent = first_chunk_sent.clone();
+        let server_finish_response = finish_response.clone();
+        let server = tokio::spawn(async move {
+            let (mut head, _) = listener.accept().await.expect("HEAD should connect");
+            read_http_request(&mut head).await;
+            head.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: v1\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("HEAD response should write");
+
+            let (mut get, _) = listener.accept().await.expect("GET should connect");
+            read_http_request(&mut get).await;
+            get.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: v1\r\nConnection: close\r\n\r\nhello",
+            )
+            .await
+            .expect("first response chunk should write");
+            get.flush()
+                .await
+                .expect("first response chunk should flush");
+            server_first_chunk_sent.notify_one();
+            server_finish_response.notified().await;
+            get.write_all(b"world")
+                .await
+                .expect("second response chunk should write");
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("model.bin");
+        let part = temp.path().join("model.bin.part");
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancellation = CancellationToken::new();
+        let reporter = Arc::new(ChannelReporter::new(sender, cancellation.clone()));
+        let download_path = path.clone();
+        let download_part = part.clone();
+        let download = tokio::spawn(crate::ui::with_reporter(reporter, async move {
+            download_hf_file("model", &url, &download_path, &download_part, "").await
+        }));
+
+        first_chunk_sent.notified().await;
+        for _ in 0..100 {
+            if std::fs::metadata(&part).map(|meta| meta.len()).ok() == Some(5) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(std::fs::read(&part).unwrap(), b"hello");
+
+        cancellation.cancel();
+        finish_response.notify_one();
+        let error = download
+            .await
+            .expect("download task should complete")
+            .expect_err("download should observe cancellation");
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(std::fs::read(&part).unwrap(), b"hello");
+        assert!(!path.exists());
+        server.await.expect("test server should complete");
+    }
+
+    async fn read_http_request(stream: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut buffer = [0; 512];
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).await.expect("request should read");
+            assert!(count > 0, "request ended before its headers");
+            request.extend_from_slice(&buffer[..count]);
+        }
+    }
+
+    #[tokio::test]
+    async fn checked_ollama_inventory_preserves_model_sizes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "name": "qwen3:14b", "size": 9_000_000_000u64 },
+                    { "name": "custom:latest", "size": 123u64 }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            ollama_local_models_checked(&server.uri()).await.unwrap(),
+            vec![
+                ("qwen3:14b".to_string(), 9_000_000_000),
+                ("custom:latest".to_string(), 123),
+            ]
+        );
     }
 }
 

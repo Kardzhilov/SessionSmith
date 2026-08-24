@@ -1,0 +1,118 @@
+.record-dialog-backdrop {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(24, 42, 28, 0.42);
+  backdrop-filter: blur(3px);
+}
+
+.record-dialog {
+  width: min(430px, 100%);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: 0 20px 50px rgba(25, 41, 27, 0.28);
+}
+
+.record-dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 17px 18px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.record-dialog__header .eyebrow {
+  margin-bottom: 3px;
+}
+
+.record-dialog__header h2 {
+  margin: 0;
+  color: var(--ink);
+  font-family: "Source Serif 4", Georgia, serif;
+  font-size: 21px;
+  font-weight: 650;
+}
+
+.record-dialog__form {
+  display: grid;
+  gap: 15px;
+  padding: 18px;
+}
+
+.record-dialog__field {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.record-dialog__field input {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--ink);
+  font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.record-dialog__field input:focus {
+  outline: 2px solid var(--pine);
+  outline-offset: 1px;
+}
+
+.record-dialog__detail {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.record-dialog__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 10px;
+  border-left: 3px solid var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.record-dialog__error svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.record-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 3px;
+}
+
+@media (max-width: 720px) {
+  .record-dialog-backdrop {
+    align-items: end;
+    padding: 12px;
+  }
+
+  .record-dialog {
+    width: 100%;
+  }
+}

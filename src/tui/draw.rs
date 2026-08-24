@@ -2086,6 +2086,7 @@ fn draw_help(frame: &mut Frame, app: &mut App, th: &Theme, area: Rect) {
         ("Shift+↑↓  /  K J", "reorder campaigns (saved)"),
         ("N / E / F", "new campaign · edit campaign · fork campaign"),
         ("r / t / n", "run pipeline · transcribe · notes"),
+        ("x", "cancel the active processing job"),
         ("R", "re-run this session (palette: keep-both to compare)"),
         ("e", "open current artifact in $EDITOR"),
         ("y", "copy current view to clipboard"),

@@ -9,6 +9,11 @@ use std::path::Path;
 // WhisperX emits `SPEAKER_00`; MOSS emits bracketed labels such as `[S01]`.
 const SPEAKER_PATTERN: &str = r"(?:\bSPEAKER_\d+\b|\[S\d+\])";
 
+/// Raw transcript backups use this reserved suffix and are never sessions.
+pub fn is_raw_diarized_stem(stem: &str) -> bool {
+    stem.ends_with(".diarized")
+}
+
 /// A representative line attributed to a diarization label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeakerSample {
@@ -166,12 +171,18 @@ pub fn apply_map(text: &str, map: &BTreeMap<String, String>) -> String {
         .into_owned()
 }
 
-/// Preserve the raw TXT transcript once, then apply a mapping to TXT and SRT.
-pub fn apply_to_files(txt: &Path, srt: &Path, map: &BTreeMap<String, String>) -> Result<()> {
+/// Preserve raw diarized transcript files once, then apply a mapping to TXT,
+/// SRT, and VTT outputs.
+pub fn apply_to_files(
+    txt: &Path,
+    srt: &Path,
+    vtt: &Path,
+    map: &BTreeMap<String, String>,
+) -> Result<()> {
     if map.is_empty() {
         return Ok(());
     }
-    for path in [txt, srt] {
+    for path in [txt, srt, vtt] {
         if path.exists() {
             let raw = path.with_file_name(format!(
                 "{}.diarized.{}",
@@ -205,7 +216,8 @@ pub fn apply_to_session(
 ) -> Result<()> {
     let txt = transcripts_dir.join(format!("{stem}.txt"));
     let srt = transcripts_dir.join(format!("{stem}.srt"));
-    apply_to_files(&txt, &srt, map)?;
+    let vtt = transcripts_dir.join(format!("{stem}.vtt"));
+    apply_to_files(&txt, &srt, &vtt, map)?;
     if let Some(mut meta) = crate::meta::load(transcripts_dir, stem) {
         meta.speaker_map = Some(map.clone());
         crate::meta::save(transcripts_dir, stem, &meta)
@@ -299,6 +311,12 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_raw_diarized_backup_stems() {
+        assert!(is_raw_diarized_stem("session-12.diarized"));
+        assert!(!is_raw_diarized_stem("session-12"));
+    }
+
+    #[test]
     fn recognizes_and_maps_moss_bracketed_labels() {
         let raw = "[S01] Hi\n[S02] The raven is watching the road\n[S01] Longer line here\n";
         let samples = detect_samples(raw);
@@ -356,5 +374,34 @@ mod tests {
         let offsets = preview_offsets(srt);
         assert_eq!(offsets.get("SPEAKER_01"), Some(&12.5));
         assert_eq!(offsets.get("SPEAKER_02"), Some(&20.0));
+    }
+
+    #[test]
+    fn applies_maps_to_all_transcript_formats_without_losing_raw_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let txt = temp.path().join("session.txt");
+        let srt = temp.path().join("session.srt");
+        let vtt = temp.path().join("session.vtt");
+        for path in [&txt, &srt, &vtt] {
+            std::fs::write(path, "SPEAKER_00: Hello").unwrap();
+        }
+
+        apply_to_files(
+            &txt,
+            &srt,
+            &vtt,
+            &BTreeMap::from([("SPEAKER_00".into(), "Avery".into())]),
+        )
+        .unwrap();
+
+        for path in [&txt, &srt, &vtt] {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "Avery: Hello");
+            let raw = path.with_file_name(format!(
+                "{}.diarized.{}",
+                path.file_stem().unwrap().to_string_lossy(),
+                path.extension().unwrap().to_string_lossy(),
+            ));
+            assert_eq!(std::fs::read_to_string(raw).unwrap(), "SPEAKER_00: Hello");
+        }
     }
 }

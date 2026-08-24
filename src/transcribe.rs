@@ -12,6 +12,7 @@ use std::sync::{
 
 use crate::asr::AsrEngine;
 use crate::config::{CampaignConfig, GlobalConfig};
+use crate::jobs::procs::{configure_command, ChildRegistry};
 use crate::models;
 use crate::presets::Preset;
 
@@ -346,11 +347,58 @@ pub struct TranscribeOutput {
     pub srt: PathBuf,
 }
 
+fn run_command_output(
+    command: &mut Command,
+    children: Option<&ChildRegistry>,
+    label: &str,
+) -> std::io::Result<std::process::Output> {
+    let Some(children) = children else {
+        return command.output();
+    };
+
+    configure_command(command);
+    let child = command.spawn()?;
+    let registration = children.register(&child, label);
+    let output = child.wait_with_output();
+    drop(registration);
+    output
+}
+
+fn run_command_status(
+    command: &mut Command,
+    children: Option<&ChildRegistry>,
+    label: &str,
+) -> std::io::Result<std::process::ExitStatus> {
+    let Some(children) = children else {
+        return command.status();
+    };
+
+    configure_command(command);
+    let mut child = command.spawn()?;
+    let registration = children.register(&child, label);
+    let status = child.wait();
+    drop(registration);
+    status
+}
+
 pub async fn transcribe(
     audio: &Path,
     out_dir: &Path,
     g: &GlobalConfig,
     opts: &TranscribeOpts,
+) -> Result<TranscribeOutput> {
+    transcribe_with_children(audio, out_dir, g, opts, None).await
+}
+
+/// Transcribe while associating externally-spawned Whisper processes with a
+/// host-owned job. Existing CLI callers use [`transcribe`] and do not need a
+/// registry.
+pub async fn transcribe_with_children(
+    audio: &Path,
+    out_dir: &Path,
+    g: &GlobalConfig,
+    opts: &TranscribeOpts,
+    children: Option<&ChildRegistry>,
 ) -> Result<TranscribeOutput> {
     std::fs::create_dir_all(out_dir)?;
     let stem = audio
@@ -396,7 +444,7 @@ pub async fn transcribe(
     // same stem (so whisperx names its outputs correctly) that is fed to ASR.
     let hf_token = g.resolved_hf_token();
     let (asr_input, vad_spans): (PathBuf, Vec<crate::meta::VadSpan>) = if opts.vad {
-        match apply_vad(audio, &stem) {
+        match apply_vad(audio, &stem, children) {
             Ok(vad) => (vad.input, vad.removed_spans),
             Err(e) => {
                 crate::ui::warn(&format!("VAD pre-pass failed ({e}); using original audio"));
@@ -462,7 +510,7 @@ pub async fn transcribe(
                 None
             }
         };
-        let res = crate::pybridge::run_asr(
+        let res = crate::pybridge::run_asr_with_children(
             *engine,
             model_ref,
             &asr_input,
@@ -471,6 +519,7 @@ pub async fn transcribe(
             &opts.language,
             bridge_prompt,
             opts.diarize,
+            children,
         );
         pb.finish_and_clear();
         if let Some(tmp) = &vad_temp {
@@ -504,12 +553,13 @@ pub async fn transcribe(
         if opts.initial_prompt.is_some() {
             crate::ui::info("ASR vocabulary prompting is not supported by transcribe.cpp");
         }
-        let res = crate::transcribe_cpp::run_asr(
+        let res = crate::transcribe_cpp::run_asr_with_children(
             &model_path,
             &asr_input,
             &prefix,
             &opts.language,
             device,
+            children,
         );
         pb.finish_and_clear();
         if let Some(tmp) = &vad_temp {
@@ -559,13 +609,14 @@ pub async fn transcribe(
             "transcribing {stem} with whisper-{} (in-process)",
             opts.model
         ));
-        let result = crate::whisper_local::transcribe_file(
+        let result = crate::whisper_local::transcribe_file_with_children(
             model_path,
             &asr_input,
             &opts.language,
             threads,
             use_gpu,
             opts.initial_prompt.as_deref(),
+            children,
         );
         pb.finish_and_clear();
 
@@ -619,8 +670,7 @@ pub async fn transcribe(
             }
             cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped());
-            let o = cmd
-                .output()
+            let o = run_command_output(&mut cmd, children, &format!("whisper-cli: {stem}"))
                 .with_context(|| format!("running {}", binary.display()))?;
             (binary.clone(), o, None::<&'static str>)
         }
@@ -710,11 +760,17 @@ pub async fn transcribe(
                     cmd.stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::piped());
                     // Use spawn() so we can track the PID and kill it cleanly on Ctrl-C.
+                    if children.is_some() {
+                        configure_command(&mut cmd);
+                    }
                     let child = cmd.spawn()?;
                     WHISPERX_PID.store(child.id(), Ordering::Relaxed);
-                    let out = child.wait_with_output()?;
+                    let registration = children
+                        .map(|children| children.register(&child, format!("whisperx: {stem}")));
+                    let out = child.wait_with_output();
                     WHISPERX_PID.store(0, Ordering::Relaxed);
-                    Ok(out)
+                    drop(registration);
+                    out
                 };
 
             let mut o = run_whisperx(device, compute)
@@ -797,8 +853,12 @@ struct VadOutput {
     removed_spans: Vec<crate::meta::VadSpan>,
 }
 
-fn detected_silences(audio: &Path) -> Result<Vec<crate::meta::VadSpan>> {
-    let output = Command::new("ffmpeg")
+fn detected_silences(
+    audio: &Path,
+    children: Option<&ChildRegistry>,
+) -> Result<Vec<crate::meta::VadSpan>> {
+    let mut command = Command::new("ffmpeg");
+    command
         .args(["-i"])
         .arg(audio)
         .args([
@@ -809,8 +869,8 @@ fn detected_silences(audio: &Path) -> Result<Vec<crate::meta::VadSpan>> {
             "-",
         ])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
+        .stderr(std::process::Stdio::piped());
+    let output = run_command_output(&mut command, children, "ffmpeg silence detection")
         .with_context(|| "ffmpeg not found — install ffmpeg")?;
     if !output.status.success() {
         bail!("ffmpeg silence detection failed");
@@ -844,8 +904,8 @@ fn detected_silences(audio: &Path) -> Result<Vec<crate::meta::VadSpan>> {
 
 /// Detect and remove long silences while retaining a map to the original
 /// timeline, so generated subtitles can be remapped after ASR.
-fn apply_vad(audio: &Path, stem: &str) -> Result<VadOutput> {
-    let spans = detected_silences(audio)?;
+fn apply_vad(audio: &Path, stem: &str, children: Option<&ChildRegistry>) -> Result<VadOutput> {
+    let spans = detected_silences(audio, children)?;
     if spans.is_empty() {
         return Ok(VadOutput {
             input: audio.to_path_buf(),
@@ -876,7 +936,8 @@ fn apply_vad(audio: &Path, stem: &str) -> Result<VadOutput> {
         .collect::<String>();
     filter_parts.push(format!("{labels}concat=n={}:v=0:a=1[out]", part_count + 1));
     let filter = filter_parts.join(";");
-    let status = Command::new("ffmpeg")
+    let mut command = Command::new("ffmpeg");
+    command
         .args(["-y", "-i"])
         .arg(audio)
         .args([
@@ -891,8 +952,8 @@ fn apply_vad(audio: &Path, stem: &str) -> Result<VadOutput> {
         ])
         .arg(&out)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .stderr(std::process::Stdio::null());
+    let status = run_command_status(&mut command, children, "ffmpeg silence removal")
         .with_context(|| "ffmpeg not found — install ffmpeg")?;
     pb.finish_and_clear();
     if !status.success() || !out.exists() {
@@ -916,6 +977,17 @@ fn concat_list_entry(path: &Path) -> String {
 }
 
 pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -> Result<PathBuf> {
+    concat_audio_files_with_children(files, stem, out_dir, None).await
+}
+
+/// Concatenate audio while associating the ffmpeg process with a host-owned
+/// job. Existing CLI callers use [`concat_audio_files`] without a registry.
+pub async fn concat_audio_files_with_children(
+    files: &[PathBuf],
+    stem: &str,
+    out_dir: &Path,
+    children: Option<&ChildRegistry>,
+) -> Result<PathBuf> {
     if files.is_empty() {
         anyhow::bail!("concat_audio_files: no input files");
     }
@@ -926,9 +998,9 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
     let out = out_dir.join(format!("{stem}.wav"));
     let expected_duration: Option<f64> = files
         .iter()
-        .map(|file| crate::audio::probe_duration(file))
+        .map(|file| crate::audio::probe_duration_with_children(file, children))
         .sum();
-    let complete_existing = crate::audio::probe_duration(&out)
+    let complete_existing = crate::audio::probe_duration_with_children(&out, children)
         .zip(expected_duration)
         .map(|(duration, expected)| duration >= expected * 0.9)
         .unwrap_or(false);
@@ -948,14 +1020,15 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
         .collect();
     std::fs::write(&list_path, &content)?;
     let pb = crate::ui::spinner(&format!("merging {} files with ffmpeg", files.len()));
-    let status = Command::new("ffmpeg")
+    let mut command = Command::new("ffmpeg");
+    command
         .args(["-y", "-f", "concat", "-safe", "0", "-i"])
         .arg(&list_path)
         .args(["-c", "copy"])
         .arg(&part)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .stderr(std::process::Stdio::null());
+    let status = run_command_status(&mut command, children, "ffmpeg audio merge")
         .with_context(|| "ffmpeg not found — install ffmpeg")?;
     pb.finish_and_clear();
     std::fs::remove_file(&list_path).ok();
@@ -964,14 +1037,15 @@ pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -
         let list2 = out_dir.join(format!("_{stem}_concat2.txt"));
         std::fs::write(&list2, &content)?;
         let pb2 = crate::ui::spinner("re-encoding merge (codec mismatch)");
-        let st2 = Command::new("ffmpeg")
+        let mut fallback = Command::new("ffmpeg");
+        fallback
             .args(["-y", "-f", "concat", "-safe", "0", "-i"])
             .arg(&list2)
             .args(["-ar", "16000", "-ac", "1"])
             .arg(&part)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()?;
+            .stderr(std::process::Stdio::null());
+        let st2 = run_command_status(&mut fallback, children, "ffmpeg audio re-encode")?;
         pb2.finish_and_clear();
         std::fs::remove_file(&list2).ok();
         if !st2.success() {

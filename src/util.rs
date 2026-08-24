@@ -1,6 +1,12 @@
 //! Small cross-platform filesystem helpers.
 
-use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, ErrorKind, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Derive a filesystem-safe identifier, falling back when no alphanumeric
 /// characters remain.
@@ -26,6 +32,112 @@ pub fn slugify(value: &str) -> String {
     } else {
         slug
     }
+}
+
+/// Stable content revision for an optimistic write contract. The caller sends
+/// this value back after reading a document, rather than exposing a path or
+/// trusting filesystem timestamp precision across platforms.
+pub fn content_revision(contents: &[u8]) -> String {
+    hex::encode(Sha256::digest(contents))
+}
+
+/// Replace a regular file only when its current contents still match
+/// `expected_revision`. The new content is written to a same-directory temp
+/// file, then installed through a rollback-aware rename sequence.
+pub fn atomic_replace_if_revision(
+    path: &Path,
+    expected_revision: &str,
+    contents: &[u8],
+) -> io::Result<()> {
+    let current = fs::read(path)?;
+    if content_revision(&current) != expected_revision {
+        return Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            "document changed since it was read",
+        ));
+    }
+    if !path.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "document path is not a regular file",
+        ));
+    }
+
+    let temporary = unique_sibling_path(path, "write")?;
+    let backup = unique_sibling_path(path, "backup")?;
+    let permissions = fs::metadata(path)?.permissions();
+    let write_result = (|| -> io::Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::set_permissions(&temporary, permissions)?;
+
+        if content_revision(&fs::read(path)?) != expected_revision {
+            return Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                "document changed before replacement",
+            ));
+        }
+
+        fs::rename(path, &backup)?;
+        if let Err(error) = fs::rename(&temporary, path) {
+            let restore = fs::rename(&backup, path);
+            if let Err(restore_error) = restore {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "replacing document failed and restoration also failed: {restore_error}"
+                    ),
+                ));
+            }
+            return Err(error);
+        }
+        let _ = fs::remove_file(&backup);
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+fn unique_sibling_path(path: &Path, purpose: &str) -> io::Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "document path has no parent directory",
+        )
+    })?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "document path has no UTF-8 filename",
+            )
+        })?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    for counter in 0..1_000 {
+        let candidate = parent.join(format!(
+            ".{filename}.sessionsmith-{purpose}-{}-{timestamp}-{counter}",
+            std::process::id(),
+        ));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::new(
+        ErrorKind::AlreadyExists,
+        "could not reserve a temporary document path",
+    ))
 }
 
 /// Find an executable using the process PATH, honoring `PATHEXT` on Windows.
@@ -94,5 +206,30 @@ mod tests {
         assert_eq!(slugify("Curse of Strahd"), "curse-of-strahd");
         assert_eq!(slugify("  My___Game!!  "), "my-game");
         assert_eq!(slugify("---"), "campaign");
+    }
+
+    #[test]
+    fn atomic_replacement_updates_matching_content_without_leaving_siblings() {
+        let directory = tempfile::tempdir().unwrap();
+        let document = directory.path().join("summary.md");
+        std::fs::write(&document, "current").unwrap();
+
+        atomic_replace_if_revision(&document, &content_revision(b"current"), b"edited").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&document).unwrap(), "edited");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_replacement_rejects_a_stale_revision_without_changing_the_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let document = directory.path().join("summary.md");
+        std::fs::write(&document, "newer").unwrap();
+
+        let error = atomic_replace_if_revision(&document, &content_revision(b"older"), b"edited")
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read_to_string(&document).unwrap(), "newer");
     }
 }

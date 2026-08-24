@@ -15,3 +15,8 @@ audio/
 # campaign configs are personal — track only the example
 campaigns/*.toml
 !campaigns/.example.toml
+
+# SessionSmith desktop GUI build output
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/

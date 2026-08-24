@@ -2,10 +2,12 @@
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use walkdir::WalkDir;
+
+use crate::jobs::procs::{configure_command, ChildRegistry};
 
 const AUDIO_EXTS: &[&str] = &[
     "wav", "mp3", "m4a", "flac", "ogg", "opus", "aac", "wma", "webm",
@@ -29,6 +31,18 @@ impl AudioFile {
     }
 }
 
+/// Whether a path has an audio extension SessionSmith can ingest.
+pub fn is_supported_audio_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            AUDIO_EXTS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+        .unwrap_or(false)
+}
+
 pub fn scan(dir: &Path, transcripts_dir: &Path) -> Result<Vec<AudioFile>> {
     let mut files = Vec::new();
     if !dir.exists() {
@@ -46,12 +60,7 @@ pub fn scan(dir: &Path, transcripts_dir: &Path) -> Result<Vec<AudioFile>> {
             continue;
         }
         let path = entry.path();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if !AUDIO_EXTS.iter().any(|&e| e == ext) {
+        if !is_supported_audio_path(path) {
             continue;
         }
         let meta = match entry.metadata() {
@@ -102,7 +111,14 @@ pub fn find_by_stem(dir: &Path, stem: &str) -> Option<PathBuf> {
 
 /// Probe duration via ffprobe. Returns None if ffprobe is unavailable or fails.
 pub fn probe_duration(path: &Path) -> Option<f64> {
-    let out = Command::new("ffprobe")
+    probe_duration_with_children(path, None)
+}
+
+/// Probe duration while associating ffprobe with a host-owned job. Existing
+/// library and player callers use [`probe_duration`] without a registry.
+pub fn probe_duration_with_children(path: &Path, children: Option<&ChildRegistry>) -> Option<f64> {
+    let mut command = Command::new("ffprobe");
+    command
         .args([
             "-v",
             "error",
@@ -111,13 +127,30 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
             "-of",
             "default=noprint_wrappers=1:nokey=1",
         ])
-        .arg(path)
-        .output()
-        .ok()?;
+        .arg(path);
+    let out = run_command_output(&mut command, children, "ffprobe audio duration").ok()?;
     if !out.status.success() {
         return None;
     }
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+fn run_command_output(
+    command: &mut Command,
+    children: Option<&ChildRegistry>,
+    label: &str,
+) -> std::io::Result<std::process::Output> {
+    let Some(children) = children else {
+        return command.output();
+    };
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_command(command);
+    let child = command.spawn()?;
+    let registration = children.register(&child, label);
+    let output = child.wait_with_output();
+    drop(registration);
+    output
 }
 
 pub fn enrich_durations(files: &mut [AudioFile]) {
@@ -237,5 +270,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(find_by_stem(tmp.path(), "session"), Some(newest));
+    }
+
+    #[test]
+    fn recognizes_supported_audio_extensions_case_insensitively() {
+        assert!(is_supported_audio_path(Path::new("session.WAV")));
+        assert!(is_supported_audio_path(Path::new("session.m4a")));
+        assert!(!is_supported_audio_path(Path::new("session.txt")));
+        assert!(!is_supported_audio_path(Path::new("session")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_aware_duration_probe_command_reaps_and_deregisters() {
+        let registry = ChildRegistry::default();
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 12.5"]);
+
+        let output = run_command_output(&mut command, Some(&registry), "test duration probe")
+            .expect("command should run");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"12.5");
+        assert!(registry.active_children().is_empty());
     }
 }

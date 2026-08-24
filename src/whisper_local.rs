@@ -6,10 +6,12 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Once;
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+use crate::jobs::procs::{configure_command, ChildRegistry};
 
 /// Route whisper.cpp / GGML logs through the `tracing` framework so they obey
 /// the app's log filter (hidden at the default `warn` level) instead of
@@ -52,8 +54,32 @@ pub fn transcribe_file(
     use_gpu: bool,
     initial_prompt: Option<&str>,
 ) -> Result<Vec<LocalSegment>> {
+    transcribe_file_with_children(
+        model_path,
+        audio,
+        language,
+        threads,
+        use_gpu,
+        initial_prompt,
+        None,
+    )
+}
+
+/// Transcribe while associating the ffmpeg decoder with a host-owned job and
+/// polling that job for cancellation during local Whisper inference.
+pub fn transcribe_file_with_children(
+    model_path: &Path,
+    audio: &Path,
+    language: &str,
+    threads: i32,
+    use_gpu: bool,
+    initial_prompt: Option<&str>,
+    children: Option<&ChildRegistry>,
+) -> Result<Vec<LocalSegment>> {
     init_logging();
-    let samples = decode_audio(audio)?;
+    ensure_not_cancelled()?;
+    let samples = decode_audio(audio, children)?;
+    ensure_not_cancelled()?;
 
     let mut cparams = WhisperContextParameters::default();
     cparams.use_gpu(use_gpu);
@@ -81,10 +107,16 @@ pub fn transcribe_file(
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+    params.set_abort_callback_safe(transcription_cancelled);
 
-    state
-        .full(params, &samples)
-        .map_err(|e| anyhow!("whisper transcription failed: {e}"))?;
+    state.full(params, &samples).map_err(|error| {
+        if transcription_cancelled() {
+            anyhow!("cancelled")
+        } else {
+            anyhow!("whisper transcription failed: {error}")
+        }
+    })?;
+    ensure_not_cancelled()?;
 
     let n = state
         .full_n_segments()
@@ -105,12 +137,15 @@ pub fn transcribe_file(
 
 /// Decode any audio file to 16 kHz mono `f32` PCM via ffmpeg (which whisper.cpp
 /// requires). Reads the raw stream directly rather than a temp file.
-fn decode_audio(audio: &Path) -> Result<Vec<f32>> {
-    let out = Command::new("ffmpeg")
+fn decode_audio(audio: &Path, children: Option<&ChildRegistry>) -> Result<Vec<f32>> {
+    let mut command = Command::new("ffmpeg");
+    command
         .args(["-v", "error", "-i"])
         .arg(audio)
         .args(["-ar", "16000", "-ac", "1", "-f", "f32le", "-"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = run_command_output(&mut command, children, "ffmpeg local whisper decode")
         .with_context(|| "ffmpeg not found — install ffmpeg")?;
     if !out.status.success() {
         bail!(
@@ -128,6 +163,35 @@ fn decode_audio(audio: &Path) -> Result<Vec<f32>> {
         bail!("decoded no audio samples from {}", audio.display());
     }
     Ok(samples)
+}
+
+fn transcription_cancelled() -> bool {
+    crate::ui::cancellation_requested()
+}
+
+fn ensure_not_cancelled() -> Result<()> {
+    if transcription_cancelled() {
+        bail!("cancelled");
+    }
+    Ok(())
+}
+
+fn run_command_output(
+    command: &mut Command,
+    children: Option<&ChildRegistry>,
+    label: &str,
+) -> std::io::Result<std::process::Output> {
+    let Some(children) = children else {
+        return command.output();
+    };
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_command(command);
+    let child = command.spawn()?;
+    let registration = children.register(&child, label);
+    let output = child.wait_with_output();
+    drop(registration);
+    output
 }
 
 /// Render segments to plain transcript text (one line per segment).
@@ -179,6 +243,11 @@ fn srt_time(cs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::jobs::report::ChannelReporter;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn srt_time_formats() {
@@ -210,5 +279,34 @@ mod tests {
         let srt = segments_to_srt(&segs);
         assert!(srt.contains("1\n00:00:00,000 --> 00:00:01,000\nHello"));
         assert!(srt.contains("2\n00:00:02,000 --> 00:00:03,000\nworld"));
+    }
+
+    #[tokio::test]
+    async fn abort_callback_observes_structured_job_cancellation() {
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let cancellation = CancellationToken::new();
+        let reporter = Arc::new(ChannelReporter::new(sender, cancellation.clone()));
+
+        crate::ui::with_reporter(reporter, async {
+            assert!(!transcription_cancelled());
+            cancellation.cancel();
+            assert!(transcription_cancelled());
+            assert!(ensure_not_cancelled().is_err());
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_aware_decoder_command_reaps_and_deregisters() {
+        let registry = ChildRegistry::default();
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf samples"]);
+
+        let output = run_command_output(&mut command, Some(&registry), "test decoder")
+            .expect("command should run");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"samples");
+        assert!(registry.active_children().is_empty());
     }
 }

@@ -11,6 +11,8 @@ use sha1::{Digest, Sha1};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::jobs::procs::{configure_command, ChildRegistry};
+
 const REPO_URL: &str = "https://github.com/handy-computer/transcribe.cpp.git";
 const TARGET_CHUNK_SECONDS: f64 = 30.0;
 const MIN_RETRY_CHUNK_SECONDS: f64 = 1.0;
@@ -233,6 +235,16 @@ pub fn ensure_runtime() -> Result<PathBuf> {
 }
 
 pub fn ensure_runtime_for(device: Option<&str>) -> Result<PathBuf> {
+    ensure_runtime_for_with_children(device, None)
+}
+
+/// Ensure the transcribe.cpp runtime while associating setup processes with a
+/// host-owned job. Existing CLI callers use [`ensure_runtime_for`] without a
+/// registry.
+pub fn ensure_runtime_for_with_children(
+    device: Option<&str>,
+    children: Option<&ChildRegistry>,
+) -> Result<PathBuf> {
     let desired_backend = build_backend_for(device);
     if let Some(p) = find_runtime() {
         if runtime_has_backend(&p, desired_backend) {
@@ -247,10 +259,11 @@ pub fn ensure_runtime_for(device: Option<&str>) -> Result<PathBuf> {
             std::fs::create_dir_all(parent)?;
         }
         crate::ui::info("fetching transcribe.cpp runtime");
-        let status = Command::new("git")
+        let mut clone = Command::new("git");
+        clone
             .args(["clone", "--depth", "1", "--recursive", REPO_URL])
-            .arg(&root)
-            .status()
+            .arg(&root);
+        let status = run_command_status(&mut clone, children, "transcribe.cpp runtime clone")
             .with_context(|| "git not found; install git to fetch transcribe.cpp")?;
         if !status.success() {
             bail!("git clone {REPO_URL} failed");
@@ -281,9 +294,9 @@ pub fn ensure_runtime_for(device: Option<&str>) -> Result<PathBuf> {
         }
         Backend::Auto | Backend::Cpu => {}
     }
-    let configure = configure
-        .status()
-        .with_context(|| "cmake not found; install cmake to build transcribe.cpp")?;
+    let configure =
+        run_command_status(&mut configure, children, "transcribe.cpp runtime configure")
+            .with_context(|| "cmake not found; install cmake to build transcribe.cpp")?;
     if !configure.success() {
         bail!("cmake configure for transcribe.cpp failed");
     }
@@ -291,17 +304,16 @@ pub fn ensure_runtime_for(device: Option<&str>) -> Result<PathBuf> {
     let jobs = std::thread::available_parallelism()
         .map(|n| n.get().to_string())
         .unwrap_or_else(|_| "2".to_string());
-    let build = Command::new("cmake")
-        .current_dir(&root)
-        .args([
-            "--build",
-            "build",
-            "--target",
-            "transcribe-cli",
-            "--parallel",
-            &jobs,
-        ])
-        .status()
+    let mut build = Command::new("cmake");
+    build.current_dir(&root).args([
+        "--build",
+        "build",
+        "--target",
+        "transcribe-cli",
+        "--parallel",
+        &jobs,
+    ]);
+    let build = run_command_status(&mut build, children, "transcribe.cpp runtime build")
         .with_context(|| "building transcribe.cpp")?;
     if !build.success() {
         bail!("cmake build for transcribe.cpp failed");
@@ -336,7 +348,7 @@ fn warn_if_gpu_unavailable(device: Option<&str>, built_backend: Backend) {
     }
 }
 
-fn normalize_audio(audio: &Path) -> Result<PathBuf> {
+fn normalize_audio(audio: &Path, children: Option<&ChildRegistry>) -> Result<PathBuf> {
     let stem = audio
         .file_stem()
         .and_then(|s| s.to_str())
@@ -348,16 +360,21 @@ fn normalize_audio(audio: &Path) -> Result<PathBuf> {
         stem,
         std::process::id()
     ));
-    let status = Command::new("ffmpeg")
+    let mut command = Command::new("ffmpeg");
+    command
         .arg("-y")
         .arg("-i")
         .arg(audio)
         .args(["-ar", "16000", "-ac", "1"])
         .arg(&out)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| "ffmpeg not found; install ffmpeg")?;
+        .stderr(Stdio::null());
+    let status = run_command_status(
+        &mut command,
+        children,
+        "ffmpeg transcribe.cpp normalization",
+    )
+    .with_context(|| "ffmpeg not found; install ffmpeg")?;
     if !status.success() || !out.exists() {
         bail!(
             "ffmpeg could not convert {} to 16 kHz mono WAV",
@@ -495,8 +512,9 @@ fn fmt_ts(seconds: f64) -> String {
     format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
-fn audio_duration_seconds(audio: &Path) -> f64 {
-    let out = Command::new("ffprobe")
+fn audio_duration_seconds(audio: &Path, children: Option<&ChildRegistry>) -> f64 {
+    let mut command = Command::new("ffprobe");
+    command
         .args([
             "-v",
             "error",
@@ -505,8 +523,8 @@ fn audio_duration_seconds(audio: &Path) -> f64 {
             "-of",
             "default=nw=1:nk=1",
         ])
-        .arg(audio)
-        .output();
+        .arg(audio);
+    let out = run_command_output(&mut command, children, "ffprobe transcribe.cpp duration");
     out.ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -514,8 +532,15 @@ fn audio_duration_seconds(audio: &Path) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn make_chunk(wav: &Path, chunk_path: &Path, start: f64, duration: f64) -> Result<()> {
-    let status = Command::new("ffmpeg")
+fn make_chunk(
+    wav: &Path,
+    chunk_path: &Path,
+    start: f64,
+    duration: f64,
+    children: Option<&ChildRegistry>,
+) -> Result<()> {
+    let mut command = Command::new("ffmpeg");
+    command
         .arg("-y")
         .args(["-ss", &format!("{start:.3}")])
         .arg("-i")
@@ -524,8 +549,8 @@ fn make_chunk(wav: &Path, chunk_path: &Path, start: f64, duration: f64) -> Resul
         .args(["-ar", "16000", "-ac", "1"])
         .arg(chunk_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    let status = run_command_status(&mut command, children, "ffmpeg transcribe.cpp chunk")
         .with_context(|| "ffmpeg not found; install ffmpeg")?;
     if !status.success() || !chunk_path.exists() {
         bail!("ffmpeg could not split transcribe.cpp audio chunk");
@@ -548,6 +573,7 @@ fn run_chunk(
     wav: &Path,
     language: &str,
     backend: Backend,
+    children: Option<&ChildRegistry>,
 ) -> Result<String> {
     let mut cmd = Command::new(binary);
     cmd.arg("-q")
@@ -564,10 +590,8 @@ fn run_chunk(
     }
     cmd.arg(wav);
 
-    let output = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = run_command_output(&mut cmd, children, "transcribe.cpp inference")
         .with_context(|| format!("running {}", binary.display()))?;
 
     if !output.status.success() {
@@ -583,6 +607,41 @@ fn run_chunk(
     Ok(text)
 }
 
+fn run_command_output(
+    command: &mut Command,
+    children: Option<&ChildRegistry>,
+    label: &str,
+) -> std::io::Result<std::process::Output> {
+    let Some(children) = children else {
+        return command.output();
+    };
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_command(command);
+    let child = command.spawn()?;
+    let registration = children.register(&child, label);
+    let output = child.wait_with_output();
+    drop(registration);
+    output
+}
+
+fn run_command_status(
+    command: &mut Command,
+    children: Option<&ChildRegistry>,
+    label: &str,
+) -> std::io::Result<std::process::ExitStatus> {
+    let Some(children) = children else {
+        return command.status();
+    };
+
+    configure_command(command);
+    let mut child = command.spawn()?;
+    let registration = children.register(&child, label);
+    let status = child.wait();
+    drop(registration);
+    status
+}
+
 #[derive(Clone, Copy)]
 struct SpanJob<'a> {
     binary: &'a Path,
@@ -590,6 +649,7 @@ struct SpanJob<'a> {
     wav: &'a Path,
     language: &'a str,
     backend: Backend,
+    children: Option<&'a ChildRegistry>,
     start: f64,
     end: f64,
     label: &'a str,
@@ -606,13 +666,14 @@ fn transcribe_span(job: SpanJob<'_>) -> Result<Vec<ChunkTranscript>> {
         (job.start * 1000.0).round() as u64,
         (job.end * 1000.0).round() as u64
     ));
-    make_chunk(job.wav, &chunk, audio_start, audio_duration)?;
+    make_chunk(job.wav, &chunk, audio_start, audio_duration, job.children)?;
     let result = run_chunk(
         job.binary,
         job.model_path,
         &chunk,
         job.language,
         job.backend,
+        job.children,
     );
     let _ = std::fs::remove_file(&chunk);
 
@@ -652,10 +713,23 @@ pub fn run_asr(
     language: &str,
     device: Option<&str>,
 ) -> Result<()> {
-    let binary = ensure_runtime_for(device)?;
+    run_asr_with_children(model_path, audio, out_prefix, language, device, None)
+}
+
+/// Run transcribe.cpp while associating each inference process with a
+/// host-owned job. Existing CLI callers use [`run_asr`] without a registry.
+pub fn run_asr_with_children(
+    model_path: &Path,
+    audio: &Path,
+    out_prefix: &Path,
+    language: &str,
+    device: Option<&str>,
+    children: Option<&ChildRegistry>,
+) -> Result<()> {
+    let binary = ensure_runtime_for_with_children(device, children)?;
     let backend = runtime_backend(&binary, device);
-    let wav = normalize_audio(audio)?;
-    let duration = audio_duration_seconds(&wav);
+    let wav = normalize_audio(audio, children)?;
+    let duration = audio_duration_seconds(&wav, children);
     let checkpoint_file = checkpoint_path(out_prefix);
     let audio_sha1 = first_mb_sha1(&wav)?;
     let model_id = model_path.display().to_string();
@@ -670,7 +744,7 @@ pub fn run_asr(
 
     if duration <= TARGET_CHUNK_SECONDS || duration <= 0.0 {
         if chunks.is_empty() {
-            let text = run_chunk(&binary, model_path, &wav, language, backend)?;
+            let text = run_chunk(&binary, model_path, &wav, language, backend, children)?;
             chunks.push(ChunkTranscript {
                 text,
                 start: 0.0,
@@ -711,6 +785,7 @@ pub fn run_asr(
                     wav: &wav,
                     language,
                     backend,
+                    children,
                     start,
                     end,
                     label: &label,
@@ -943,5 +1018,34 @@ mod tests {
             render_chunks(resumed).unwrap(),
             render_chunks(vec![first, second]).unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_aware_status_command_reaps_and_deregisters() {
+        let registry = ChildRegistry::default();
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+
+        assert!(
+            run_command_status(&mut command, Some(&registry), "test setup command")
+                .expect("command should run")
+                .success()
+        );
+        assert!(registry.active_children().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_aware_output_command_reaps_and_deregisters() {
+        let registry = ChildRegistry::default();
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf ready"]);
+
+        let output = run_command_output(&mut command, Some(&registry), "test probe command")
+            .expect("command should run");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ready");
+        assert!(registry.active_children().is_empty());
     }
 }

@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 
 use crate::asr::AsrEngine;
+use crate::jobs::procs::{configure_command, ChildRegistry};
 
 /// Locate the `uv` binary (PATH, then the common `~/.local/bin` install dir).
 pub fn uv_path() -> Option<PathBuf> {
@@ -132,6 +133,32 @@ pub fn run_asr(
     initial_prompt: Option<&str>,
     diarize: bool,
 ) -> Result<()> {
+    run_asr_with_children(
+        engine,
+        model_ref,
+        audio,
+        out_prefix,
+        device,
+        language,
+        initial_prompt,
+        diarize,
+        None,
+    )
+}
+
+/// Run a bridge ASR engine while associating its `uv` process with a
+/// host-owned job. Existing CLI callers use [`run_asr`] without a registry.
+pub fn run_asr_with_children(
+    engine: AsrEngine,
+    model_ref: &str,
+    audio: &Path,
+    out_prefix: &Path,
+    device: &str,
+    language: &str,
+    initial_prompt: Option<&str>,
+    diarize: bool,
+    children: Option<&ChildRegistry>,
+) -> Result<()> {
     let (name, contents) = script_for(engine)?;
     let script = write_script(name, &contents)?;
     let uv = require_uv(engine)?;
@@ -143,7 +170,7 @@ pub fn run_asr(
         | AsrEngine::CanaryQwen
         | AsrEngine::Voxtral
         | AsrEngine::GraniteSpeech
-        | AsrEngine::MossTranscribeDiarize => normalize_audio(audio),
+        | AsrEngine::MossTranscribeDiarize => normalize_audio(audio, children),
         AsrEngine::FasterWhisper | AsrEngine::TranscribeCpp | AsrEngine::WhisperCpp => None,
     };
     let effective_audio = temp_wav.as_deref().unwrap_or(audio);
@@ -173,7 +200,7 @@ pub fn run_asr(
         "{} · preparing environment with uv (first run downloads dependencies)…",
         engine.label()
     ));
-    let res = stream_uv(engine, &mut cmd);
+    let res = stream_uv(engine, &mut cmd, children);
     if let Some(tmp) = temp_wav {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -196,7 +223,7 @@ pub fn run_asr(
 /// Convert `audio` to a temporary 16 kHz mono WAV via ffmpeg, returning the temp
 /// path (or `None` if ffmpeg is unavailable/fails, so the caller falls back to
 /// the original file).
-fn normalize_audio(audio: &Path) -> Option<PathBuf> {
+fn normalize_audio(audio: &Path, children: Option<&ChildRegistry>) -> Option<PathBuf> {
     let stem = audio
         .file_stem()
         .and_then(|s| s.to_str())
@@ -204,16 +231,16 @@ fn normalize_audio(audio: &Path) -> Option<PathBuf> {
         .unwrap_or("audio");
     let mut out = std::env::temp_dir();
     out.push(format!("ss_bridge_{}_{}.wav", stem, std::process::id()));
-    let status = Command::new("ffmpeg")
+    let mut command = Command::new("ffmpeg");
+    command
         .arg("-y")
         .arg("-i")
         .arg(audio)
         .args(["-ar", "16000", "-ac", "1"])
         .arg(&out)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?;
+        .stderr(Stdio::null());
+    let status = run_command_status(&mut command, children, "ffmpeg bridge normalization").ok()?;
     if status.success() {
         Some(out)
     } else {
@@ -221,9 +248,38 @@ fn normalize_audio(audio: &Path) -> Option<PathBuf> {
     }
 }
 
+fn run_command_status(
+    command: &mut Command,
+    children: Option<&ChildRegistry>,
+    label: &str,
+) -> std::io::Result<std::process::ExitStatus> {
+    let Some(children) = children else {
+        return command.status();
+    };
+
+    configure_command(command);
+    let mut child = command.spawn()?;
+    let registration = children.register(&child, label);
+    let status = child.wait();
+    drop(registration);
+    status
+}
+
 /// Download the environment + model weights for a bridge engine without
 /// transcribing (the in-app "prepare/install" action).
 pub fn run_asr_prepare(engine: AsrEngine, model_ref: &str, device: &str) -> Result<()> {
+    run_asr_prepare_with_children(engine, model_ref, device, None)
+}
+
+/// Prepare a bridge ASR engine while associating the `uv` process with a
+/// host-owned job. Existing CLI callers use [`run_asr_prepare`] without a
+/// registry.
+pub fn run_asr_prepare_with_children(
+    engine: AsrEngine,
+    model_ref: &str,
+    device: &str,
+    children: Option<&ChildRegistry>,
+) -> Result<()> {
     let (name, contents) = script_for(engine)?;
     let script = write_script(name, &contents)?;
     let uv = require_uv(engine)?;
@@ -240,7 +296,7 @@ pub fn run_asr_prepare(engine: AsrEngine, model_ref: &str, device: &str) -> Resu
         "{} · downloading environment + weights with uv (this can take a while)…",
         engine.label()
     ));
-    stream_uv(engine, &mut cmd)
+    stream_uv(engine, &mut cmd, children)
 }
 
 fn require_uv(engine: AsrEngine) -> Result<PathBuf> {
@@ -263,13 +319,18 @@ fn arch_of(engine: AsrEngine) -> Option<&'static str> {
 
 /// Spawn `cmd` (a `uv run …` bridge invocation), stream its `@@P` progress lines
 /// to the UI, and surface stderr on failure.
-fn stream_uv(engine: AsrEngine, cmd: &mut Command) -> Result<()> {
+fn stream_uv(engine: AsrEngine, cmd: &mut Command, children: Option<&ChildRegistry>) -> Result<()> {
     cmd.env("PYTHONUNBUFFERED", "1");
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if children.is_some() {
+        configure_command(cmd);
+    }
 
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning uv for {}", engine.label()))?;
+    let registration = children
+        .map(|children| children.register(&child, format!("uv bridge: {}", engine.label())));
 
     // Track the PID so the Ctrl-C handler can free the GPU immediately.
     crate::transcribe::WHISPERX_PID.store(child.id(), Ordering::Relaxed);
@@ -299,6 +360,7 @@ fn stream_uv(engine: AsrEngine, cmd: &mut Command) -> Result<()> {
 
     let status = child.wait();
     crate::transcribe::WHISPERX_PID.store(0, Ordering::Relaxed);
+    drop(registration);
     let stderr_text = stderr_handle.join().unwrap_or_default();
     let status = status.with_context(|| "waiting on uv bridge process")?;
 
@@ -498,6 +560,44 @@ def main():
 if __name__ == "__main__":
     main()
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_aware_status_command_can_be_cancelled() {
+        use std::time::Duration;
+
+        let registry = ChildRegistry::default();
+        let worker_registry = registry.clone();
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 2"]);
+            run_command_status(&mut command, Some(&worker_registry), "test normalization")
+                .expect("test process should run")
+        });
+
+        let started = (0..100).any(|_| {
+            if !registry.active_children().is_empty() {
+                true
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
+                false
+            }
+        });
+        if !started {
+            let _ = worker.join();
+            panic!("test process should be registered");
+        }
+
+        assert_eq!(registry.kill_all(), 1);
+        let status = worker.join().expect("test worker should complete");
+        assert!(!status.success());
+        assert!(registry.active_children().is_empty());
+    }
+}
 
 /// IBM Granite Speech bridge. The model supports keyword list biasing through
 /// its transcription prompt; SessionSmith's `Glossary:` prompt is translated to

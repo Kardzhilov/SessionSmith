@@ -210,6 +210,7 @@ async fn run_notes_with_backend(
             let text = generate_bullets(backend, &chat_opts, sys, &transcript, g).await?;
             std::fs::write(&bullets_out, &text)?;
             report.record(Artifact::Bullets.label(), &transcript, &text, None);
+            crate::ui::artifact_written(&session.stem, Artifact::Bullets.id(), &bullets_out);
             crate::ui::ok(&format!("wrote {}", bullets_out.display()));
             text
         }
@@ -224,6 +225,7 @@ async fn run_notes_with_backend(
             let text = generate_bullets(backend, &chat_opts, sys, &transcript, g).await?;
             std::fs::write(&bullets_real, &text)?;
             report.record(Artifact::Bullets.label(), &transcript, &text, None);
+            crate::ui::artifact_written(&session.stem, Artifact::Bullets.id(), &bullets_real);
             crate::ui::ok(&format!("wrote {}", bullets_real.display()));
             text
         }
@@ -255,22 +257,24 @@ async fn run_notes_with_backend(
                 let usage_input = user.clone();
                 let opts2 = chat_opts.clone();
                 let g2 = g.clone();
-                handles.push(tokio::spawn(async move {
+                handles.push(tokio::spawn(crate::ui::inherit_reporter(async move {
                     let b = llm::build(&g2)?;
                     let response = call_one_with_usage(b.as_ref(), &opts2, a, sys, user).await?;
                     std::fs::write(&out, &response.text)?;
                     crate::ui::ok(&format!("wrote {}", out.display()));
-                    Ok::<(Artifact, String, llm::CollectedResponse), anyhow::Error>((
+                    Ok::<(Artifact, PathBuf, String, llm::CollectedResponse), anyhow::Error>((
                         a,
+                        out,
                         usage_input,
                         response,
                     ))
-                }));
+                })));
             }
             for h in handles {
                 match h.await? {
-                    Ok((artifact, input, response)) => {
-                        report.record(artifact.label(), &input, &response.text, response.usage)
+                    Ok((artifact, output_path, input, response)) => {
+                        report.record(artifact.label(), &input, &response.text, response.usage);
+                        crate::ui::artifact_written(&session.stem, artifact.id(), &output_path);
                     }
                     Err(e) => crate::ui::warn(&format!("artifact failed — {e:#}")),
                 }
@@ -289,6 +293,7 @@ async fn run_notes_with_backend(
                     Ok(response) => {
                         std::fs::write(&out, &response.text)?;
                         report.record(a.label(), &usage_input, &response.text, response.usage);
+                        crate::ui::artifact_written(&session.stem, a.id(), &out);
                         crate::ui::ok(&format!("wrote {}", out.display()));
                     }
                     Err(e) => {
@@ -320,6 +325,7 @@ async fn run_notes_with_backend(
                     let grounded = ground_quotes(&text, &ts);
                     std::fs::write(&out, &grounded)?;
                     report.record(Artifact::Quotes.label(), &ts, &grounded, None);
+                    crate::ui::artifact_written(&session.stem, Artifact::Quotes.id(), &out);
                     crate::ui::ok(&format!("wrote {}", out.display()));
                 }
                 Err(e) => crate::ui::warn(&format!("{}: failed — {e:#}", Artifact::Quotes.label())),
@@ -350,6 +356,7 @@ async fn run_notes_with_backend(
                         .unwrap_or(text);
                     std::fs::write(&out, &pretty)?;
                     report.record("dm-notes.json", &usage_input, &pretty, response.usage);
+                    crate::ui::artifact_written(&session.stem, "dm-notes-json", &out);
                     crate::ui::ok(&format!("wrote {}", out.display()));
                 }
                 Err(e) => crate::ui::warn(&format!("dm-notes.json: failed — {e:#}")),

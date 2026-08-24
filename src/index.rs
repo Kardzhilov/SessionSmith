@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -129,6 +130,7 @@ fn record_into(conn: &Connection, stem: &str, notes_dir: &Path) -> Result<()> {
         Ok(e) => e,
         Err(_) => return Ok(()),
     };
+    let mut indexed_kinds = BTreeSet::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -143,6 +145,7 @@ fn record_into(conn: &Connection, stem: &str, notes_dir: &Path) -> Result<()> {
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_string();
+        indexed_kinds.insert(kind.clone());
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         conn.execute(
             "INSERT INTO artifacts (session, kind, path, content, updated)
@@ -163,6 +166,29 @@ fn record_into(conn: &Connection, stem: &str, notes_dir: &Path) -> Result<()> {
             "INSERT INTO artifacts_fts(rowid, session, kind, path, content) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![row_id, stem, kind, path.to_string_lossy(), content],
         )?;
+    }
+    remove_stale_session_records(conn, stem, &indexed_kinds)?;
+    Ok(())
+}
+
+fn remove_stale_session_records(
+    conn: &Connection,
+    stem: &str,
+    indexed_kinds: &BTreeSet<String>,
+) -> Result<()> {
+    let mut statement = conn.prepare("SELECT id, kind FROM artifacts WHERE session = ?1")?;
+    let rows = statement.query_map([stem], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let stale = rows
+        .filter_map(|row| row.ok())
+        .filter(|(_, kind)| !indexed_kinds.contains(kind))
+        .collect::<Vec<_>>();
+    drop(statement);
+
+    for (id, _) in stale {
+        conn.execute("DELETE FROM artifacts_fts WHERE rowid = ?1", [id])?;
+        conn.execute("DELETE FROM artifacts WHERE id = ?1", [id])?;
     }
     Ok(())
 }
@@ -374,6 +400,35 @@ mod tests {
         // Re-recording upserts rather than duplicating.
         record_into(&conn, "session1", dir.path()).unwrap();
         assert_eq!(search_conn(&conn, "tavern").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reindexing_a_session_removes_deleted_candidate_artifacts() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("summary.md");
+        let candidate = dir.path().join("summary.candidate.md");
+        std::fs::write(&current, "The original record.").unwrap();
+        std::fs::write(&candidate, "A temporary candidate marker.").unwrap();
+        record_into(&conn, "session1", dir.path()).unwrap();
+        assert!(search_conn(&conn, "temporary")
+            .unwrap()
+            .iter()
+            .any(|hit| { hit.kind == "summary.candidate.md" }));
+
+        std::fs::remove_file(&candidate).unwrap();
+        std::fs::write(&current, "The promoted candidate marker.").unwrap();
+        record_into(&conn, "session1", dir.path()).unwrap();
+
+        assert!(search_conn(&conn, "temporary").unwrap().is_empty());
+        assert_eq!(
+            search_conn(&conn, "promoted")
+                .unwrap()
+                .first()
+                .map(|hit| hit.kind.as_str()),
+            Some("summary.md")
+        );
     }
 
     #[test]

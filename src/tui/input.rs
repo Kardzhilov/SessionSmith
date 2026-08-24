@@ -143,6 +143,7 @@ impl App {
             KeyCode::Char('r') => self.dispatch(Action::RunPipeline),
             KeyCode::Char('t') => self.dispatch(Action::Transcribe),
             KeyCode::Char('n') => self.dispatch(Action::GenerateNotes),
+            KeyCode::Char('x') => self.dispatch(Action::CancelJob),
             KeyCode::Char('e') => self.dispatch(Action::OpenInEditor),
             KeyCode::Char('T') => self.dispatch(Action::CycleTheme),
             KeyCode::Char('y') => self.copy_current(),
@@ -443,7 +444,7 @@ impl App {
                     Some(ConfirmAction::Rerun(target, artifacts, candidate)) => {
                         self.start_rerun(target, artifacts, candidate, true);
                     }
-                    Some(ConfirmAction::Quit) => self.should_quit = true,
+                    Some(ConfirmAction::Quit) => self.cancel_active_job_then_quit(),
                     Some(ConfirmAction::DiscardCampaignForm) => {
                         self.discard_pending_campaign_form()
                     }
@@ -1160,6 +1161,9 @@ impl App {
                 transcripts: Vec::new(),
                 artifacts: Vec::new(),
             }),
+            Action::CancelJob => {
+                self.cancel_active_job();
+            }
             Action::Quit => self.request_quit(),
         }
     }

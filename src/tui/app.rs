@@ -13,6 +13,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::audio::{self, AudioFile};
 use crate::config::{CampaignConfig, GlobalConfig};
 use crate::index::SearchHit;
+use crate::jobs::manager::{JobId, JobManager};
 use crate::presets::{self, Preset};
 use crate::prompts::{Artifact, ALL_ARTIFACTS};
 use crate::session::SessionInput;
@@ -79,6 +80,7 @@ pub enum Action {
     MapSpeakers,
     RebuildLog,
     SystemCheck,
+    CancelJob,
     Quit,
 }
 
@@ -105,6 +107,7 @@ impl Action {
             Action::MapSpeakers => "Map speakers for the open session",
             Action::RebuildLog => "Rebuild campaign log",
             Action::SystemCheck => "System check (doctor)",
+            Action::CancelJob => "Cancel active job",
             Action::Quit => "Quit",
         }
     }
@@ -130,6 +133,7 @@ impl Action {
             Action::MapSpeakers,
             Action::RebuildLog,
             Action::SystemCheck,
+            Action::CancelJob,
             Action::Quit,
         ]
     }
@@ -400,11 +404,15 @@ pub enum FooterCmd {
 
 pub struct App {
     pub handle: tokio::runtime::Handle,
+    job_manager: JobManager,
+    active_job_id: Option<JobId>,
 
     pub themes: Vec<Theme>,
     pub theme_idx: usize,
 
     pub should_quit: bool,
+    /// Exit once a confirmed managed-job cancellation reaches a terminal state.
+    pending_quit_after_cancel: bool,
     pub pending_editor: Option<PathBuf>,
     editor_return: EditorReturn,
     /// A shell command to run with the TUI suspended (e.g. the Ollama updater):
@@ -512,11 +520,52 @@ pub struct App {
 impl App {
     pub fn request_quit(&mut self) {
         if self.job_running {
-            self.pending_confirm = Some(ConfirmAction::Quit);
-            self.overlay = Overlay::Confirm {
-                title: "Quit?".into(),
-                body: "A job is running and will be cancelled.".into(),
+            if self.active_job_id.is_some() {
+                self.pending_confirm = Some(ConfirmAction::Quit);
+                self.overlay = Overlay::Confirm {
+                    title: "Quit?".into(),
+                    body: "A job is running and will be cancelled before SessionSmith exits."
+                        .into(),
+                };
+            } else {
+                self.message(
+                    "Job still running",
+                    "This model operation cannot be cancelled safely yet. Wait for it to finish before quitting.",
+                    true,
+                );
+            }
+        } else {
+            self.should_quit = true;
+        }
+    }
+
+    /// Request cancellation for the manager-owned job currently displayed in
+    /// the Working pane. The UI remains active until its terminal event arrives.
+    pub(super) fn cancel_active_job(&mut self) -> bool {
+        let Some(id) = self.active_job_id else {
+            self.status = if self.job_running {
+                "This model operation cannot be cancelled safely yet.".into()
+            } else {
+                "No cancellable job is running.".into()
             };
+            return false;
+        };
+
+        if self.job_manager.cancel(id) {
+            self.status = format!("Cancelling: {}", self.job_title);
+            true
+        } else {
+            self.status = "Cancellation already requested; waiting for cleanup.".into();
+            false
+        }
+    }
+
+    /// Cancel the managed job and leave the TUI after its terminal event has
+    /// confirmed that cleanup completed.
+    pub(super) fn cancel_active_job_then_quit(&mut self) {
+        if self.job_running {
+            self.pending_quit_after_cancel = true;
+            self.cancel_active_job();
         } else {
             self.should_quit = true;
         }
@@ -528,10 +577,13 @@ impl App {
         let mouse_enabled = global.ui.mouse && std::env::var_os("SESSIONSMITH_NO_MOUSE").is_none();
 
         let mut app = Self {
+            job_manager: JobManager::new(handle.clone()),
             handle,
+            active_job_id: None,
             themes,
             theme_idx,
             should_quit: false,
+            pending_quit_after_cancel: false,
             pending_editor: None,
             editor_return: EditorReturn::Viewer,
             pending_shell: None,
@@ -1200,7 +1252,9 @@ impl App {
             for p in rd.flatten().map(|e| e.path()) {
                 if p.extension().and_then(|e| e.to_str()) == Some("txt") {
                     if let Some(s) = p.file_stem().and_then(|s| s.to_str()) {
-                        stems.insert(s.to_string());
+                        if !crate::speakers::is_raw_diarized_stem(s) {
+                            stems.insert(s.to_string());
+                        }
                     }
                 }
             }
@@ -1688,7 +1742,7 @@ impl App {
         };
         if self.viewing_candidate {
             // Keep the NEW version: replace the current file with the candidate.
-            if let Err(e) = std::fs::rename(&cand, &real) {
+            if let Err(e) = crate::candidates::promote(&cand, &real) {
                 self.status = format!("keep failed: {e}");
                 return;
             }
@@ -1702,7 +1756,10 @@ impl App {
             self.status = "kept the NEW version".into();
         } else {
             // Keep the CURRENT version: throw away the candidate.
-            let _ = std::fs::remove_file(&cand);
+            if let Err(e) = crate::candidates::discard(&cand) {
+                self.status = format!("discard failed: {e}");
+                return;
+            }
             self.status = "kept the CURRENT version".into();
         }
         self.viewing_candidate = false;
@@ -1757,12 +1814,14 @@ impl App {
                         self.job_log.push((LogLevel::Step, name));
                         self.job_progress = None;
                     }
+                    UiEvent::ArtifactWritten { .. } => {}
                     UiEvent::JobDone(res) => done = Some(res),
                 }
             }
         }
         if let Some(res) = done {
             self.job_running = false;
+            self.active_job_id = None;
             self.job_rx = None;
             self.job_progress = None;
             self.job_elapsed = self.job_started.map(|s| s.elapsed());
@@ -1779,10 +1838,19 @@ impl App {
                     self.job_log.push((LogLevel::Ok, summary.clone()));
                     self.status = format!("Done: {summary}");
                 }
+                Err(e) if e == "cancelled" => {
+                    self.job_log.push((LogLevel::Warn, "cancelled".into()));
+                    self.status = format!("Cancelled: {}", self.job_title);
+                }
                 Err(e) => {
                     self.job_log.push((LogLevel::Error, e.clone()));
                     self.status = format!("Failed: {e}");
                 }
+            }
+            if self.pending_quit_after_cancel {
+                self.pending_quit_after_cancel = false;
+                self.should_quit = true;
+                return;
             }
             // Refresh data so new transcripts/artifacts appear, while keeping
             // the user's current document open when it still exists.
@@ -1917,7 +1985,7 @@ impl App {
         self.job_elapsed = None;
         self.job_finished_at = None;
         self.job_title = req_kind.title.clone();
-        self.status = format!("Running: {}", req_kind.title);
+        self.status = format!("Running: {} (x to cancel)", req_kind.title);
 
         let req = JobRequest {
             kind: req_kind.kind,
@@ -1925,6 +1993,8 @@ impl App {
             campaign: cfg,
             preset,
             asr_model,
+            language: "auto".into(),
+            session_date: None,
             sessions: std::mem::take(&mut req_kind.sessions),
             transcripts: std::mem::take(&mut req_kind.transcripts),
             artifacts: std::mem::take(&mut req_kind.artifacts),
@@ -1935,7 +2005,7 @@ impl App {
             candidate: false,
             model_override: None,
         };
-        jobs::spawn(&self.handle, tx, req);
+        self.active_job_id = Some(jobs::spawn(&self.job_manager, tx, req));
     }
 
     /// Re-run the pipeline for one existing session. When `retranscribe` is
@@ -2005,7 +2075,7 @@ impl App {
             format!("Re-run {stem} (replace)")
         };
         self.job_title = title.clone();
-        self.status = format!("Running: {title}");
+        self.status = format!("Running: {title} (x to cancel)");
 
         let req = JobRequest {
             kind,
@@ -2013,6 +2083,8 @@ impl App {
             campaign: cfg,
             preset,
             asr_model,
+            language: "auto".into(),
+            session_date: None,
             sessions,
             transcripts,
             artifacts,
@@ -2023,7 +2095,7 @@ impl App {
             candidate,
             model_override: None,
         };
-        jobs::spawn(&self.handle, tx, req);
+        self.active_job_id = Some(jobs::spawn(&self.job_manager, tx, req));
     }
 
     pub(super) fn message(&mut self, title: &str, body: &str, error: bool) {
@@ -2439,6 +2511,7 @@ impl App {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.job_rx = Some(rx);
         self.job_running = true;
+        self.active_job_id = None;
         self.job_scroll = 0;
         self.job_follow = true;
         self.job_progress = None;
@@ -2447,8 +2520,18 @@ impl App {
         self.job_elapsed = None;
         self.job_finished_at = None;
         self.job_title = title.clone();
-        self.status = format!("Running: {title}");
-        jobs::spawn_model(&self.handle, tx, self.global.clone(), job);
+        self.active_job_id = jobs::spawn_model(
+            &self.job_manager,
+            tx,
+            self.global.clone(),
+            job,
+            title.clone(),
+        );
+        self.status = if self.active_job_id.is_some() {
+            format!("Running: {title} (x to cancel)")
+        } else {
+            format!("Running: {title} (cannot be cancelled safely)")
+        };
     }
 }
 
@@ -2525,7 +2608,14 @@ fn parse_hms_bracket(line: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    use std::{future, sync::Arc};
+
     use super::*;
+    use crate::jobs::{
+        manager::{JobKind as ManagedJobKind, JobState},
+        report::{ChannelReporter, JobEvent},
+    };
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn timestamps_continue_to_parse_alongside_markdown_links() {
@@ -2547,6 +2637,47 @@ mod tests {
         let effective = crate::config::effective(&global, &campaign);
         assert_eq!(effective.asr.model.as_deref(), Some("parakeet-tdt-0.6b-v3"));
         assert!(effective.asr.diarize);
+    }
+
+    #[tokio::test]
+    async fn active_managed_job_cancels_through_the_job_manager() {
+        let mut app = App::new(tokio::runtime::Handle::current());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let reporter = Arc::new(ChannelReporter::new(sender, CancellationToken::new()));
+        let id = app.job_manager.submit(
+            ManagedJobKind::Notes,
+            "Generate notes",
+            reporter,
+            |_| async move { future::pending::<anyhow::Result<String>>().await },
+        );
+        app.active_job_id = Some(id);
+        app.job_running = true;
+        app.job_title = "Generate notes".into();
+
+        assert!(app.cancel_active_job());
+        assert_eq!(app.status, "Cancelling: Generate notes");
+
+        let completion = loop {
+            match receiver.recv().await {
+                Some(JobEvent::JobDone(result)) => break result,
+                Some(_) => {}
+                None => panic!("job reporter closed before cancellation completed"),
+            }
+        };
+        assert_eq!(completion, Err("cancelled".into()));
+        assert_eq!(app.job_manager.list()[0].state, JobState::Cancelled);
+    }
+
+    #[test]
+    fn unsafe_legacy_model_job_blocks_quit() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut app = App::new(runtime.handle().clone());
+        app.job_running = true;
+
+        app.request_quit();
+
+        assert!(!app.should_quit);
+        assert!(matches!(app.overlay, Overlay::Message { .. }));
     }
 }
 

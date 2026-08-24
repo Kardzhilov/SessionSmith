@@ -15,6 +15,10 @@ mod screenshots;
 mod theme;
 
 pub use app::App;
+pub use jobs::{
+    spawn_model_with_reporter, spawn_with_reporter, JobKind as PipelineJobKind, JobRequest,
+    ModelJob,
+};
 #[doc(hidden)]
 pub use screenshots::generate_screenshots;
 

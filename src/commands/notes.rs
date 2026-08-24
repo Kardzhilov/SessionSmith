@@ -56,7 +56,13 @@ pub fn pick_transcript_interactively(transcripts_dir: &Path) -> Result<PathBuf> 
     let mut files: Vec<PathBuf> = std::fs::read_dir(transcripts_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
+        .filter(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("txt")
+                && !path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(crate::speakers::is_raw_diarized_stem)
+        })
         .collect();
     files.sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
     if files.is_empty() {

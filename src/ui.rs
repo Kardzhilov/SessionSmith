@@ -4,47 +4,21 @@ use comfy_table::{presets, Cell, Color as TableColor, ContentArrangement, Table}
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
-use std::sync::Mutex;
+use std::future::Future;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
 use unicode_width::UnicodeWidthStr;
 
-/// Structured progress events emitted by the pipeline/transcription code.
-///
-/// When a full-screen TUI installs an event sink via [`set_event_sink`], the
-/// `header`/`step`/`ok`/`warn`/`error`/`info` helpers below redirect their
-/// output into these events instead of printing to stdout (which would corrupt
-/// the alternate screen). The plain CLI leaves the sink unset and keeps its
-/// line-oriented output.
-#[derive(Clone, Debug)]
-pub enum UiEvent {
-    Header(String),
-    Step {
-        n: usize,
-        total: usize,
-        msg: String,
-    },
-    Ok(String),
-    Warn(String),
-    Error(String),
-    Info(String),
-    /// A determinate/indeterminate progress update. `total == 0` means the
-    /// length is unknown (render as an animated/indeterminate indicator).
-    Progress {
-        label: String,
-        pos: u64,
-        total: u64,
-        rate: Option<f64>,
-    },
-    /// A background job finished: `Ok(summary)` or `Err(message)`.
-    JobDone(std::result::Result<String, String>),
-    /// A high-level pipeline phase started (e.g. `Transcribe`, `Outline`,
-    /// `Notes`, `Campaign log`). Drives the animated stage timeline in the TUI.
-    Phase(String),
-}
+/// Backwards-compatible name for the shared job event contract.
+pub use crate::jobs::report::JobEvent as UiEvent;
+use crate::jobs::report::Reporter;
 
-static SINK: Lazy<Mutex<Option<UnboundedSender<UiEvent>>>> = Lazy::new(|| Mutex::new(None));
 static COLOR_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
+
+tokio::task_local! {
+    static TASK_REPORTER: Arc<dyn Reporter>;
+}
 
 /// Set global terminal colour output. The CLI calls this for `--no-color`.
 pub fn set_color_enabled(enabled: bool) {
@@ -59,27 +33,64 @@ pub fn color_enabled() -> bool {
     COLOR_ENABLED.lock().map(|value| *value).unwrap_or(true)
 }
 
-/// Install (or clear with `None`) the process-wide UI event sink. While a sink
-/// is active, the status helpers emit [`UiEvent`]s instead of printing.
-pub fn set_event_sink(tx: Option<UnboundedSender<UiEvent>>) {
-    if let Ok(mut g) = SINK.lock() {
-        *g = tx;
+/// Run a future with an explicit structured reporter instead of terminal
+/// output. The scope is task-local, so concurrent jobs cannot overwrite one
+/// another's event destination.
+pub async fn with_reporter<T>(reporter: Arc<dyn Reporter>, future: impl Future<Output = T>) -> T {
+    TASK_REPORTER.scope(reporter, future).await
+}
+
+/// Preserve the current task's reporter when spawning a child task. Call this
+/// before `tokio::spawn`, since task-local values do not propagate by default.
+pub fn inherit_reporter<F>(future: F) -> impl Future<Output = F::Output>
+where
+    F: Future,
+{
+    let reporter = TASK_REPORTER.try_with(Clone::clone).ok();
+    async move {
+        if let Some(reporter) = reporter {
+            with_reporter(reporter, future).await
+        } else {
+            future.await
+        }
     }
 }
 
-/// Whether an event sink is currently installed (i.e. running inside the TUI).
+/// Preserve the current task's reporter while running synchronous work on
+/// Tokio's blocking pool. Task-local values otherwise do not cross the thread
+/// boundary created by `spawn_blocking`.
+pub async fn spawn_blocking_with_reporter<F, T>(operation: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let reporter = TASK_REPORTER.try_with(Clone::clone).ok();
+    tokio::task::spawn_blocking(move || {
+        if let Some(reporter) = reporter {
+            TASK_REPORTER.sync_scope(reporter, operation)
+        } else {
+            operation()
+        }
+    })
+    .await
+}
+
+/// Whether the current task reports structured events instead of terminal UI.
 pub fn sink_active() -> bool {
-    SINK.lock().map(|g| g.is_some()).unwrap_or(false)
+    TASK_REPORTER.try_with(|_| ()).is_ok()
+}
+
+/// Whether the current structured job has requested cooperative cancellation.
+pub fn cancellation_requested() -> bool {
+    TASK_REPORTER
+        .try_with(|reporter| reporter.is_cancelled())
+        .unwrap_or(false)
 }
 
 fn emit(ev: UiEvent) -> bool {
-    if let Ok(g) = SINK.lock() {
-        if let Some(tx) = g.as_ref() {
-            let _ = tx.send(ev);
-            return true;
-        }
-    }
-    false
+    TASK_REPORTER
+        .try_with(|reporter| reporter.event(ev))
+        .is_ok()
 }
 
 /// Emit a progress update to the TUI (no-op outside the TUI). `total == 0`
@@ -109,6 +120,12 @@ pub fn phase(name: &str) {
 
 /// Print a bordered panel with a title and body lines.
 pub fn panel(title: &str, lines: &[String]) {
+    if emit(UiEvent::Header(title.to_string())) {
+        for line in lines {
+            let _ = emit(UiEvent::Info(line.clone()));
+        }
+        return;
+    }
     let width = lines
         .iter()
         .map(|l| visible_width(l))
@@ -208,6 +225,15 @@ pub fn step(n: usize, total: usize, msg: &str) {
     println!("{} {}", format!("[{n}/{total}]").bright_black(), msg.bold());
 }
 
+/// Notify event-driven hosts that an artifact is ready to be read from disk.
+pub fn artifact_written(session: &str, artifact: &str, path: &Path) {
+    let _ = emit(UiEvent::ArtifactWritten {
+        session: session.into(),
+        artifact: artifact.into(),
+        path: path.to_path_buf(),
+    });
+}
+
 pub fn spinner(msg: &str) -> ProgressBar {
     if sink_active() {
         emit(UiEvent::Info(msg.to_string()));
@@ -269,11 +295,70 @@ pub fn new_table(headers: &[&str]) -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::report::ChannelReporter;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn visible_width_ignores_ansi_and_counts_wide_characters() {
         assert_eq!(visible_width("\x1b[31mred\x1b[0m"), 3);
         assert_eq!(visible_width("表"), 2);
         assert_eq!(visible_width("café"), 4);
+    }
+
+    #[tokio::test]
+    async fn task_reporter_receives_events_from_ui_helpers_and_spawned_work() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let reporter = Arc::new(ChannelReporter::new(sender, CancellationToken::new()));
+
+        with_reporter(reporter, async {
+            phase("Notes");
+            tokio::spawn(inherit_reporter(async {
+                ok("artifact ready");
+            }))
+            .await
+            .expect("child task should complete");
+        })
+        .await;
+
+        assert_eq!(receiver.recv().await, Some(UiEvent::Phase("Notes".into())));
+        assert_eq!(
+            receiver.recv().await,
+            Some(UiEvent::Ok("artifact ready".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn task_reporter_receives_events_from_blocking_work() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let reporter = Arc::new(ChannelReporter::new(sender, CancellationToken::new()));
+
+        with_reporter(reporter, async {
+            spawn_blocking_with_reporter(|| {
+                ok("blocking artifact ready");
+            })
+            .await
+            .expect("blocking task should complete");
+        })
+        .await;
+
+        assert_eq!(
+            receiver.recv().await,
+            Some(UiEvent::Ok("blocking artifact ready".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn task_reporter_exposes_cancellation_state() {
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let cancellation = CancellationToken::new();
+        let reporter = Arc::new(ChannelReporter::new(sender, cancellation.clone()));
+
+        with_reporter(reporter, async {
+            assert!(!cancellation_requested());
+            cancellation.cancel();
+            assert!(cancellation_requested());
+        })
+        .await;
     }
 }

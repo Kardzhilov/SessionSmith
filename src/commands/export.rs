@@ -4,10 +4,35 @@ use anyhow::{bail, Context, Result};
 use pulldown_cmark::{html, Options, Parser};
 use std::path::{Path, PathBuf};
 
-use crate::cli::{ExportArgs, ExportFormat};
+use crate::cli::{ExportArgs, ExportFormat as CliExportFormat};
 use crate::{commands, ui};
 
 const HTML_CSS: &str = include_str!("export.css");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    Html,
+    Obsidian,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportRequest {
+    /// Human-readable campaign name used in export metadata and page titles.
+    pub campaign_name: String,
+    /// Already-resolved session note directories. Callers are responsible for
+    /// selecting only authorized session paths.
+    pub session_dirs: Vec<PathBuf>,
+    /// Already-approved export directory.
+    pub output_dir: PathBuf,
+    pub format: ExportFormat,
+    pub player_safe: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportResult {
+    pub session_count: usize,
+    pub output_dir: PathBuf,
+}
 
 pub async fn run(args: ExportArgs) -> Result<()> {
     let campaign = commands::load_campaign_or_die(&commands::resolve_campaign(None)?)?;
@@ -15,25 +40,21 @@ pub async fn run(args: ExportArgs) -> Result<()> {
     let output = args
         .out
         .unwrap_or_else(|| PathBuf::from("exports").join(campaign.slug()));
-
-    match args.format {
-        ExportFormat::Html => export_html(
-            &campaign.campaign.name,
-            &sessions,
-            &output,
-            args.player_safe,
-        )?,
-        ExportFormat::Obsidian => export_obsidian(
-            &campaign.campaign.name,
-            &sessions,
-            &output,
-            args.player_safe,
-        )?,
-    }
+    let format = match args.format {
+        CliExportFormat::Html => ExportFormat::Html,
+        CliExportFormat::Obsidian => ExportFormat::Obsidian,
+    };
+    let result = export(ExportRequest {
+        campaign_name: campaign.campaign.name,
+        session_dirs: sessions,
+        output_dir: output,
+        format,
+        player_safe: args.player_safe,
+    })?;
     ui::ok(&format!(
         "exported {} session(s) to {}",
-        sessions.len(),
-        output.display()
+        result.session_count,
+        result.output_dir.display()
     ));
     Ok(())
 }
@@ -74,6 +95,36 @@ fn artifact_files(session: &Path, player_safe: bool) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+pub fn export(request: ExportRequest) -> Result<ExportResult> {
+    if request.session_dirs.is_empty() {
+        bail!("no session notes were selected for export");
+    }
+    for session in &request.session_dirs {
+        if !session.is_dir() {
+            bail!("session notes not found: {}", session.display());
+        }
+    }
+
+    match request.format {
+        ExportFormat::Html => export_html(
+            &request.campaign_name,
+            &request.session_dirs,
+            &request.output_dir,
+            request.player_safe,
+        )?,
+        ExportFormat::Obsidian => export_obsidian(
+            &request.campaign_name,
+            &request.session_dirs,
+            &request.output_dir,
+            request.player_safe,
+        )?,
+    }
+    Ok(ExportResult {
+        session_count: request.session_dirs.len(),
+        output_dir: request.output_dir,
+    })
+}
+
 fn export_html(
     campaign: &str,
     sessions: &[PathBuf],
@@ -112,11 +163,26 @@ fn export_html(
             escape_html(stem)
         ));
     }
+    if let Some(log) = campaign_log_markdown(sessions) {
+        let mut body = String::new();
+        let parser = Parser::new_ext(&log, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH);
+        html::push_html(&mut body, parser);
+        std::fs::write(
+            output.join("campaign-log.html"),
+            html_page(campaign, "Campaign Log", &body),
+        )?;
+        index.push_str("<li><a href=\"campaign-log.html\">Campaign Log</a></li>");
+    }
     std::fs::write(
         output.join("index.html"),
         html_page(campaign, campaign, &format!("<ul>{index}</ul>")),
     )?;
     Ok(())
+}
+
+fn campaign_log_markdown(sessions: &[PathBuf]) -> Option<String> {
+    let notes_dir = sessions.first()?.parent()?;
+    std::fs::read_to_string(notes_dir.join("_campaign-log.md")).ok()
 }
 
 fn export_obsidian(
@@ -226,5 +292,65 @@ mod tests {
         assert!(root.join("Sessions/session-one/session-one.md").exists());
         let log = std::fs::read_to_string(root.join("Campaign Log.md")).unwrap();
         assert!(log.contains("[[Sessions/session-one/session-one|session-one]]"));
+    }
+
+    #[test]
+    fn resolved_request_exports_html_without_cli_path_resolution() {
+        let temp = tempdir().unwrap();
+        let session = temp.path().join("notes/session-one");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("summary.md"), "# A session summary").unwrap();
+        let output = temp.path().join("managed-export");
+
+        let result = export(ExportRequest {
+            campaign_name: "Test Campaign".into(),
+            session_dirs: vec![session],
+            output_dir: output.clone(),
+            format: ExportFormat::Html,
+            player_safe: false,
+        })
+        .unwrap();
+
+        assert_eq!(result.session_count, 1);
+        assert_eq!(result.output_dir, output);
+        assert!(output.join("index.html").is_file());
+        assert!(output.join("session-one.html").is_file());
+    }
+
+    #[test]
+    fn resolved_request_requires_a_selected_session() {
+        let temp = tempdir().unwrap();
+        let error = export(ExportRequest {
+            campaign_name: "Test Campaign".into(),
+            session_dirs: Vec::new(),
+            output_dir: temp.path().join("export"),
+            format: ExportFormat::Html,
+            player_safe: false,
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no session notes"));
+    }
+
+    #[test]
+    fn html_export_includes_the_campaign_log_when_available() {
+        let temp = tempdir().unwrap();
+        let notes = temp.path().join("notes");
+        let session = notes.join("session-one");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("summary.md"), "# Session summary").unwrap();
+        std::fs::write(
+            notes.join("_campaign-log.md"),
+            "# Campaign Log\n\nContinuity.",
+        )
+        .unwrap();
+        let output = temp.path().join("export");
+
+        export_html("Test Campaign", &[session], &output, false).unwrap();
+
+        let index = std::fs::read_to_string(output.join("index.html")).unwrap();
+        let log = std::fs::read_to_string(output.join("campaign-log.html")).unwrap();
+        assert!(index.contains("campaign-log.html"));
+        assert!(log.contains("Continuity."));
     }
 }
