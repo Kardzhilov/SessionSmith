@@ -138,6 +138,13 @@ async fn models_inventory() -> Result<model_inventory::ModelInventory, String> {
 }
 
 #[tauri::command]
+async fn model_set_default(
+    request: model_inventory::ModelDefaultRequest,
+) -> Result<(), String> {
+    model_inventory::set_default(request).await
+}
+
+#[tauri::command]
 fn campaign_settings(campaign_id: String) -> Result<settings::CampaignSettings, String> {
     settings::campaign_settings(campaign_id)
 }
@@ -302,6 +309,7 @@ pub fn run() {
             search_query,
             health_report,
             models_inventory,
+            model_set_default,
             campaign_settings,
             campaign_settings_write,
             job_submit_doctor,

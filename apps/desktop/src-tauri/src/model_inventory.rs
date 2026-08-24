@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sessionsmith::{
     asr,
     config::GlobalConfig,
@@ -12,6 +12,7 @@ pub struct ModelEntry {
     pub id: String,
     pub label: String,
     pub family: Option<String>,
+    pub cataloged: bool,
     pub engine: String,
     pub state: String,
     pub is_default: bool,
@@ -37,10 +38,28 @@ pub struct ModelInventory {
     pub ollama_service: OllamaService,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelDefaultKind {
+    Transcription,
+    Llm,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDefaultRequest {
+    pub kind: ModelDefaultKind,
+    pub model_id: String,
+}
+
 pub(crate) async fn inventory() -> Result<ModelInventory, String> {
     let global = GlobalConfig::load_or_default().map_err(|error| error.to_string())?;
     let asr_default = global.asr.model.as_deref();
-    let llm_default = global.backend.model.as_deref();
+    let llm_default = if global.backend.kind.eq_ignore_ascii_case("ollama") {
+        global.backend.model.as_deref()
+    } else {
+        None
+    };
     let whisper_cache = models::whisper_cache_dir(global.asr.model_dir.as_deref())
         .map_err(|error| error.to_string())?;
     let whisper = models::WHISPER_MODELS
@@ -56,6 +75,7 @@ pub(crate) async fn inventory() -> Result<ModelInventory, String> {
                 id: model.id.into(),
                 label: format!("Whisper {}", model.id),
                 family: None,
+                cataloged: true,
                 engine: "whisper.cpp".into(),
                 state: if installed { "installed" } else { "available" }.into(),
                 is_default: asr_default == Some(model.id),
@@ -82,6 +102,7 @@ pub(crate) async fn inventory() -> Result<ModelInventory, String> {
                 id: model.id.into(),
                 label: model.display.into(),
                 family: Some(model.engine.label().into()),
+                cataloged: true,
                 engine: model.engine.label().into(),
                 state: if installed { "ready" } else { "available" }.into(),
                 is_default: asr_default == Some(model.id),
@@ -125,6 +146,47 @@ pub(crate) async fn inventory() -> Result<ModelInventory, String> {
     })
 }
 
+pub(crate) async fn set_default(request: ModelDefaultRequest) -> Result<(), String> {
+    let model_id = request.model_id.trim();
+    if model_id.is_empty() {
+        return Err("Select an installed model.".into());
+    }
+
+    let inventory = inventory().await?;
+    let installed = |model: &ModelEntry| model.state != "available";
+    match request.kind {
+        ModelDefaultKind::Transcription => {
+            if !inventory
+                .whisper
+                .iter()
+                .chain(inventory.asr.iter())
+                .any(|model| model.id == model_id && installed(model))
+            {
+                return Err("Select an installed transcription model.".into());
+            }
+            let mut global = GlobalConfig::load_or_default().map_err(|error| error.to_string())?;
+            global.asr.model = Some(model_id.into());
+            global.save().map_err(|error| error.to_string())
+        }
+        ModelDefaultKind::Llm => {
+            if !inventory.ollama_service.reachable {
+                return Err("Start Ollama before choosing a local language model.".into());
+            }
+            if !inventory
+                .ollama
+                .iter()
+                .any(|model| model.id == model_id && installed(model))
+            {
+                return Err("Select an installed local language model.".into());
+            }
+            let mut global = GlobalConfig::load_or_default().map_err(|error| error.to_string())?;
+            global.backend.kind = "ollama".into();
+            global.backend.model = Some(model_id.into());
+            global.save().map_err(|error| error.to_string())
+        }
+    }
+}
+
 fn ollama_entries(
     installed: &BTreeMap<String, u64>,
     default_model: Option<&str>,
@@ -149,6 +211,7 @@ fn ollama_entries(
             id: id.clone(),
             label: id.clone(),
             family: None,
+            cataloged: false,
             engine: "Ollama".into(),
             state: "installed".into(),
             is_default: default_model == Some(id.as_str()),
@@ -177,6 +240,7 @@ fn catalog_entries(
                 id: option.pull.into(),
                 label: format!("{} {}", model.display, option.label),
                 family: Some(model.display.into()),
+                cataloged: true,
                 engine: "Ollama".into(),
                 state: if installed_size.is_some() {
                     "installed"

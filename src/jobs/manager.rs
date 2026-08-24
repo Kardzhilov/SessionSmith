@@ -57,6 +57,7 @@ pub struct JobSnapshot {
     pub id: JobId,
     pub kind: JobKind,
     pub title: String,
+    pub can_cancel: bool,
     pub state: JobState,
     pub started_at: Option<SystemTime>,
     pub finished_at: Option<SystemTime>,
@@ -67,6 +68,7 @@ pub struct JobSnapshot {
 struct JobRecord {
     kind: JobKind,
     title: String,
+    can_cancel: bool,
     state: JobState,
     cancellation: CancellationToken,
     children: ChildRegistry,
@@ -139,6 +141,23 @@ impl JobManager {
         Work: FnOnce(JobContext) -> JobFuture + Send + 'static,
         JobFuture: Future<Output = Result<String>> + Send + 'static,
     {
+        self.submit_with_cancellation(kind, title, true, reporter, work)
+    }
+
+    /// Start work with an explicit cancellation contract. Hosts should pass
+    /// `false` for operations whose remote side cannot reliably be aborted.
+    pub fn submit_with_cancellation<Work, JobFuture>(
+        &self,
+        kind: JobKind,
+        title: impl Into<String>,
+        can_cancel: bool,
+        reporter: Arc<dyn Reporter>,
+        work: Work,
+    ) -> JobId
+    where
+        Work: FnOnce(JobContext) -> JobFuture + Send + 'static,
+        JobFuture: Future<Output = Result<String>> + Send + 'static,
+    {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let cancellation = CancellationToken::new();
         let children = ChildRegistry::default();
@@ -154,6 +173,7 @@ impl JobManager {
                 JobRecord {
                     kind,
                     title,
+                    can_cancel,
                     state: JobState::Queued,
                     cancellation: cancellation.clone(),
                     children: children.clone(),
@@ -220,10 +240,15 @@ impl JobManager {
     pub fn cancel(&self, id: JobId) -> bool {
         let job = self.with_jobs_mut(|jobs| {
             let record = jobs.get_mut(&id)?;
-            if matches!(
-                record.state,
-                JobState::Succeeded | JobState::Failed | JobState::Cancelled | JobState::Cancelling
-            ) {
+            if !record.can_cancel
+                || matches!(
+                    record.state,
+                    JobState::Succeeded
+                        | JobState::Failed
+                        | JobState::Cancelled
+                        | JobState::Cancelling
+                )
+            {
                 return None;
             }
             record.state = JobState::Cancelling;
@@ -250,10 +275,11 @@ impl JobManager {
         let ids = self.with_jobs(|jobs| {
             jobs.iter()
                 .filter_map(|(&id, record)| {
-                    (!matches!(
-                        record.state,
-                        JobState::Succeeded | JobState::Failed | JobState::Cancelled
-                    ))
+                    (record.can_cancel
+                        && !matches!(
+                            record.state,
+                            JobState::Succeeded | JobState::Failed | JobState::Cancelled
+                        ))
                     .then_some(id)
                 })
                 .collect::<Vec<_>>()
@@ -319,6 +345,7 @@ fn snapshot(id: JobId, record: &JobRecord) -> JobSnapshot {
         id,
         kind: record.kind.clone(),
         title: record.title.clone(),
+        can_cancel: record.can_cancel,
         state: record.state.clone(),
         started_at: record.started_at,
         finished_at: record.finished_at,
@@ -388,6 +415,34 @@ mod tests {
         let job = manager.list().pop().expect("job snapshot should exist");
         assert_eq!(job.state, JobState::Cancelled);
         assert_eq!(job.summary.as_deref(), Some("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn manager_rejects_cancellation_for_non_cancellable_work() {
+        let manager = JobManager::new(tokio::runtime::Handle::current());
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let reporter = Arc::new(ChannelReporter::new(sender, CancellationToken::new()));
+        let (release, gate) = oneshot::channel();
+        let id = manager.submit_with_cancellation(
+            JobKind::Model,
+            "Pull local model",
+            false,
+            reporter,
+            move |_| async move {
+                gate.await.expect("test gate should be released");
+                Ok("model ready".into())
+            },
+        );
+
+        assert!(!manager.cancel(id));
+        let job = manager.list().pop().expect("job snapshot should exist");
+        assert!(!job.can_cancel);
+
+        release.send(()).expect("job should still be waiting");
+        assert_eq!(
+            next_completion(&mut receiver).await,
+            Ok("model ready".into())
+        );
     }
 
     #[tokio::test]

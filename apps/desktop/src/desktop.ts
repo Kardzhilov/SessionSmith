@@ -16,6 +16,7 @@ import type {
   HealthReport,
   ImportAudioRequest,
   JobSubmission,
+  ModelDefaultRequest,
   ModelInventory,
   ModelRequest,
   NotesRequest,
@@ -71,6 +72,8 @@ export const desktop = {
     invoke<SpeakerReview>("speaker_review", { campaignId, stem }),
   healthReport: () => invoke<HealthReport>("health_report"),
   modelsInventory: () => invoke<ModelInventory>("models_inventory"),
+  modelSetDefault: (request: ModelDefaultRequest) =>
+    invoke<void>("model_set_default", { request }),
   campaignSettings: (campaignId: string) =>
     invoke<CampaignSettings>("campaign_settings", { campaignId }),
   campaignSettingsWrite: (request: CampaignSettingsWriteRequest) =>

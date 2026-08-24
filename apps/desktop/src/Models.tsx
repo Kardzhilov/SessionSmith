@@ -2,23 +2,33 @@ import { type ReactNode, useEffect, useState } from "react";
 import {
   Bot,
   BrainCircuit,
+  Check,
   ChevronDown,
   ChevronRight,
   CircleAlert,
   CircleCheck,
   CircleDashed,
-  Cpu,
   Download,
   LoaderCircle,
   RefreshCw,
-  ServerCog,
   Trash2,
   X,
 } from "lucide-react";
 import { desktop, errorMessage } from "./desktop";
-import type { ModelAction, ModelEntry, ModelInventory, ModelState } from "./types";
+import type {
+  ModelAction,
+  ModelDefaultKind,
+  ModelEntry,
+  ModelInventory,
+  ModelState,
+} from "./types";
 
-type ManagedFamily = "whisper" | "asr";
+type ManagedFamily = "whisper" | "asr" | "ollama";
+
+type CategorizedModel = {
+  managedFamily: ManagedFamily;
+  model: ModelEntry;
+};
 
 type RemovalTarget = {
   family: ManagedFamily;
@@ -42,8 +52,10 @@ export function ModelInventoryPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [inventoryRefreshKey, setInventoryRefreshKey] = useState(0);
-  const [showOllamaCatalog, setShowOllamaCatalog] = useState(false);
+  const [showTranscriptionCatalog, setShowTranscriptionCatalog] = useState(false);
+  const [showLlmCatalog, setShowLlmCatalog] = useState(false);
   const [actionSubmitting, setActionSubmitting] = useState(false);
+  const [defaultSubmitting, setDefaultSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [removalTarget, setRemovalTarget] = useState<RemovalTarget | null>(null);
 
@@ -90,6 +102,20 @@ export function ModelInventoryPage({
     }
   }
 
+  async function setModelDefault(kind: ModelDefaultKind, modelId: string) {
+    setDefaultSubmitting(true);
+    setActionError(null);
+    onActionStarting();
+    try {
+      await desktop.modelSetDefault({ kind, modelId });
+      setInventoryRefreshKey((key) => key + 1);
+    } catch (nextError) {
+      setActionError(errorMessage(nextError));
+    } finally {
+      setDefaultSubmitting(false);
+    }
+  }
+
   if (!inventory && loading) {
     return <ModelsLoading />;
   }
@@ -111,8 +137,16 @@ export function ModelInventoryPage({
     );
   }
 
-  const installedOllama = inventory.ollama.filter((model) => model.state === "installed");
-  const catalogOllama = inventory.ollama.filter((model) => model.state !== "installed");
+  const transcriptionModels: CategorizedModel[] = [
+    ...inventory.whisper.map((model) => ({ managedFamily: "whisper" as const, model })),
+    ...inventory.asr.map((model) => ({ managedFamily: "asr" as const, model })),
+  ];
+  const installedTranscription = transcriptionModels.filter(({ model }) => model.state !== "available");
+  const catalogTranscription = transcriptionModels.filter(({ model }) => model.state === "available");
+  const llmModels = inventory.ollama.map((model) => ({ managedFamily: "ollama" as const, model }));
+  const installedLlm = llmModels.filter(({ model }) => model.state === "installed");
+  const catalogLlm = llmModels.filter(({ model }) => model.state !== "installed");
+  const actionBusy = actionSubmitting || defaultSubmitting || modelRunning;
 
   return (
     <div className="models-page">
@@ -120,7 +154,7 @@ export function ModelInventoryPage({
         <div>
           <p className="eyebrow">Local runtime</p>
           <h1>Models</h1>
-          <p className="page-subtitle">Installed speech and language models, with their configured defaults.</p>
+          <p className="page-subtitle">Active local transcription and language models.</p>
         </div>
         <button
           className="button button--quiet"
@@ -140,126 +174,159 @@ export function ModelInventoryPage({
       )}
       {(actionError ?? jobError) && <p className="models-action-error" role="alert">{actionError ?? jobError}</p>}
 
-      <section className={`models-service models-service--${inventory.ollamaService.reachable ? "ready" : "offline"}`}>
-        <span className="models-service__icon" aria-hidden="true">
-          <ServerCog size={20} />
-        </span>
-        <div>
-          <p className="eyebrow">Ollama service</p>
-          <h2>{inventory.ollamaService.reachable ? "Local server reachable" : "Local server unavailable"}</h2>
-          <p>{inventory.ollamaService.detail}</p>
-        </div>
-        <span className="models-service__endpoint" title={inventory.ollamaService.endpoint}>
-          {inventory.ollamaService.endpoint}
-        </span>
-      </section>
-
-      <ModelGroup
-        title="Whisper"
-        detail="Offline speech-to-text models stored in the local GGML cache."
-        icon={<Cpu size={18} aria-hidden="true" />}
-        models={inventory.whisper}
-        managedFamily="whisper"
-        actionBusy={actionSubmitting || modelRunning}
-        removalTarget={removalTarget}
-        onAction={(action, modelId) => void submitModelAction(action, modelId)}
-        onRequestRemoval={(modelId) => setRemovalTarget({ family: "whisper", modelId })}
-        onCancelRemoval={() => setRemovalTarget(null)}
-      />
-      <ModelGroup
-        title="ASR Engines"
-        detail="Bridge and local engines available for high-accuracy transcription."
+      <ModelCategory
+        id="transcription-models"
+        title="Transcription"
+        detail="Installed speech-to-text models."
         icon={<BrainCircuit size={18} aria-hidden="true" />}
-        models={inventory.asr}
-        managedFamily="asr"
-        actionBusy={actionSubmitting || modelRunning}
+        installed={installedTranscription}
+        catalog={catalogTranscription}
+        showCatalog={showTranscriptionCatalog}
+        onToggleCatalog={() => setShowTranscriptionCatalog((show) => !show)}
+        emptyDescription="No transcription models are installed."
+        catalogEmptyDescription="All curated transcription models are installed."
+        defaultKind="transcription"
+        actionBusy={actionBusy}
         removalTarget={removalTarget}
         onAction={(action, modelId) => void submitModelAction(action, modelId)}
-        onRequestRemoval={(modelId) => setRemovalTarget({ family: "asr", modelId })}
+        onSetDefault={(kind, modelId) => void setModelDefault(kind, modelId)}
+        onRequestRemoval={(family, modelId) => setRemovalTarget({ family, modelId })}
         onCancelRemoval={() => setRemovalTarget(null)}
       />
-      <section className="models-section" aria-labelledby="ollama-models-heading">
-        <div className="section-header models-section__heading">
-          <div>
-            <h2 id="ollama-models-heading">Ollama <span>{installedOllama.length}</span></h2>
-            <p>Language models installed in the local Ollama registry.</p>
-          </div>
-          <button
-            className="button button--quiet button--compact"
-            type="button"
-            onClick={() => setShowOllamaCatalog((show) => !show)}
-            aria-expanded={showOllamaCatalog}
-          >
-            {showOllamaCatalog ? <ChevronDown size={15} aria-hidden="true" /> : <ChevronRight size={15} aria-hidden="true" />}
-            {showOllamaCatalog ? "Hide catalog" : `Browse catalog (${catalogOllama.length})`}
-          </button>
-        </div>
-        {installedOllama.length > 0 ? (
-          <div className="model-list">
-            {installedOllama.map((model) => <ModelRow key={model.id} model={model} />)}
-          </div>
-        ) : (
-          <div className="models-empty">
-            <Bot size={20} aria-hidden="true" />
-            <p>{inventory.ollamaService.reachable ? "No Ollama models are installed yet." : "Start Ollama to inspect local language models."}</p>
-          </div>
-        )}
-        {showOllamaCatalog && (
-          <div className="model-list model-list--catalog">
-            {catalogOllama.map((model) => <ModelRow key={model.id} model={model} />)}
-          </div>
-        )}
-      </section>
+      <ModelCategory
+        id="llm-models"
+        title="LLMs"
+        detail={inventory.ollamaService.reachable
+          ? `Installed Ollama models at ${inventory.ollamaService.endpoint}.`
+          : "Ollama is unavailable."}
+        icon={<Bot size={18} aria-hidden="true" />}
+        installed={installedLlm}
+        catalog={catalogLlm}
+        showCatalog={showLlmCatalog}
+        onToggleCatalog={() => setShowLlmCatalog((show) => !show)}
+        emptyDescription={inventory.ollamaService.reachable
+          ? "No local language models are installed."
+          : "Start Ollama to inspect installed language models."}
+        catalogEmptyDescription="All curated language models are installed."
+        defaultKind="llm"
+        notice={inventory.ollamaService.reachable ? null : inventory.ollamaService.detail}
+        actionBusy={actionBusy}
+        removalTarget={removalTarget}
+        onAction={(action, modelId) => void submitModelAction(action, modelId)}
+        onSetDefault={(kind, modelId) => void setModelDefault(kind, modelId)}
+        onRequestRemoval={(family, modelId) => setRemovalTarget({ family, modelId })}
+        onCancelRemoval={() => setRemovalTarget(null)}
+      />
     </div>
   );
 }
 
-function ModelGroup({
+function ModelCategory({
+  id,
   title,
   detail,
   icon,
-  models,
-  managedFamily,
+  installed,
+  catalog,
+  showCatalog,
+  onToggleCatalog,
+  emptyDescription,
+  catalogEmptyDescription,
+  defaultKind,
+  notice,
   actionBusy,
   removalTarget,
   onAction,
+  onSetDefault,
   onRequestRemoval,
   onCancelRemoval,
 }: {
+  id: string;
   title: string;
   detail: string;
   icon: ReactNode;
-  models: ModelEntry[];
-  managedFamily: ManagedFamily;
+  installed: CategorizedModel[];
+  catalog: CategorizedModel[];
+  showCatalog: boolean;
+  onToggleCatalog: () => void;
+  emptyDescription: string;
+  catalogEmptyDescription: string;
+  defaultKind: ModelDefaultKind;
+  notice?: string | null;
   actionBusy: boolean;
   removalTarget: RemovalTarget | null;
   onAction: (action: ModelAction, modelId: string) => void;
-  onRequestRemoval: (modelId: string) => void;
+  onSetDefault: (kind: ModelDefaultKind, modelId: string) => void;
+  onRequestRemoval: (family: ManagedFamily, modelId: string) => void;
   onCancelRemoval: () => void;
 }) {
   return (
-    <section className="models-section">
+    <section className="models-section" aria-labelledby={id}>
       <div className="section-header">
         <div>
-          <h2>{title} <span>{models.length}</span></h2>
+          <h2 id={id}>{title} <span>{installed.length}</span></h2>
           <p>{detail}</p>
         </div>
-        <span className="models-section__icon">{icon}</span>
+        <div className="models-section__actions">
+          <span className="models-section__icon">{icon}</span>
+          <button
+            className="button button--quiet button--compact"
+            type="button"
+            onClick={onToggleCatalog}
+            aria-expanded={showCatalog}
+          >
+            {showCatalog ? <ChevronDown size={15} aria-hidden="true" /> : <ChevronRight size={15} aria-hidden="true" />}
+            {showCatalog ? "Hide catalog" : `Browse catalog (${catalog.length})`}
+          </button>
+        </div>
       </div>
-      <div className="model-list">
-        {models.map((model) => (
+      {notice && <p className="models-section__notice" role="status">{notice}</p>}
+      {installed.length > 0 ? (
+        <div className="model-list">
+          {installed.map(({ managedFamily, model }) => (
+            <ModelRow
+              actionBusy={actionBusy}
+              defaultKind={defaultKind}
+              key={model.id}
+              managedFamily={managedFamily}
+              model={model}
+              removalPending={removalTarget?.family === managedFamily && removalTarget.modelId === model.id}
+              onAction={onAction}
+              onCancelRemoval={onCancelRemoval}
+              onRequestRemoval={(modelId) => onRequestRemoval(managedFamily, modelId)}
+              onSetDefault={onSetDefault}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="models-empty">
+          <CircleDashed size={20} aria-hidden="true" />
+          <p>{emptyDescription}</p>
+        </div>
+      )}
+      {showCatalog && (
+        <div className="model-list model-list--catalog">
+          {catalog.length > 0 ? catalog.map(({ managedFamily, model }) => (
           <ModelRow
             actionBusy={actionBusy}
+            defaultKind={defaultKind}
             key={model.id}
             managedFamily={managedFamily}
             model={model}
             removalPending={removalTarget?.family === managedFamily && removalTarget.modelId === model.id}
             onAction={onAction}
             onCancelRemoval={onCancelRemoval}
-            onRequestRemoval={onRequestRemoval}
+            onRequestRemoval={(modelId) => onRequestRemoval(managedFamily, modelId)}
+            onSetDefault={onSetDefault}
           />
-        ))}
-      </div>
+          )) : (
+            <div className="models-empty">
+              <CircleCheck size={20} aria-hidden="true" />
+              <p>{catalogEmptyDescription}</p>
+            </div>
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -267,17 +334,21 @@ function ModelGroup({
 function ModelRow({
   model,
   managedFamily,
+  defaultKind,
   actionBusy,
   removalPending,
   onAction,
+  onSetDefault,
   onRequestRemoval,
   onCancelRemoval,
 }: {
   model: ModelEntry;
   managedFamily?: ManagedFamily;
+  defaultKind?: ModelDefaultKind;
   actionBusy?: boolean;
   removalPending?: boolean;
   onAction?: (action: ModelAction, modelId: string) => void;
+  onSetDefault?: (kind: ModelDefaultKind, modelId: string) => void;
   onRequestRemoval?: (modelId: string) => void;
   onCancelRemoval?: () => void;
 }) {
@@ -287,13 +358,19 @@ function ModelRow({
     ? "downloadWhisper"
     : managedFamily === "asr"
       ? "prepareAsr"
+      : managedFamily === "ollama"
+        ? "pullOllama"
       : null;
   const removeAction: ModelAction | null = managedFamily === "whisper"
     ? "deleteWhisper"
     : managedFamily === "asr"
       ? "deleteAsr"
+      : managedFamily === "ollama"
+        ? "deleteOllama"
       : null;
-  const actionLabel = managedFamily === "whisper" ? "Download model" : "Prepare model";
+  const actionLabel = managedFamily === "asr" ? "Prepare model" : "Download model";
+  const defaultActionLabel = defaultKind === "transcription" ? "Use for transcription" : "Use for notes";
+  const removeAllowed = managedFamily !== "ollama" || model.cataloged;
 
   return (
     <article className={`model-row model-row--${model.state}`}>
@@ -323,6 +400,17 @@ function ModelRow({
       </dl>
       <div className="model-row__controls">
         <span className="model-row__state">{stateLabel}</span>
+        {defaultKind && !isAvailable && !model.isDefault && (
+          <button
+            className="button button--quiet button--compact model-row__default-action"
+            type="button"
+            disabled={actionBusy}
+            onClick={() => onSetDefault?.(defaultKind, model.id)}
+          >
+            <Check size={15} aria-hidden="true" />
+            {defaultActionLabel}
+          </button>
+        )}
         {installAction && isAvailable && (
           <button
             className="icon-button model-row__action"
@@ -335,7 +423,7 @@ function ModelRow({
             {actionBusy ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}
           </button>
         )}
-        {removeAction && !isAvailable && !removalPending && (
+        {removeAction && !isAvailable && removeAllowed && !model.isDefault && !removalPending && (
           <button
             className="icon-button model-row__action model-row__action--remove"
             type="button"

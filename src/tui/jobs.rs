@@ -136,9 +136,11 @@ pub fn spawn_model_with_reporter(
     job: ModelJob,
     title: impl Into<String>,
 ) -> JobId {
-    manager.submit(
+    let can_cancel = job.supports_cancellation();
+    manager.submit_with_cancellation(
         crate::jobs::manager::JobKind::Model,
         title,
+        can_cancel,
         reporter,
         move |context| async move {
             let reporter = context.reporter();

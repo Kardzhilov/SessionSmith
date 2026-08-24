@@ -201,6 +201,7 @@ export type ModelEntry = {
   id: string;
   label: string;
   family: string | null;
+  cataloged: boolean;
   engine: string;
   state: ModelState;
   isDefault: boolean;
@@ -399,10 +400,19 @@ export type ModelAction =
   | "downloadWhisper"
   | "deleteWhisper"
   | "prepareAsr"
-  | "deleteAsr";
+  | "deleteAsr"
+  | "pullOllama"
+  | "deleteOllama";
 
 export type ModelRequest = {
   action: ModelAction;
+  modelId: string;
+};
+
+export type ModelDefaultKind = "transcription" | "llm";
+
+export type ModelDefaultRequest = {
+  kind: ModelDefaultKind;
   modelId: string;
 };
 

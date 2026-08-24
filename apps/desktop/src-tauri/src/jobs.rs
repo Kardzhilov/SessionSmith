@@ -158,6 +158,8 @@ pub enum ModelAction {
     DeleteWhisper,
     PrepareAsr,
     DeleteAsr,
+    PullOllama,
+    DeleteOllama,
 }
 
 #[derive(Debug, Deserialize)]
@@ -489,7 +491,6 @@ impl DesktopJobs {
         request: ModelRequest,
     ) -> Result<JobSubmission, String> {
         let (global, job, title) = model_request(request)?;
-        debug_assert!(job.supports_cancellation());
         let manager = self.manager()?;
         if model_job_active(&manager) {
             return Err("A local model action is already active.".into());
@@ -673,7 +674,7 @@ impl DesktopJobs {
             .into_iter()
             .find(|job| job.id == id)
             .ok_or_else(|| format!("Job {id} was not found."))?;
-        if !job_supports_cancellation(&job.kind) {
+        if !job.can_cancel || !job_supports_cancellation(&job.kind) {
             return Err(format!("Job {id} cannot be cancelled."));
         }
         if !manager.cancel(id) {
@@ -772,6 +773,7 @@ impl DesktopJobs {
             progress: details.progress,
             log_tail: details.log_tail.into_iter().collect(),
             can_cancel: matches!(snapshot.state, JobState::Queued | JobState::Running)
+                && snapshot.can_cancel
                 && job_supports_cancellation(&snapshot.kind),
         }
     }
@@ -1336,6 +1338,26 @@ fn model_request(request: ModelRequest) -> Result<(GlobalConfig, ModelJob, Strin
                     format!("Delete ASR · {}", spec.display),
                 ),
                 _ => unreachable!("outer match restricts ASR actions"),
+            }
+        }
+        ModelAction::PullOllama | ModelAction::DeleteOllama => {
+            let known = sessionsmith::models::OLLAMA_CATALOG
+                .iter()
+                .flat_map(|model| model.options)
+                .any(|option| option.pull == id);
+            if !known {
+                return Err("Select an Ollama model from the local catalog.".into());
+            }
+            match request.action {
+                ModelAction::PullOllama => (
+                    ModelJob::PullOllama(id.to_string()),
+                    format!("Download Ollama · {id}"),
+                ),
+                ModelAction::DeleteOllama => (
+                    ModelJob::DeleteOllama(id.to_string()),
+                    format!("Delete Ollama · {id}"),
+                ),
+                _ => unreachable!("outer match restricts Ollama actions"),
             }
         }
     };
@@ -2121,6 +2143,16 @@ mod tests {
             model_id: "large-v3-turbo".into(),
         })
         .is_err());
+        assert!(super::model_request(ModelRequest {
+            action: ModelAction::PullOllama,
+            model_id: "../../not-a-model".into(),
+        })
+        .is_err());
+        assert!(super::model_request(ModelRequest {
+            action: ModelAction::PullOllama,
+            model_id: "qwen3.5:9b".into(),
+        })
+        .is_ok());
     }
 
     #[test]

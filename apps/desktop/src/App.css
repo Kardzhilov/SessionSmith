@@ -1095,6 +1095,12 @@ h1 {
   align-items: center;
 }
 
+.models-section__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .models-section__icon {
   display: grid;
   width: 31px;
@@ -1103,6 +1109,16 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 6px;
   color: var(--pine);
+}
+
+.models-section__notice {
+  margin: -2px 0 12px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--amber);
+  background: var(--amber-soft);
+  color: #7d4a10;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .model-list {
@@ -1226,6 +1242,12 @@ h1 {
 
 .model-row__action--remove {
   color: var(--red);
+}
+
+.model-row__default-action {
+  min-height: 29px;
+  padding: 0 8px;
+  font-size: 10px;
 }
 
 .model-row__confirmation {
@@ -2078,6 +2100,10 @@ h1 {
 
   .models-section__heading {
     align-items: flex-start;
+  }
+
+  .models-section__actions {
+    align-items: flex-end;
   }
 
   .model-row {
