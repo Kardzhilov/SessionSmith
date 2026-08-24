@@ -718,8 +718,7 @@ impl DesktopJobs {
             return Ok(manager);
         }
 
-        let manager = JobManager::try_current()
-            .map_err(|error| format!("Desktop job runtime is unavailable: {error}"))?;
+        let manager = JobManager::new(tauri::async_runtime::handle().inner().clone());
         let _ = self.inner.manager.set(manager);
         self.manager_if_initialized()
             .ok_or_else(|| "Desktop job manager could not be initialized.".into())
@@ -1844,6 +1843,11 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         directory
+    }
+
+    #[test]
+    fn desktop_jobs_initialize_from_the_tauri_runtime() {
+        assert!(super::DesktopJobs::default().manager().is_ok());
     }
 
     #[test]

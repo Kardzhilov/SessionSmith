@@ -75,12 +75,27 @@ fn bridge_model_cache(engine: AsrEngine, model_ref: &str) -> Option<PathBuf> {
 /// Best-effort deletion of local files SessionSmith can confidently attribute
 /// to one Python bridge ASR model.
 pub fn delete_asr_cache(engine: AsrEngine, model_ref: &str) -> Result<()> {
+    delete_bridge_model_cache(bridge_model_cache(engine, model_ref))?;
     let (script_name, _) = script_for(engine)?;
-    let script = bridge_dir()?.join(script_name);
-    if script.exists() {
-        std::fs::remove_file(&script).with_context(|| format!("deleting {}", script.display()))?;
+    if let Some(cache_dir) = dirs::cache_dir() {
+        let script = cache_dir
+            .join("sessionsmith")
+            .join("bridges")
+            .join(script_name);
+        if script.exists() {
+            if let Err(error) = std::fs::remove_file(&script) {
+                crate::ui::warn(&format!(
+                    "could not remove unused bridge script {}: {error}",
+                    script.display()
+                ));
+            }
+        }
     }
-    if let Some(model_dir) = bridge_model_cache(engine, model_ref) {
+    Ok(())
+}
+
+fn delete_bridge_model_cache(model_dir: Option<PathBuf>) -> Result<()> {
+    if let Some(model_dir) = model_dir {
         if model_dir.exists() {
             std::fs::remove_dir_all(&model_dir)
                 .with_context(|| format!("deleting {}", model_dir.display()))?;
@@ -564,6 +579,24 @@ if __name__ == "__main__":
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn deletes_an_advanced_model_cache_directory() {
+        let temp = tempdir().expect("temporary cache root should be available");
+        let model_dir = temp
+            .path()
+            .join("huggingface/hub/models--OpenMOSS-Team--MOSS-Transcribe-Diarize");
+        std::fs::create_dir_all(model_dir.join("snapshots/example"))
+            .expect("model snapshot directory should be created");
+        std::fs::write(model_dir.join("snapshots/example/config.json"), "{}")
+            .expect("model snapshot should be written");
+
+        delete_bridge_model_cache(Some(model_dir.clone()))
+            .expect("model cache deletion should succeed");
+
+        assert!(!model_dir.exists());
+    }
 
     #[cfg(unix)]
     #[test]

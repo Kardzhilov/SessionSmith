@@ -119,6 +119,7 @@ function App() {
   const [campaignLogHandoff, setCampaignLogHandoff] = useState<{ campaignId: string; stem: string } | null>(null);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
   const [modelReloadKey, setModelReloadKey] = useState(0);
+  const [modelActionError, setModelActionError] = useState<string | null>(null);
   const [importSubmitting, setImportSubmitting] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportSubmitting, setExportSubmitting] = useState(false);
@@ -193,8 +194,9 @@ function App() {
         setLogReloadKey((current) => current + 1);
         setCampaignLogHandoff(null);
       }
-      if (payload.kind === "model" && payload.state === "succeeded") {
+      if (payload.kind === "model" && isTerminalJob(payload)) {
         setModelReloadKey((current) => current + 1);
+        setModelActionError(payload.state === "failed" ? payload.summary ?? "The local model action failed." : null);
       }
     })
       .then((stopListening) => {
@@ -835,6 +837,8 @@ function App() {
           <ModelInventoryPage
             refreshKey={modelReloadKey}
             modelRunning={modelRunning}
+            jobError={modelActionError}
+            onActionStarting={() => setModelActionError(null)}
             onJobStarted={async () => {
               setJobsOpen(true);
               await refreshJobs();

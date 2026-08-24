@@ -28,10 +28,14 @@ type RemovalTarget = {
 export function ModelInventoryPage({
   refreshKey,
   modelRunning,
+  jobError,
+  onActionStarting,
   onJobStarted,
 }: {
   refreshKey: number;
   modelRunning: boolean;
+  jobError: string | null;
+  onActionStarting: () => void;
   onJobStarted: () => Promise<void>;
 }) {
   const [inventory, setInventory] = useState<ModelInventory | null>(null);
@@ -74,6 +78,7 @@ export function ModelInventoryPage({
   async function submitModelAction(action: ModelAction, modelId: string) {
     setActionSubmitting(true);
     setActionError(null);
+    onActionStarting();
     try {
       await desktop.jobSubmitModel({ action, modelId });
       setRemovalTarget(null);
@@ -133,7 +138,7 @@ export function ModelInventoryPage({
           The latest refresh did not complete. Showing the previous inventory: {error}
         </p>
       )}
-      {actionError && <p className="models-action-error" role="alert">{actionError}</p>}
+      {(actionError ?? jobError) && <p className="models-action-error" role="alert">{actionError ?? jobError}</p>}
 
       <section className={`models-service models-service--${inventory.ollamaService.reachable ? "ready" : "offline"}`}>
         <span className="models-service__icon" aria-hidden="true">

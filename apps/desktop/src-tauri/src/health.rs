@@ -1,5 +1,6 @@
 use serde::Serialize;
 use sessionsmith::{
+    asr::{self, AsrEngine, AsrModelSpec},
     config::GlobalConfig,
     deps::{self, DepStatus},
     hardware, models, util,
@@ -53,14 +54,13 @@ pub(crate) async fn report() -> Result<HealthReport, String> {
         .model
         .clone()
         .unwrap_or_else(|| recommendation.whisper_model.to_string());
-    let mut statuses = vec![
-        deps::check_ffmpeg(),
-        deps::check_ffprobe(),
-        deps::check_whisper_cli(global.asr.binary.as_deref()),
-        deps::check_whisper_model(&asr_model, &cache),
-        deps::check_uv(),
-        desktop_audio_player_check(),
-    ];
+    let mut statuses = vec![deps::check_ffmpeg(), deps::check_ffprobe()];
+    if configured_model_uses_whisper(&asr_model) {
+        statuses.push(deps::check_whisper_cli(global.asr.binary.as_deref()));
+    }
+    statuses.push(configured_asr_model_check(&asr_model, &cache));
+    statuses.push(deps::check_uv());
+    statuses.push(desktop_audio_player_check());
     statuses.push(deps::check_backend(&global).await);
 
     Ok(HealthReport {
@@ -79,6 +79,30 @@ pub(crate) async fn report() -> Result<HealthReport, String> {
             recommendation_reason: recommendation.reason,
         },
     })
+}
+
+fn configured_model_uses_whisper(model: &str) -> bool {
+    asr::find(model).is_none_or(|spec| spec.engine == AsrEngine::WhisperCpp)
+}
+
+fn configured_asr_model_check(model: &str, whisper_cache: &std::path::Path) -> DepStatus {
+    match asr::find(model).filter(|spec| spec.engine != AsrEngine::WhisperCpp) {
+        Some(spec) => advanced_asr_model_check(spec),
+        None => deps::check_whisper_model(model, whisper_cache),
+    }
+}
+
+fn advanced_asr_model_check(spec: &AsrModelSpec) -> DepStatus {
+    let prepared = asr::is_prepared(spec.id);
+    DepStatus {
+        name: format!("asr model: {}", spec.display),
+        ok: prepared,
+        detail: if prepared {
+            format!("{} is prepared for {}", spec.display, spec.engine.label())
+        } else {
+            format!("{} is not prepared; open Models to prepare it", spec.display)
+        },
+    }
 }
 
 fn desktop_audio_player_check() -> DepStatus {
@@ -147,8 +171,9 @@ fn remedy_for(label: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{health_id, map_check};
+    use super::{configured_asr_model_check, configured_model_uses_whisper, health_id, map_check};
     use sessionsmith::deps::DepStatus;
+    use std::path::Path;
 
     #[test]
     fn maps_optional_uv_to_a_warning() {
@@ -175,5 +200,15 @@ mod tests {
     #[test]
     fn produces_stable_ids_from_dependency_labels() {
         assert_eq!(health_id("backend: ollama"), "backend-ollama");
+    }
+
+    #[test]
+    fn advanced_asr_models_are_not_checked_as_whisper_models() {
+        let model = "moss-transcribe-diarize-0.9b";
+        let check = configured_asr_model_check(model, Path::new("."));
+
+        assert!(!configured_model_uses_whisper(model));
+        assert_eq!(check.name, "asr model: MOSS Transcribe-Diarize 0.9B");
+        assert!(!check.detail.contains("unknown whisper model"));
     }
 }
