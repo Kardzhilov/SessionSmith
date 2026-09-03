@@ -63,8 +63,8 @@ jobs:
         run: |
           tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
           package_version="$(node -p "require('./apps/desktop/package.json').version")"
-          desktop_version="$(sed -n '/^version = /{s/version = "\([^"]*\)"/\1/p;q}' apps/desktop/src-tauri/Cargo.toml)"
-          core_version="$(sed -n '/^version = /{s/version = "\([^"]*\)"/\1/p;q}' Cargo.toml)"
+          desktop_version="$(awk -F '"' '/^version = / { print $2; exit }' apps/desktop/src-tauri/Cargo.toml)"
+          core_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
           test "$package_version" = "$desktop_version"
           test "$package_version" = "$core_version"
           test "$tag" = "v$package_version"
