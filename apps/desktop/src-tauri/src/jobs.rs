@@ -2208,14 +2208,15 @@ fn workspace_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_event, approved_export_session_dir, artifacts_from_ids, import_request,
-        log_rebuild_request, managed_export_dir, notes_request, process_request, push_log,
-        recording_request, validate_asr_model, validate_backend_kind, validate_language,
-        validate_session_date, CandidateAction, CandidateResolveRequest, ExportFormat,
-        ExportRequest, ImportAudioRequest, JobDetails, ModelAction, ModelRequest, NotesRequest,
-        ProcessRequest, RecordRequest, SpeakerMapEntry, SpeakerMapRequest, TranscribeRequest,
-        LOG_TAIL_LIMIT,
+        apply_event, artifacts_from_ids, import_request, log_rebuild_request, managed_export_dir,
+        notes_request, process_request, push_log, recording_request, validate_asr_model,
+        validate_backend_kind, validate_language, validate_session_date, CandidateAction,
+        CandidateResolveRequest, ExportFormat, ExportRequest, ImportAudioRequest, JobDetails,
+        ModelAction, ModelRequest, NotesRequest, ProcessRequest, RecordRequest, SpeakerMapEntry,
+        SpeakerMapRequest, TranscribeRequest, LOG_TAIL_LIMIT,
     };
+    #[cfg(unix)]
+    use super::approved_export_session_dir;
     use sessionsmith::jobs::report::JobEvent;
     use std::{
         fs,
@@ -2322,7 +2323,8 @@ mod tests {
     fn managed_export_dir_stays_under_the_workspace() {
         let workspace = temporary_directory("managed-export");
         let output = managed_export_dir(&workspace, "test-campaign").unwrap();
-        assert!(output.starts_with(workspace.join("exports")));
+        let exports = fs::canonicalize(workspace.join("exports")).unwrap();
+        assert!(output.starts_with(exports));
         assert!(output.is_dir());
         fs::remove_dir_all(workspace).unwrap();
     }

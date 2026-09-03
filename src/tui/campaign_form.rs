@@ -1433,14 +1433,11 @@ mod tests {
     }
 
     #[test]
-    fn edit_round_trips_a_real_campaign_without_changes() {
+    fn edit_round_trips_the_example_campaign_without_changes() {
         let config: CampaignConfig =
-            toml::from_str(include_str!("../../campaigns/DnDThursday.toml")).unwrap();
-        let form = CampaignFormState::edit(
-            &config,
-            PathBuf::from("campaigns/DnDThursday.toml"),
-            presets(),
-        );
+            toml::from_str(include_str!("../../campaigns/.example.toml")).unwrap();
+        let form =
+            CampaignFormState::edit(&config, PathBuf::from("campaigns/.example.toml"), presets());
         let applied = form.build_config().unwrap();
         assert_eq!(
             toml::to_string(&config).unwrap(),

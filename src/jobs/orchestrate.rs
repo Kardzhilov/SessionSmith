@@ -469,8 +469,7 @@ mod tests {
             .expect("fake uv metadata should exist")
             .permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&fake_uv, permissions)
-            .expect("fake uv should be executable");
+        std::fs::set_permissions(&fake_uv, permissions).expect("fake uv should be executable");
         let original_path = std::env::var_os("PATH").unwrap_or_default();
         let mut path_entries = vec![fake_bin];
         path_entries.extend(std::env::split_paths(&original_path));

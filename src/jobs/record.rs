@@ -138,8 +138,7 @@ fn ffmpeg_supports_capture_format(ffmpeg: &std::path::Path, format: &str) -> boo
 fn ffmpeg_device_listing_supports(listing: &[u8], format: &str) -> bool {
     String::from_utf8_lossy(listing).lines().any(|line| {
         let mut fields = line.split_whitespace();
-        fields.next().is_some_and(|flags| flags.contains('D'))
-            && fields.next() == Some(format)
+        fields.next().is_some_and(|flags| flags.contains('D')) && fields.next() == Some(format)
     })
 }
 
@@ -196,10 +195,7 @@ mod tests {
 
         assert!(ffmpeg_device_listing_supports(listing.as_bytes(), "pulse"));
         assert!(ffmpeg_device_listing_supports(listing.as_bytes(), "alsa"));
-        assert!(!ffmpeg_device_listing_supports(
-            listing.as_bytes(),
-            "sdl2"
-        ));
+        assert!(!ffmpeg_device_listing_supports(listing.as_bytes(), "sdl2"));
     }
 
     #[test]
