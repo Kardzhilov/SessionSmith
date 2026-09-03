@@ -130,7 +130,12 @@ where
             .map_err(|(_, error)| error)
             .with_context(|| format!("closing temporary index {}", temporary.display()))?;
         validate(&temporary)?;
-        std::fs::File::open(&temporary)?.sync_all()?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary)
+            .with_context(|| format!("opening migrated index for sync {}", temporary.display()))?
+            .sync_all()
+            .with_context(|| format!("syncing migrated index {}", temporary.display()))?;
         std::fs::rename(&temporary, destination)
             .with_context(|| format!("installing migrated index {}", destination.display()))?;
         sync_directory(parent)?;
