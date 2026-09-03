@@ -589,11 +589,17 @@ fn sync_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     fs::File::open(path)
         .with_context(|| format!("opening directory for sync {}", path.display()))?
         .sync_all()
         .with_context(|| format!("syncing directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn sync_tree(root: &Path) -> Result<()> {
@@ -1418,7 +1424,7 @@ mod tests {
         fs::write(output.join("old/artifact.txt"), "preserved").unwrap();
         let mut new_campaign = old_campaign.clone();
         new_campaign.campaign.name = "New".into();
-        new_campaign.source_path = Some(campaigns.join("new.toml"));
+        new_campaign.source_path = Some(future_source_path(&campaigns.join("new.toml")));
         old_campaign.source_path = Some(future_source_path(&old_path));
         for campaign in [&old_campaign, &new_campaign] {
             let index = crate::index::campaign_index_path_at(&cache, campaign);

@@ -183,11 +183,17 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     std::fs::File::open(path)
         .with_context(|| format!("opening directory for sync {}", path.display()))?
         .sync_all()
         .with_context(|| format!("syncing directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn init_schema(conn: &Connection) -> Result<()> {

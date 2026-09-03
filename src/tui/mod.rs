@@ -481,6 +481,20 @@ mod tests {
         (rt, app)
     }
 
+    fn select_test_campaign(app: &mut App) {
+        let path = std::path::PathBuf::from("campaigns/test-campaign.toml");
+        let mut campaign = crate::config::CampaignConfig::default();
+        campaign.campaign.name = "Test Campaign".into();
+        campaign.source_path = Some(path.clone());
+        app.campaigns = vec![CampaignEntry {
+            name: campaign.campaign.name.clone(),
+            path,
+        }];
+        app.campaign_idx = 0;
+        app.campaign = Some(campaign);
+        app.camp_state.select(Some(0));
+    }
+
     #[test]
     fn renders_all_states_without_panic() {
         let (_rt, mut app) = new_app();
@@ -531,6 +545,7 @@ mod tests {
     #[test]
     fn campaign_management_stays_inside_the_tui() {
         let (_rt, mut app) = new_app();
+        select_test_campaign(&mut app);
 
         app.on_key(KeyEvent::from(KeyCode::Char('N')));
         assert!(matches!(&app.overlay, super::app::Overlay::CampaignForm(_)));
@@ -938,6 +953,7 @@ mod tests {
     #[test]
     fn overlay_click_targets_and_paste_cover_interactive_workflows() {
         let (_rt, mut app) = new_app();
+        select_test_campaign(&mut app);
         app.on_key(KeyEvent::from(KeyCode::Char('F')));
         let _ = render_to_buffer(&mut app, 110, 32);
         assert!(app.hit_rect(HitTarget::TextPromptInput).is_some());

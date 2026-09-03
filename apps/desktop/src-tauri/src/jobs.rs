@@ -2207,6 +2207,8 @@ fn workspace_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::approved_export_session_dir;
     use super::{
         apply_event, artifacts_from_ids, import_request, log_rebuild_request, managed_export_dir,
         notes_request, process_request, push_log, recording_request, validate_asr_model,
@@ -2215,8 +2217,6 @@ mod tests {
         ModelAction, ModelRequest, NotesRequest, ProcessRequest, RecordRequest, SpeakerMapEntry,
         SpeakerMapRequest, TranscribeRequest, LOG_TAIL_LIMIT,
     };
-    #[cfg(unix)]
-    use super::approved_export_session_dir;
     use sessionsmith::jobs::report::JobEvent;
     use std::{
         fs,

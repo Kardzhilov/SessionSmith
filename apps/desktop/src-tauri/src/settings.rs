@@ -140,8 +140,8 @@ pub(crate) fn write_app_settings(request: AppSettingsWriteRequest) -> Result<App
         return Err("Select an available application theme.".into());
     }
     let path = GlobalConfig::path().map_err(|error| error.to_string())?;
-    let current = sessionsmith::config::read_desktop_settings(&path)
-        .map_err(|error| error.to_string())?;
+    let current =
+        sessionsmith::config::read_desktop_settings(&path).map_err(|error| error.to_string())?;
     if current.revision != request.expected_revision {
         return Err("app settings changed since they were read".into());
     }
@@ -170,8 +170,8 @@ pub(crate) fn write_app_settings(request: AppSettingsWriteRequest) -> Result<App
 
 pub(crate) fn onboarding_state() -> Result<OnboardingState, String> {
     let path = GlobalConfig::path().map_err(|error| error.to_string())?;
-    let result = sessionsmith::config::read_desktop_settings(&path)
-        .map_err(|error| error.to_string())?;
+    let result =
+        sessionsmith::config::read_desktop_settings(&path).map_err(|error| error.to_string())?;
     Ok(build_onboarding_state(result))
 }
 
@@ -192,20 +192,17 @@ fn complete_onboarding_at(
     if !matches!(request.outcome.as_str(), "finished" | "skipped") {
         return Err("Onboarding outcome must be finished or skipped.".into());
     }
-    let current = sessionsmith::config::read_desktop_settings(path)
-        .map_err(|error| error.to_string())?;
+    let current =
+        sessionsmith::config::read_desktop_settings(path).map_err(|error| error.to_string())?;
     if current.revision != request.expected_revision {
         return Err("app settings changed since onboarding was opened".into());
     }
     let mut desktop = current.settings;
     desktop.onboarding_completed_version = request.version;
     desktop.onboarding_outcome = request.outcome;
-    let result = sessionsmith::config::write_desktop_settings(
-        path,
-        &request.expected_revision,
-        desktop,
-    )
-    .map_err(|error| error.to_string())?;
+    let result =
+        sessionsmith::config::write_desktop_settings(path, &request.expected_revision, desktop)
+            .map_err(|error| error.to_string())?;
     Ok(build_onboarding_state(result))
 }
 
@@ -270,12 +267,9 @@ fn create_campaign_in(
         preset_id,
         request.notes.trim().to_string(),
     );
-    let path = sessionsmith::campaign_ops::create_campaign(
-        &root.join("campaigns"),
-        output_dir,
-        &config,
-    )
-    .map_err(|error| error.to_string())?;
+    let path =
+        sessionsmith::campaign_ops::create_campaign(&root.join("campaigns"), output_dir, &config)
+            .map_err(|error| error.to_string())?;
     let campaign_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -1123,18 +1117,16 @@ mod tests {
     fn campaign_creation_uses_core_scaffolding_and_rejects_config_collision() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("output");
-        let created = create_campaign_in(directory.path(), &output, create_request("My Game"))
-            .unwrap();
+        let created =
+            create_campaign_in(directory.path(), &output, create_request("My Game")).unwrap();
         assert_eq!(created.campaign_id, "my-game");
-        let config = CampaignConfig::load(
-            &directory.path().join("campaigns").join("my-game.toml"),
-        )
-        .unwrap();
+        let config =
+            CampaignConfig::load(&directory.path().join("campaigns").join("my-game.toml")).unwrap();
         assert_eq!(config.campaign.name, "My Game");
         assert_eq!(config.players[0].character, "Mara");
 
-        let error = create_campaign_in(directory.path(), &output, create_request("My Game"))
-            .unwrap_err();
+        let error =
+            create_campaign_in(directory.path(), &output, create_request("My Game")).unwrap_err();
         assert!(error.contains("campaign already exists"));
     }
 
@@ -1143,8 +1135,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("output");
         std::fs::create_dir_all(output.join("my-game")).unwrap();
-        let error = create_campaign_in(directory.path(), &output, create_request("My Game"))
-            .unwrap_err();
+        let error =
+            create_campaign_in(directory.path(), &output, create_request("My Game")).unwrap_err();
         assert!(error.contains("campaign output already exists"));
 
         let mut invalid = create_request("Another Game");
@@ -1152,8 +1144,8 @@ mod tests {
         let error = create_campaign_in(directory.path(), &output, invalid).unwrap_err();
         assert!(error.contains("unknown system preset"));
 
-        let error = create_campaign_in(directory.path(), &output, create_request("   "))
-            .unwrap_err();
+        let error =
+            create_campaign_in(directory.path(), &output, create_request("   ")).unwrap_err();
         assert!(error.contains("campaign name cannot be empty"));
     }
 }
