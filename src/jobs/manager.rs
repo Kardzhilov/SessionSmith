@@ -37,6 +37,7 @@ pub enum JobKind {
     Reindex,
     CandidateResolve,
     SpeakerMap,
+    SessionRename,
     Model,
     Export,
     Record,

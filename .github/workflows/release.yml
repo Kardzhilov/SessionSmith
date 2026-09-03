@@ -1,151 +1,92 @@
-name: CI & Release
+name: Desktop Release
 
-# Runs on every push to main: tests first, then (only if tests pass) builds the
-# release binary and publishes a GitHub Release versioned by UTC date/time.
 on:
   push:
-    branches: [main]
-  workflow_dispatch: {}
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to build
+        required: true
+        type: string
 
-# Allow the built-in GITHUB_TOKEN to create tags/releases.
 permissions:
   contents: write
 
-# Don't cancel an in-progress release if another push lands; let each finish.
 concurrency:
-  group: release-main
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  windows-test:
-    name: Test on Windows
-    runs-on: windows-latest
+  release:
+    name: Bundle (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-22.04
+          - platform: macos
+            os: macos-latest
+          - platform: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-      - name: Run portable test suite
-        run: cargo test --no-default-features --all-targets --locked
-
-  changes:
-    name: Detect relevant changes
-    runs-on: ubuntu-latest
-    # Skip on forks so their pushes don't fail trying to publish releases.
-    if: github.repository == 'Kardzhilov/SessionSmith'
-    outputs:
-      run: ${{ steps.filter.outputs.run }}
-    steps:
-      - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      # Decide whether this push contains anything other than docs/README.
-      # We diff the ENTIRE push range (github.event.before -> github.sha), not
-      # just the tip commit, so a batch whose last commit is docs-only still
-      # releases when an earlier commit touched real code.
-      - name: Determine whether non-doc files changed
-        id: filter
-        run: |
-          set -uo pipefail
-
-          # Manual runs (workflow_dispatch) and non-push events always release.
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "Non-push event — running."
-            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-
-          before="${{ github.event.before }}"
-          after="${{ github.sha }}"
-          zero="0000000000000000000000000000000000000000"
-
-          # First push to the branch, or the base commit isn't available:
-          # be safe and run.
-          if [ -z "$before" ] || [ "$before" = "$zero" ] \
-             || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
-            echo "First push or unknown base commit — running."
-            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-
-          changed="$(git diff --name-only "$before" "$after")"
-          echo "Files changed across this push:"
-          echo "$changed"
-
-          # A file is a "doc" if it is a Markdown file (anywhere) or lives under
-          # docs/. If ANY changed file is NOT a doc, we release.
-          if printf '%s\n' "$changed" | grep -qvE '(\.md$|^docs/)'; then
-            echo "Non-doc changes detected — running release."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Only docs/README changed — skipping release."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  release:
-    name: Test & Release
-    runs-on: ubuntu-latest
-    needs: changes
-    # Only release when the change filter says so (also skips on forks, since
-    # the `changes` job doesn't run there and this output is then empty).
-    if: needs.changes.outputs.run == 'true'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # The default build compiles the bundled whisper.cpp (via whisper-rs),
-      # which needs cmake + clang/libclang for bindgen. (Runtime binary is
-      # self-contained; these are build-time only.)
-      - name: Install build dependencies
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-
-      # Gate: the release steps below only run if this succeeds.
-      - name: Run tests
-        run: cargo test --release --locked
-
-      - name: Build release binary
-        run: cargo build --release --locked --bin sessionsmith
-
-      - name: Compute version (UTC date/time)
-        id: ver
-        run: echo "version=$(date -u +'%Y.%m.%d.%H%M%S')" >> "$GITHUB_OUTPUT"
-
-      - name: Package artifacts
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Verify tag matches the app version
+        shell: bash
         run: |
-          mkdir -p dist
-          cp target/release/sessionsmith dist/sessionsmith-linux-x86_64
-          cd dist
-          sha256sum sessionsmith-linux-x86_64 > sessionsmith-linux-x86_64.sha256
-
-      - name: Create GitHub Release
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          package_version="$(node -p "require('./apps/desktop/package.json').version")"
+          desktop_version="$(sed -n '/^version = /{s/version = "\([^"]*\)"/\1/p;q}' apps/desktop/src-tauri/Cargo.toml)"
+          core_version="$(sed -n '/^version = /{s/version = "\([^"]*\)"/\1/p;q}' Cargo.toml)"
+          test "$package_version" = "$desktop_version"
+          test "$package_version" = "$core_version"
+          test "$tag" = "v$package_version"
+      - name: Build and upload desktop bundles
+        uses: tauri-apps/tauri-action@v0
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          version="${{ steps.ver.outputs.version }}"
-          short="${GITHUB_SHA:0:7}"
-          {
-            echo "Automated release built from \`${short}\` on $(date -u +'%Y-%m-%d %H:%M UTC')."
-            echo ""
-            echo "**Asset:** \`sessionsmith-linux-x86_64\` — Linux x86_64, CPU whisper build."
-            echo "For GPU builds, build from source with \`--features cuda|vulkan|metal\` (see \`docs/setup.md\`)."
-            echo ""
-            echo "Commit: ${GITHUB_SHA}"
-          } > release-notes.md
-          gh release create "v${version}" \
-            dist/sessionsmith-linux-x86_64 \
-            dist/sessionsmith-linux-x86_64.sha256 \
-            --title "v${version}" \
-            --notes-file release-notes.md
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          releaseName: SessionSmith ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          releaseBody: See the assets below to install SessionSmith for your platform.
+          releaseDraft: true
+          prerelease: false
+
+  publish:
+    name: Publish release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish completed draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false

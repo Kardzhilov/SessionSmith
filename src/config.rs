@@ -28,7 +28,50 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
+    pub desktop: DesktopConfig,
+    #[serde(default)]
     pub hardware: Option<HardwareProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopConfig {
+    #[serde(default = "default_date_format")]
+    pub date_format: String,
+    #[serde(default = "default_appearance")]
+    pub appearance: String,
+    #[serde(default = "default_desktop_theme")]
+    pub theme: String,
+    #[serde(default = "default_volume")]
+    pub player_volume: u8,
+    #[serde(default)]
+    pub onboarding_completed_version: u32,
+    #[serde(default)]
+    pub onboarding_outcome: String,
+}
+
+fn default_date_format() -> String {
+    "dmy".into()
+}
+
+fn default_appearance() -> String {
+    "system".into()
+}
+
+fn default_desktop_theme() -> String {
+    "default".into()
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            date_format: default_date_format(),
+            appearance: default_appearance(),
+            theme: default_desktop_theme(),
+            player_volume: default_volume(),
+            onboarding_completed_version: 0,
+            onboarding_outcome: String::new(),
+        }
+    }
 }
 
 /// Full-screen TUI preferences.
@@ -565,6 +608,63 @@ pub struct CampaignEditableSettingsResult {
     pub revision: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct CampaignEditableIdentity {
+    pub gm: String,
+    pub setting: String,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CampaignEditableSpeaker {
+    pub label: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CampaignEditableOutputs {
+    pub default: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CampaignEditableSystem {
+    pub preset: String,
+    pub overrides: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CampaignEditableBackend {
+    pub kind: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CampaignEditableAsr {
+    pub model: Option<String>,
+    pub threads: Option<u32>,
+    pub diarize: Option<bool>,
+    pub vad: Option<bool>,
+    pub device: Option<String>,
+    pub engine: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CampaignEditablePrompts {
+    pub bullets: Option<String>,
+    pub dm_notes: Option<String>,
+    pub recap: Option<String>,
+    pub summary: Option<String>,
+    pub story: Option<String>,
+    pub quotes: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DesktopSettingsResult {
+    pub settings: DesktopConfig,
+    pub revision: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionConfig {
     /// Literal, case-sensitive corrections applied longest-first to transcript
@@ -675,7 +775,7 @@ impl CampaignConfig {
         let text = std::str::from_utf8(&bytes)
             .with_context(|| format!("campaign config is not UTF-8: {}", path.display()))?;
         let mut cfg: Self =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+            toml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.source_path = std::fs::canonicalize(path)
             .ok()
             .or_else(|| Some(path.to_path_buf()));
@@ -767,6 +867,138 @@ const MAX_EDITABLE_PLAYERS: usize = 100;
 const MAX_EDITABLE_VOCABULARY: usize = 250;
 const MAX_EDITABLE_REPLACEMENTS: usize = 250;
 const MAX_EDITABLE_TEXT_LENGTH: usize = 240;
+const MAX_EDITABLE_NOTES_LENGTH: usize = 8_000;
+const MAX_EDITABLE_SPEAKERS: usize = 40;
+const MAX_EDITABLE_SPEAKER_NAME_LENGTH: usize = 100;
+
+pub fn read_desktop_settings(path: &Path) -> Result<DesktopSettingsResult> {
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = toml::to_string_pretty(&GlobalConfig::default())?;
+        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+        set_private_permissions(path)?;
+    }
+    let contents = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let text = std::str::from_utf8(&contents)
+        .with_context(|| format!("global config is not UTF-8: {}", path.display()))?;
+    let config: GlobalConfig =
+        toml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(DesktopSettingsResult {
+        settings: normalize_desktop_settings(config.desktop)?,
+        revision: crate::util::content_revision(&contents),
+    })
+}
+
+pub fn write_desktop_settings(
+    path: &Path,
+    expected_revision: &str,
+    settings: DesktopConfig,
+) -> Result<DesktopSettingsResult> {
+    validate_revision(expected_revision)?;
+    let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if crate::util::content_revision(&original) != expected_revision {
+        bail!("app settings changed since they were read");
+    }
+    let original = std::str::from_utf8(&original)
+        .with_context(|| format!("global config is not UTF-8: {}", path.display()))?;
+    let mut document = original
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let settings = normalize_desktop_settings(settings)?;
+    let desktop = document
+        .as_table_mut()
+        .entry("desktop")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[desktop] must be a TOML table to edit app settings"))?;
+    desktop.insert("date_format", value(&settings.date_format));
+    desktop.insert("appearance", value(&settings.appearance));
+    desktop.insert("theme", value(&settings.theme));
+    desktop.insert("player_volume", value(i64::from(settings.player_volume)));
+    desktop.insert(
+        "onboarding_completed_version",
+        value(i64::from(settings.onboarding_completed_version)),
+    );
+    desktop.insert("onboarding_outcome", value(&settings.onboarding_outcome));
+
+    let updated = document.to_string();
+    let _: GlobalConfig = toml::from_str(&updated)
+        .with_context(|| format!("validating updated {}", path.display()))?;
+    match crate::util::atomic_replace_if_revision(path, expected_revision, updated.as_bytes()) {
+        Ok(()) => Ok(DesktopSettingsResult {
+            settings,
+            revision: crate::util::content_revision(updated.as_bytes()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            bail!("app settings changed since they were read")
+        }
+        Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+    }
+}
+
+/// Replace a campaign file ID in persisted sidebar ordering without
+/// reserializing unrelated global configuration.
+pub fn replace_campaign_order_id(path: &Path, old_id: &str, new_id: &str) -> Result<bool> {
+    if old_id == new_id || !path.is_file() {
+        return Ok(false);
+    }
+    let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let revision = crate::util::content_revision(&original);
+    let text = std::str::from_utf8(&original)
+        .with_context(|| format!("global config is not UTF-8: {}", path.display()))?;
+    let mut document = text
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let Some(order) = document
+        .as_table_mut()
+        .get_mut("ui")
+        .and_then(|item| item.as_table_mut())
+        .and_then(|table| table.get_mut("campaign_order"))
+        .and_then(|item| item.as_array_mut())
+    else {
+        return Ok(false);
+    };
+    let positions = (0..order.len())
+        .filter(|index| order.get(*index).and_then(|value| value.as_str()) == Some(old_id))
+        .collect::<Vec<_>>();
+    if positions.is_empty() {
+        return Ok(false);
+    }
+    for index in positions {
+        order.replace(index, new_id);
+    }
+    let updated = document.to_string();
+    let _: GlobalConfig = toml::from_str(&updated)
+        .with_context(|| format!("validating updated {}", path.display()))?;
+    crate::util::atomic_replace_if_revision(path, &revision, updated.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+fn normalize_desktop_settings(settings: DesktopConfig) -> Result<DesktopConfig> {
+    if !matches!(settings.date_format.as_str(), "dmy" | "mdy" | "ymd" | "iso") {
+        bail!("date format must be dmy, mdy, ymd, or iso");
+    }
+    if !matches!(settings.appearance.as_str(), "system" | "light" | "dark") {
+        bail!("appearance must be system, light, or dark");
+    }
+    let theme = normalize_editable_text(&settings.theme, "theme", true)?;
+    if settings.player_volume > 100 {
+        bail!("player volume must be between 0 and 100");
+    }
+    if !matches!(
+        settings.onboarding_outcome.as_str(),
+        "" | "finished" | "skipped"
+    ) {
+        bail!("onboarding outcome must be empty, finished, or skipped");
+    }
+    if settings.onboarding_completed_version == 0 && !settings.onboarding_outcome.is_empty() {
+        bail!("onboarding outcome requires a completed onboarding version");
+    }
+    Ok(DesktopConfig { theme, ..settings })
+}
 
 /// Apply the narrow editable-settings surface without reserializing unrelated
 /// campaign TOML. The caller supplies the revision obtained while reading the
@@ -790,6 +1022,340 @@ pub fn write_campaign_editable_settings(
 
     replace_players(&mut document, &settings.players);
     replace_transcription_settings(&mut document, &settings)?;
+
+    let updated = document.to_string();
+    let config: CampaignConfig = toml::from_str(&updated)
+        .with_context(|| format!("validating updated {}", path.display()))?;
+    match crate::util::atomic_replace_if_revision(path, expected_revision, updated.as_bytes()) {
+        Ok(()) => Ok(CampaignEditableSettingsResult {
+            config,
+            revision: crate::util::content_revision(updated.as_bytes()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            bail!("campaign settings changed since they were read")
+        }
+        Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+    }
+}
+
+pub fn write_campaign_editable_identity(
+    path: &Path,
+    expected_revision: &str,
+    identity: CampaignEditableIdentity,
+) -> Result<CampaignEditableSettingsResult> {
+    validate_revision(expected_revision)?;
+    let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if crate::util::content_revision(&original) != expected_revision {
+        bail!("campaign settings changed since they were read");
+    }
+    let original = std::str::from_utf8(&original)
+        .with_context(|| format!("campaign config is not UTF-8: {}", path.display()))?;
+    let mut document = original
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let identity = CampaignEditableIdentity {
+        gm: normalize_editable_text(&identity.gm, "game master", false)?,
+        setting: normalize_editable_text(&identity.setting, "setting", false)?,
+        notes: normalize_editable_notes(&identity.notes)?,
+    };
+    let campaign = document
+        .as_table_mut()
+        .entry("campaign")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[campaign] must be a TOML table to edit identity settings"))?;
+    campaign.insert("gm", value(&identity.gm));
+    campaign.insert("setting", value(&identity.setting));
+    campaign.insert("notes", value(&identity.notes));
+
+    let updated = document.to_string();
+    let config: CampaignConfig = toml::from_str(&updated)
+        .with_context(|| format!("validating updated {}", path.display()))?;
+    match crate::util::atomic_replace_if_revision(path, expected_revision, updated.as_bytes()) {
+        Ok(()) => Ok(CampaignEditableSettingsResult {
+            config,
+            revision: crate::util::content_revision(updated.as_bytes()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            bail!("campaign settings changed since they were read")
+        }
+        Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+    }
+}
+
+pub fn write_campaign_editable_speakers(
+    path: &Path,
+    expected_revision: &str,
+    speakers: Vec<CampaignEditableSpeaker>,
+) -> Result<CampaignEditableSettingsResult> {
+    validate_revision(expected_revision)?;
+    if speakers.len() > MAX_EDITABLE_SPEAKERS {
+        bail!("no more than {MAX_EDITABLE_SPEAKERS} speaker defaults may be saved at once");
+    }
+    let mut normalized = BTreeMap::new();
+    for speaker in speakers {
+        let name = normalize_editable_text(&speaker.name, "speaker name", true)?;
+        if name.chars().count() > MAX_EDITABLE_SPEAKER_NAME_LENGTH {
+            bail!("speaker name must be at most {MAX_EDITABLE_SPEAKER_NAME_LENGTH} characters");
+        }
+        let (label, _) = crate::speakers::parse_mapping(&format!("{}={name}", speaker.label))?;
+        if normalized.insert(label, name).is_some() {
+            bail!("speaker labels must be unique");
+        }
+    }
+
+    let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if crate::util::content_revision(&original) != expected_revision {
+        bail!("campaign settings changed since they were read");
+    }
+    let original = std::str::from_utf8(&original)
+        .with_context(|| format!("campaign config is not UTF-8: {}", path.display()))?;
+    let mut document = original
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let transcription = document
+        .as_table_mut()
+        .entry("transcription")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[transcription] must be a TOML table to edit speaker defaults"))?;
+    if normalized.is_empty() {
+        transcription.remove("speakers");
+    } else {
+        let mut table = Table::new();
+        for (label, name) in normalized {
+            table.insert(&label, value(name));
+        }
+        transcription.insert("speakers", Item::Table(table));
+    }
+
+    let updated = document.to_string();
+    let config: CampaignConfig = toml::from_str(&updated)
+        .with_context(|| format!("validating updated {}", path.display()))?;
+    match crate::util::atomic_replace_if_revision(path, expected_revision, updated.as_bytes()) {
+        Ok(()) => Ok(CampaignEditableSettingsResult {
+            config,
+            revision: crate::util::content_revision(updated.as_bytes()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            bail!("campaign settings changed since they were read")
+        }
+        Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+    }
+}
+
+pub fn write_campaign_editable_outputs(
+    path: &Path,
+    expected_revision: &str,
+    outputs: CampaignEditableOutputs,
+) -> Result<CampaignEditableSettingsResult> {
+    validate_revision(expected_revision)?;
+    let mut seen = BTreeSet::new();
+    let mut defaults = Vec::with_capacity(outputs.default.len());
+    for output in outputs.default {
+        let output = normalize_editable_text(&output, "output artifact", true)?;
+        let artifact = crate::prompts::ALL_ARTIFACTS
+            .iter()
+            .find(|artifact| artifact.id() == output)
+            .ok_or_else(|| anyhow!("unknown output artifact '{output}'"))?;
+        if !seen.insert(artifact.id()) {
+            bail!("output artifacts must be unique");
+        }
+        defaults.push(artifact.id().to_string());
+    }
+
+    let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if crate::util::content_revision(&original) != expected_revision {
+        bail!("campaign settings changed since they were read");
+    }
+    let original = std::str::from_utf8(&original)
+        .with_context(|| format!("campaign config is not UTF-8: {}", path.display()))?;
+    let mut document = original
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let outputs = document
+        .as_table_mut()
+        .entry("outputs")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[outputs] must be a TOML table to edit output defaults"))?;
+    let mut values = Array::new();
+    for output in defaults {
+        values.push(output);
+    }
+    outputs.insert("default", value(values));
+
+    let updated = document.to_string();
+    let config: CampaignConfig = toml::from_str(&updated)
+        .with_context(|| format!("validating updated {}", path.display()))?;
+    match crate::util::atomic_replace_if_revision(path, expected_revision, updated.as_bytes()) {
+        Ok(()) => Ok(CampaignEditableSettingsResult {
+            config,
+            revision: crate::util::content_revision(updated.as_bytes()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            bail!("campaign settings changed since they were read")
+        }
+        Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+    }
+}
+
+pub fn write_campaign_editable_system(
+    path: &Path,
+    expected_revision: &str,
+    system: CampaignEditableSystem,
+) -> Result<CampaignEditableSettingsResult> {
+    validate_revision(expected_revision)?;
+    let preset = normalize_editable_text(&system.preset, "system preset", true)?;
+    crate::presets::load(&preset)?;
+    let overrides = normalize_editable_multiline(
+        &system.overrides,
+        "system overrides",
+        MAX_EDITABLE_NOTES_LENGTH,
+    )?;
+
+    let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if crate::util::content_revision(&original) != expected_revision {
+        bail!("campaign settings changed since they were read");
+    }
+    let original = std::str::from_utf8(&original)
+        .with_context(|| format!("campaign config is not UTF-8: {}", path.display()))?;
+    let mut document = original
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let system = document
+        .as_table_mut()
+        .entry("system")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[system] must be a TOML table to edit game system settings"))?;
+    system.insert("preset", value(preset));
+    system.insert("overrides", value(overrides));
+
+    let updated = document.to_string();
+    let config: CampaignConfig = toml::from_str(&updated)
+        .with_context(|| format!("validating updated {}", path.display()))?;
+    match crate::util::atomic_replace_if_revision(path, expected_revision, updated.as_bytes()) {
+        Ok(()) => Ok(CampaignEditableSettingsResult {
+            config,
+            revision: crate::util::content_revision(updated.as_bytes()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            bail!("campaign settings changed since they were read")
+        }
+        Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
+    }
+}
+
+pub fn write_campaign_editable_backend(
+    path: &Path,
+    expected_revision: &str,
+    backend: CampaignEditableBackend,
+) -> Result<CampaignEditableSettingsResult> {
+    validate_revision(expected_revision)?;
+    let kind =
+        normalize_optional_choice(backend.kind, "backend", &["ollama", "openai", "anthropic"])?;
+    let model = normalize_optional_limited_text(backend.model, "backend model", 256)?;
+    let base_url = normalize_optional_limited_text(backend.base_url, "backend URL", 2_048)?;
+    if let Some(url) = &base_url {
+        let parsed = reqwest::Url::parse(url)
+            .with_context(|| "backend URL must be an absolute HTTP(S) URL")?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            bail!("backend URL must be HTTP(S) and cannot contain credentials");
+        }
+    }
+
+    write_campaign_section(path, expected_revision, "backend", |table| {
+        replace_optional_string(table, "kind", kind);
+        replace_optional_string(table, "base_url", base_url);
+        replace_optional_string(table, "model", model);
+        Ok(())
+    })
+}
+
+pub fn write_campaign_editable_asr(
+    path: &Path,
+    expected_revision: &str,
+    asr: CampaignEditableAsr,
+) -> Result<CampaignEditableSettingsResult> {
+    validate_revision(expected_revision)?;
+    let model = normalize_optional_limited_text(asr.model, "ASR model", 256)?;
+    if let Some(model) = &model {
+        if crate::asr::find(model).is_none() {
+            bail!("unknown ASR model '{model}'");
+        }
+    }
+    if matches!(asr.threads, Some(0 | 1025..)) {
+        bail!("ASR threads must be between 1 and 1024");
+    }
+    let device = normalize_optional_choice(asr.device, "ASR device", &["auto", "cuda", "cpu"])?;
+    let engine = normalize_optional_choice(
+        asr.engine,
+        "ASR engine",
+        &["auto", "local", "whisper-cli", "whisperx"],
+    )?;
+
+    write_campaign_section(path, expected_revision, "asr", |table| {
+        replace_optional_string(table, "model", model);
+        replace_optional_integer(table, "threads", asr.threads.map(i64::from));
+        replace_optional_bool(table, "diarize", asr.diarize);
+        replace_optional_bool(table, "vad", asr.vad);
+        replace_optional_string(table, "device", device);
+        replace_optional_string(table, "engine", engine);
+        Ok(())
+    })
+}
+
+pub fn write_campaign_editable_prompts(
+    path: &Path,
+    expected_revision: &str,
+    prompts: CampaignEditablePrompts,
+) -> Result<CampaignEditableSettingsResult> {
+    validate_revision(expected_revision)?;
+    let prompts = CampaignEditablePrompts {
+        bullets: normalize_optional_multiline(prompts.bullets, "bullets prompt")?,
+        dm_notes: normalize_optional_multiline(prompts.dm_notes, "DM notes prompt")?,
+        recap: normalize_optional_multiline(prompts.recap, "recap prompt")?,
+        summary: normalize_optional_multiline(prompts.summary, "summary prompt")?,
+        story: normalize_optional_multiline(prompts.story, "story prompt")?,
+        quotes: normalize_optional_multiline(prompts.quotes, "quotes prompt")?,
+    };
+    write_campaign_section(path, expected_revision, "prompts", |table| {
+        replace_optional_string(table, "bullets", prompts.bullets);
+        replace_optional_string(table, "dm_notes", prompts.dm_notes);
+        replace_optional_string(table, "recap", prompts.recap);
+        replace_optional_string(table, "summary", prompts.summary);
+        replace_optional_string(table, "story", prompts.story);
+        replace_optional_string(table, "quotes", prompts.quotes);
+        Ok(())
+    })
+}
+
+fn write_campaign_section(
+    path: &Path,
+    expected_revision: &str,
+    section: &str,
+    update: impl FnOnce(&mut Table) -> Result<()>,
+) -> Result<CampaignEditableSettingsResult> {
+    let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if crate::util::content_revision(&original) != expected_revision {
+        bail!("campaign settings changed since they were read");
+    }
+    let original = std::str::from_utf8(&original)
+        .with_context(|| format!("campaign config is not UTF-8: {}", path.display()))?;
+    let mut document = original
+        .parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let table = document
+        .as_table_mut()
+        .entry(section)
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[{section}] must be a TOML table to edit these settings"))?;
+    update(table)?;
 
     let updated = document.to_string();
     let config: CampaignConfig = toml::from_str(&updated)
@@ -885,6 +1451,107 @@ fn normalize_editable_text(value: &str, label: &str, required: bool) -> Result<S
         bail!("{label} cannot contain control characters");
     }
     Ok(value.into())
+}
+
+fn normalize_editable_notes(value: &str) -> Result<String> {
+    normalize_editable_multiline(value, "campaign notes", MAX_EDITABLE_NOTES_LENGTH)
+}
+
+fn normalize_editable_multiline(value: &str, label: &str, max_length: usize) -> Result<String> {
+    let value = value.trim();
+    if value.chars().count() > max_length {
+        bail!("{label} must be at most {max_length} characters");
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        bail!("{label} cannot contain unsupported control characters");
+    }
+    Ok(value.into())
+}
+
+fn normalize_optional_limited_text(
+    value: Option<String>,
+    label: &str,
+    max_length: usize,
+) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() {
+                return Ok(None);
+            }
+            if value.chars().count() > max_length {
+                bail!("{label} must be at most {max_length} characters");
+            }
+            if value.chars().any(char::is_control) {
+                bail!("{label} cannot contain control characters");
+            }
+            Ok(Some(value.into()))
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn normalize_optional_multiline(value: Option<String>, label: &str) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            if value.trim().is_empty() {
+                Ok(None)
+            } else {
+                normalize_editable_multiline(&value, label, MAX_EDITABLE_NOTES_LENGTH).map(Some)
+            }
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn normalize_optional_choice(
+    value: Option<String>,
+    label: &str,
+    choices: &[&str],
+) -> Result<Option<String>> {
+    let value = normalize_optional_limited_text(value, label, MAX_EDITABLE_TEXT_LENGTH)?;
+    if let Some(value) = &value {
+        if !choices.contains(&value.as_str()) {
+            bail!("{label} must be one of: {}", choices.join(", "));
+        }
+    }
+    Ok(value)
+}
+
+fn replace_optional_string(table: &mut Table, key: &str, value_to_write: Option<String>) {
+    match value_to_write {
+        Some(value_to_write) => {
+            table.insert(key, value(value_to_write));
+        }
+        None => {
+            table.remove(key);
+        }
+    }
+}
+
+fn replace_optional_integer(table: &mut Table, key: &str, value_to_write: Option<i64>) {
+    match value_to_write {
+        Some(value_to_write) => {
+            table.insert(key, value(value_to_write));
+        }
+        None => {
+            table.remove(key);
+        }
+    }
+}
+
+fn replace_optional_bool(table: &mut Table, key: &str, value_to_write: Option<bool>) {
+    match value_to_write {
+        Some(value_to_write) => {
+            table.insert(key, value(value_to_write));
+        }
+        None => {
+            table.remove(key);
+        }
+    }
 }
 
 fn replace_players(document: &mut DocumentMut, players: &[Player]) {
@@ -1043,6 +1710,77 @@ mod tests {
     }
 
     #[test]
+    fn desktop_settings_default_to_dmy_system_and_half_volume() {
+        let config: GlobalConfig = toml::from_str("").unwrap();
+        assert_eq!(config.desktop, DesktopConfig::default());
+        assert_eq!(config.desktop.date_format, "dmy");
+        assert_eq!(config.desktop.appearance, "system");
+        assert_eq!(config.desktop.theme, "default");
+        assert_eq!(config.desktop.player_volume, 50);
+        assert_eq!(config.desktop.onboarding_completed_version, 0);
+        assert!(config.desktop.onboarding_outcome.is_empty());
+    }
+
+    #[test]
+    fn desktop_settings_writer_preserves_unowned_toml_and_rejects_invalid_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let source =
+            "# Keep this comment.\n[backend]\nkind = \"ollama\"\n\n[future]\nenabled = true\n";
+        std::fs::write(&path, source).unwrap();
+
+        let result = write_desktop_settings(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            DesktopConfig {
+                date_format: "dmy".into(),
+                appearance: "dark".into(),
+                theme: "default".into(),
+                player_volume: 64,
+                onboarding_completed_version: 1,
+                onboarding_outcome: "finished".into(),
+            },
+        )
+        .unwrap();
+        let updated = std::fs::read_to_string(&path).unwrap();
+        assert!(updated.contains("# Keep this comment."));
+        assert!(updated.contains("[future]"));
+        assert!(updated.contains("enabled = true"));
+        assert_eq!(result.settings.player_volume, 64);
+        assert_eq!(result.settings.onboarding_completed_version, 1);
+        assert_eq!(result.settings.onboarding_outcome, "finished");
+
+        let invalid = write_desktop_settings(
+            &path,
+            &result.revision,
+            DesktopConfig {
+                appearance: "sepia".into(),
+                ..result.settings
+            },
+        )
+        .unwrap_err();
+        assert!(invalid.to_string().contains("appearance must be"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), updated);
+    }
+
+    #[test]
+    fn desktop_settings_writer_rejects_stale_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let source = "[desktop]\ndate_format = \"dmy\"\n";
+        std::fs::write(&path, source).unwrap();
+
+        let error = write_desktop_settings(
+            &path,
+            &crate::util::content_revision(b"stale"),
+            DesktopConfig::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed since they were read"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
     fn editable_campaign_settings_preserve_unrelated_toml_comments() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("campaign.toml");
@@ -1106,6 +1844,434 @@ default = ["summary"]
     }
 
     #[test]
+    fn editable_campaign_identity_preserves_name_and_unrelated_toml() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = r#"# Keep heading.
+[campaign]
+name = "Table Test"
+gm = "Old GM"
+
+[backend]
+# Keep provider context.
+kind = "ollama"
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let result = write_campaign_editable_identity(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditableIdentity {
+                gm: " Mina ".into(),
+                setting: "The Shattered Coast".into(),
+                notes: "First line\nSecond line".into(),
+            },
+        )
+        .unwrap();
+
+        let updated = std::fs::read_to_string(&path).unwrap();
+        assert!(updated.contains("# Keep heading."));
+        assert!(updated.contains("# Keep provider context."));
+        assert_eq!(result.config.campaign.name, "Table Test");
+        assert_eq!(result.config.campaign.gm, "Mina");
+        assert_eq!(result.config.campaign.setting, "The Shattered Coast");
+        assert_eq!(result.config.campaign.notes, "First line\nSecond line");
+    }
+
+    #[test]
+    fn editable_campaign_identity_rejects_invalid_values_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+
+        let error = write_campaign_editable_identity(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditableIdentity {
+                gm: "Mina\u{7}".into(),
+                setting: String::new(),
+                notes: String::new(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("game master cannot contain control characters"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn editable_campaign_speakers_round_trip_and_preserve_unrelated_toml() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = r#"[campaign]
+name = "Table Test"
+
+[transcription]
+vocabulary = ["Damasus"]
+
+[transcription.speakers]
+SPEAKER_00 = "Old name"
+
+[backend]
+# Keep provider context.
+kind = "ollama"
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let result = write_campaign_editable_speakers(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            vec![
+                CampaignEditableSpeaker {
+                    label: "SPEAKER_01".into(),
+                    name: " Tamsin ".into(),
+                },
+                CampaignEditableSpeaker {
+                    label: "SPEAKER_00".into(),
+                    name: "Mina".into(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let updated = std::fs::read_to_string(path).unwrap();
+        assert!(updated.contains("# Keep provider context."));
+        assert_eq!(result.config.transcription.vocabulary, ["Damasus"]);
+        assert_eq!(result.config.transcription.speakers["SPEAKER_00"], "Mina");
+        assert_eq!(result.config.transcription.speakers["SPEAKER_01"], "Tamsin");
+    }
+
+    #[test]
+    fn editable_campaign_speakers_reject_duplicates_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+
+        let error = write_campaign_editable_speakers(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            vec![
+                CampaignEditableSpeaker {
+                    label: "SPEAKER_00".into(),
+                    name: "Mina".into(),
+                },
+                CampaignEditableSpeaker {
+                    label: " SPEAKER_00 ".into(),
+                    name: "Tamsin".into(),
+                },
+            ],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("speaker labels must be unique"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn editable_campaign_outputs_preserve_order_and_unrelated_toml() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = r#"[campaign]
+name = "Table Test"
+
+[outputs]
+default = ["summary"]
+
+[backend]
+# Keep provider context.
+kind = "ollama"
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let result = write_campaign_editable_outputs(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditableOutputs {
+                default: vec!["recap".into(), "quotes".into(), "bullets".into()],
+            },
+        )
+        .unwrap();
+
+        let updated = std::fs::read_to_string(path).unwrap();
+        assert!(updated.contains("# Keep provider context."));
+        assert_eq!(
+            result.config.outputs.default,
+            ["recap", "quotes", "bullets"]
+        );
+    }
+
+    #[test]
+    fn editable_campaign_outputs_reject_unknown_and_duplicate_ids_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+        let revision = crate::util::content_revision(source.as_bytes());
+
+        let unknown = write_campaign_editable_outputs(
+            &path,
+            &revision,
+            CampaignEditableOutputs {
+                default: vec!["timeline".into()],
+            },
+        )
+        .unwrap_err();
+        assert!(unknown.to_string().contains("unknown output artifact"));
+
+        let duplicate = write_campaign_editable_outputs(
+            &path,
+            &revision,
+            CampaignEditableOutputs {
+                default: vec!["summary".into(), "summary".into()],
+            },
+        )
+        .unwrap_err();
+        assert!(duplicate
+            .to_string()
+            .contains("output artifacts must be unique"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn editable_campaign_system_validates_preset_and_preserves_comments() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = r#"[campaign]
+name = "Table Test"
+
+[system]
+preset = "generic"
+
+[backend]
+# Keep provider context.
+kind = "ollama"
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let result = write_campaign_editable_system(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditableSystem {
+                preset: "dnd5e".into(),
+                overrides: "Track faction clocks.\nAvoid spoilers.".into(),
+            },
+        )
+        .unwrap();
+
+        let updated = std::fs::read_to_string(path).unwrap();
+        assert!(updated.contains("# Keep provider context."));
+        assert_eq!(result.config.system.preset, "dnd5e");
+        assert_eq!(
+            result.config.system.overrides,
+            "Track faction clocks.\nAvoid spoilers."
+        );
+    }
+
+    #[test]
+    fn editable_campaign_system_rejects_unknown_preset_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+
+        let error = write_campaign_editable_system(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditableSystem {
+                preset: "invented-system".into(),
+                overrides: String::new(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown system preset"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn editable_campaign_backend_and_asr_preserve_secrets_and_clear_owned_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = r#"[campaign]
+name = "Table Test"
+
+[backend]
+api_key = "keep-backend-secret"
+
+[asr]
+hf_token = "keep-asr-secret"
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let backend = write_campaign_editable_backend(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditableBackend {
+                kind: Some("openai".into()),
+                base_url: Some("https://api.example.test/v1".into()),
+                model: Some("notes-model".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(backend.config.backend.kind.as_deref(), Some("openai"));
+        assert_eq!(
+            backend.config.backend.api_key.as_deref(),
+            Some("keep-backend-secret")
+        );
+
+        let asr = write_campaign_editable_asr(
+            &path,
+            &backend.revision,
+            CampaignEditableAsr {
+                model: Some("base".into()),
+                threads: Some(8),
+                diarize: Some(true),
+                vad: Some(false),
+                device: Some("cpu".into()),
+                engine: Some("local".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(asr.config.asr.model.as_deref(), Some("base"));
+        assert_eq!(asr.config.asr.threads, Some(8));
+        assert_eq!(asr.config.asr.hf_token.as_deref(), Some("keep-asr-secret"));
+
+        let cleared = write_campaign_editable_backend(
+            &path,
+            &asr.revision,
+            CampaignEditableBackend {
+                kind: None,
+                base_url: None,
+                model: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(cleared.config.backend.kind, None);
+        assert_eq!(cleared.config.backend.base_url, None);
+        assert_eq!(cleared.config.backend.model, None);
+        assert_eq!(
+            cleared.config.backend.api_key.as_deref(),
+            Some("keep-backend-secret")
+        );
+    }
+
+    #[test]
+    fn editable_campaign_overrides_reject_invalid_values_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+        let revision = crate::util::content_revision(source.as_bytes());
+
+        let backend_error = write_campaign_editable_backend(
+            &path,
+            &revision,
+            CampaignEditableBackend {
+                kind: Some("local".into()),
+                base_url: Some("file:///tmp/socket".into()),
+                model: None,
+            },
+        )
+        .unwrap_err();
+        assert!(backend_error.to_string().contains("backend must be one of"));
+
+        let asr_error = write_campaign_editable_asr(
+            &path,
+            &revision,
+            CampaignEditableAsr {
+                model: Some("unknown-model".into()),
+                threads: None,
+                diarize: None,
+                vad: None,
+                device: None,
+                engine: None,
+            },
+        )
+        .unwrap_err();
+        assert!(asr_error.to_string().contains("unknown ASR model"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn editable_campaign_prompts_round_trip_clear_and_preserve_comments() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = r#"[campaign]
+name = "Table Test"
+
+[prompts]
+summary = "Old summary"
+story = "Old story"
+
+[backend]
+# Keep provider context.
+api_key = "keep-secret"
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let result = write_campaign_editable_prompts(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditablePrompts {
+                bullets: Some("Extract every event.\nKeep chronology.".into()),
+                dm_notes: None,
+                recap: Some("  ".into()),
+                summary: Some("New summary".into()),
+                story: None,
+                quotes: Some("Capture exact quotations.".into()),
+            },
+        )
+        .unwrap();
+
+        let updated = std::fs::read_to_string(path).unwrap();
+        assert!(updated.contains("# Keep provider context."));
+        assert!(updated.contains("api_key = \"keep-secret\""));
+        assert_eq!(
+            result.config.prompts.bullets.as_deref(),
+            Some("Extract every event.\nKeep chronology.")
+        );
+        assert_eq!(
+            result.config.prompts.summary.as_deref(),
+            Some("New summary")
+        );
+        assert_eq!(
+            result.config.prompts.quotes.as_deref(),
+            Some("Capture exact quotations.")
+        );
+        assert_eq!(result.config.prompts.recap, None);
+        assert_eq!(result.config.prompts.story, None);
+    }
+
+    #[test]
+    fn editable_campaign_prompts_reject_control_characters_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+
+        let error = write_campaign_editable_prompts(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditablePrompts {
+                bullets: Some("Bad\u{7}prompt".into()),
+                dm_notes: None,
+                recap: None,
+                summary: None,
+                story: None,
+                quotes: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported control characters"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
     fn editable_campaign_settings_reject_stale_revisions_without_writing() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("campaign.toml");
@@ -1124,6 +2290,106 @@ default = ["summary"]
         .unwrap_err();
 
         assert!(error.to_string().contains("changed since they were read"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn editable_campaign_settings_reject_duplicate_and_control_character_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+        let revision = crate::util::content_revision(source.as_bytes());
+
+        let duplicate_error = write_campaign_editable_settings(
+            &path,
+            &revision,
+            CampaignEditableSettings {
+                players: Vec::new(),
+                vocabulary: vec!["Damasus".into(), "Damasus".into()],
+                replacements: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(duplicate_error
+            .to_string()
+            .contains("vocabulary terms must be unique"));
+
+        let control_error = write_campaign_editable_settings(
+            &path,
+            &revision,
+            CampaignEditableSettings {
+                players: vec![Player {
+                    player: "Mina\nOther".into(),
+                    character: "Tamsin".into(),
+                    ancestry: String::new(),
+                    class: String::new(),
+                }],
+                vocabulary: Vec::new(),
+                replacements: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(control_error
+            .to_string()
+            .contains("player name cannot contain control characters"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn editable_campaign_settings_reject_non_table_transcription_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "transcription = \"invalid\"\n\n[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+
+        let error = write_campaign_editable_settings(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditableSettings {
+                players: Vec::new(),
+                vocabulary: Vec::new(),
+                replacements: Vec::new(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("[transcription] must be a TOML table"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn editable_campaign_settings_reject_duplicate_correction_sources_after_trimming() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("campaign.toml");
+        let source = "[campaign]\nname = \"Table Test\"\n";
+        std::fs::write(&path, source).unwrap();
+
+        let error = write_campaign_editable_settings(
+            &path,
+            &crate::util::content_revision(source.as_bytes()),
+            CampaignEditableSettings {
+                players: Vec::new(),
+                vocabulary: Vec::new(),
+                replacements: vec![
+                    CampaignTextReplacement {
+                        from: "Mosses".into(),
+                        to: "Damasus".into(),
+                    },
+                    CampaignTextReplacement {
+                        from: " Mosses ".into(),
+                        to: "Damasus".into(),
+                    },
+                ],
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("correction sources must be unique"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
 }

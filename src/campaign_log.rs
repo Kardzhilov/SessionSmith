@@ -12,6 +12,27 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub async fn rebuild_for(
+    campaign: &crate::config::CampaignConfig,
+    global: &crate::config::GlobalConfig,
+    preset: &crate::presets::Preset,
+) -> anyhow::Result<()> {
+    let chat_options = crate::llm::ChatOptions {
+        model: global
+            .backend
+            .model
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no model configured"))?,
+        temperature: Some(0.3),
+        max_tokens: None,
+        timeout: std::time::Duration::from_secs(global.runtime.timeout_secs),
+        think: global.runtime.think,
+        num_ctx: global.effective_num_ctx(),
+        format: None,
+    };
+    crate::pipeline::rebuild_campaign_log(global, campaign, preset, &chat_options).await
+}
+
 /// One session's entry in the log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionBlock {

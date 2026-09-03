@@ -1,0 +1,226 @@
+.search-dialog-backdrop {
+  position: fixed;
+  z-index: 45;
+  inset: 0;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding: min(12vh, 110px) 24px 24px;
+  background: var(--scrim);
+  backdrop-filter: blur(3px);
+}
+
+.search-dialog {
+  width: min(760px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: 0 20px 50px rgba(25, 41, 27, 0.28);
+}
+
+.search-dialog__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px 11px 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--pine);
+}
+
+.search-dialog__input-wrap {
+  min-width: 0;
+  flex: 1;
+}
+
+.search-dialog__input-wrap input {
+  width: 100%;
+  min-height: 34px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.search-dialog__input-wrap input::placeholder {
+  color: var(--faint);
+}
+
+.search-dialog__scope {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.search-dialog__scope > span {
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-dialog__scope label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.search-dialog__scope input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--pine);
+}
+
+.search-dialog__filters {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.search-filter {
+  min-height: 28px;
+  flex: 0 0 auto;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.search-filter--active {
+  border-color: var(--pine);
+  color: var(--pine);
+  background: var(--pine-soft);
+}
+
+.search-dialog__results {
+  display: grid;
+  max-height: min(520px, calc(100vh - 220px));
+  overflow: auto;
+}
+
+.search-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.search-dialog__footer .button {
+  min-height: 32px;
+  font-size: 11px;
+}
+
+.search-dialog__state {
+  display: grid;
+  min-height: 132px;
+  place-items: center;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.search-dialog__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 14px;
+  padding: 9px 10px;
+  border-left: 3px solid var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.search-result {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 13px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.search-result:hover {
+  background: var(--surface-subtle);
+}
+
+.search-result--active {
+  background: var(--pine-soft);
+  box-shadow: inset 3px 0 0 var(--pine);
+}
+
+.search-result:last-child {
+  border-bottom: 0;
+}
+
+.search-result__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--faint);
+  font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.search-result__meta span + span::before {
+  margin-right: 6px;
+  color: var(--line-strong);
+  content: "/";
+}
+
+.search-result__snippet {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.search-result mark {
+  padding: 0 1px;
+  background: var(--amber-soft);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .search-dialog-backdrop {
+    padding: 12px;
+  }
+
+  .search-dialog__results {
+    max-height: calc(100vh - 166px);
+  }
+}

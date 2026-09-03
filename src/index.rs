@@ -2,11 +2,12 @@
 //! cross-session search (`sessionsmith search`). The database is a single file
 //! in the user cache directory; nothing leaves the machine.
 
-use anyhow::{Context, Result};
-use rusqlite::Connection;
+use anyhow::{bail, Context, Result};
+use rusqlite::{backup::Backup, Connection, OpenFlags};
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::CampaignConfig;
 
@@ -26,6 +27,14 @@ fn db_path(campaign: &CampaignConfig) -> PathBuf {
         .join("sessionsmith")
         .join("indexes")
         .join(key)
+        .join("index.sqlite")
+}
+
+pub fn campaign_index_path_at(cache_root: &Path, campaign: &CampaignConfig) -> PathBuf {
+    cache_root
+        .join("sessionsmith")
+        .join("indexes")
+        .join(campaign_cache_key(campaign))
         .join("index.sqlite")
 }
 
@@ -71,17 +80,114 @@ fn open(campaign: &CampaignConfig) -> Result<Connection> {
 }
 
 fn migrate_legacy_db(legacy: &Path, destination: &Path) -> Result<()> {
-    std::fs::rename(legacy, destination)
-        .with_context(|| format!("migrating legacy index {}", legacy.display()))?;
-    for suffix in ["-wal", "-shm"] {
-        let from = PathBuf::from(format!("{}{}", legacy.display(), suffix));
-        if from.exists() {
-            let to = PathBuf::from(format!("{}{}", destination.display(), suffix));
-            std::fs::rename(&from, &to)
-                .with_context(|| format!("migrating legacy index sidecar {}", from.display()))?;
+    migrate_legacy_db_with_validator(legacy, destination, validate_migrated_db)
+}
+
+fn migrate_legacy_db_with_validator<F>(legacy: &Path, destination: &Path, validate: F) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    if destination.exists() {
+        bail!(
+            "index migration destination already exists: {}",
+            destination.display()
+        );
+    }
+    let parent = destination
+        .parent()
+        .context("index migration destination has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating index directory {}", parent.display()))?;
+    let temporary = migration_temporary_path(destination);
+    if temporary.exists() {
+        bail!(
+            "index migration temporary destination already exists: {}",
+            temporary.display()
+        );
+    }
+
+    let result = (|| -> Result<()> {
+        let source = Connection::open(legacy)
+            .with_context(|| format!("opening legacy index {}", legacy.display()))?;
+        let checkpoint_busy: i64 =
+            source.query_row("PRAGMA wal_checkpoint(FULL)", [], |row| row.get(0))?;
+        if checkpoint_busy != 0 {
+            bail!(
+                "legacy index WAL checkpoint is busy; leaving {} in place",
+                legacy.display()
+            );
+        }
+
+        let mut copied = Connection::open(&temporary).with_context(|| {
+            format!("creating temporary migrated index {}", temporary.display())
+        })?;
+        {
+            let backup = Backup::new(&source, &mut copied)?;
+            backup.run_to_completion(128, Duration::from_millis(10), None)?;
+        }
+        copied
+            .close()
+            .map_err(|(_, error)| error)
+            .with_context(|| format!("closing temporary index {}", temporary.display()))?;
+        validate(&temporary)?;
+        std::fs::File::open(&temporary)?.sync_all()?;
+        std::fs::rename(&temporary, destination)
+            .with_context(|| format!("installing migrated index {}", destination.display()))?;
+        sync_directory(parent)?;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        if temporary.is_file() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        return Err(error).with_context(|| format!("migrating legacy index {}", legacy.display()));
+    }
+
+    for path in [
+        legacy.to_path_buf(),
+        sidecar_path(legacy, "-wal"),
+        sidecar_path(legacy, "-shm"),
+    ] {
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                crate::ui::warn(&format!(
+                    "migrated search index but could not remove legacy file {}: {error}",
+                    path.display()
+                ));
+            }
         }
     }
+    let _ = legacy.parent().map(sync_directory).transpose();
     Ok(())
+}
+
+fn validate_migrated_db(path: &Path) -> Result<()> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening migrated index for validation {}", path.display()))?;
+    let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        bail!("migrated index failed integrity validation: {integrity}");
+    }
+    let _: i64 = connection.query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))?;
+    Ok(())
+}
+
+fn migration_temporary_path(destination: &Path) -> PathBuf {
+    sidecar_path(destination, ".migration-tmp")
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name: OsString = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)
+        .with_context(|| format!("opening directory for sync {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing directory {}", path.display()))
 }
 
 fn init_schema(conn: &Connection) -> Result<()> {
@@ -112,6 +218,108 @@ fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Copy a campaign index to its new identity while preserving the source.
+/// Artifact paths beneath the old output root are rewritten to the new root.
+pub fn migrate_campaign_index_at(
+    cache_root: &Path,
+    old_campaign: &CampaignConfig,
+    new_campaign: &CampaignConfig,
+    old_output_root: &Path,
+    new_output_root: &Path,
+) -> Result<bool> {
+    let old_path = campaign_index_path_at(cache_root, old_campaign);
+    let new_path = campaign_index_path_at(cache_root, new_campaign);
+    if old_path == new_path || !old_path.is_file() {
+        return Ok(false);
+    }
+    if new_path.exists() {
+        bail!(
+            "campaign search index already exists: {}; refusing to overwrite it",
+            new_path.display()
+        );
+    }
+    let parent = new_path
+        .parent()
+        .context("campaign search index path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating index directory {}", parent.display()))?;
+
+    let result = (|| -> Result<()> {
+        let source = Connection::open(&old_path)
+            .with_context(|| format!("opening source index {}", old_path.display()))?;
+        init_schema(&source)?;
+        let mut destination = Connection::open(&new_path)
+            .with_context(|| format!("creating destination index {}", new_path.display()))?;
+        init_schema(&destination)?;
+
+        let rows = {
+            let mut statement = source.prepare(
+                "SELECT id, session, kind, path, content, updated FROM artifacts ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+
+        let transaction = destination.transaction()?;
+        for (id, session, kind, path, content, updated) in &rows {
+            let path = Path::new(path)
+                .strip_prefix(old_output_root)
+                .map(|relative| new_output_root.join(relative))
+                .unwrap_or_else(|_| PathBuf::from(path));
+            transaction.execute(
+                "INSERT INTO artifacts (id, session, kind, path, content, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![id, session, kind, path.to_string_lossy(), content, updated],
+            )?;
+        }
+        transaction.execute("DELETE FROM artifacts_fts", [])?;
+        transaction.execute(
+            "INSERT INTO artifacts_fts(rowid, session, kind, path, content)
+             SELECT id, session, kind, path, content FROM artifacts",
+            [],
+        )?;
+        let copied: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))?;
+        if copied != rows.len() as i64 {
+            bail!(
+                "campaign search index migration copied {copied} of {} rows",
+                rows.len()
+            );
+        }
+        transaction.commit()?;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(parent);
+        return Err(error);
+    }
+    Ok(true)
+}
+
+pub fn remove_campaign_index_at(cache_root: &Path, campaign: &CampaignConfig) -> Result<()> {
+    let path = campaign_index_path_at(cache_root, campaign);
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.exists() {
+        std::fs::remove_dir_all(parent)
+            .with_context(|| format!("removing campaign index {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -121,53 +329,102 @@ fn now_secs() -> i64 {
 
 /// Index (or re-index) every artifact file in a session's notes directory.
 pub fn record_session(campaign: &CampaignConfig, stem: &str, notes_dir: &Path) -> Result<()> {
-    let conn = open(campaign)?;
-    record_into(&conn, stem, notes_dir)
+    let transcript = campaign.transcripts_dir().join(format!("{stem}.txt"));
+    record_session_at(campaign, stem, notes_dir, &transcript)
 }
 
-fn record_into(conn: &Connection, stem: &str, notes_dir: &Path) -> Result<()> {
-    let entries = match std::fs::read_dir(notes_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+pub fn record_session_at(
+    campaign: &CampaignConfig,
+    stem: &str,
+    notes_dir: &Path,
+    transcript: &Path,
+) -> Result<()> {
+    let conn = open(campaign)?;
+    record_into_with_transcript(&conn, stem, notes_dir, Some(transcript))
+}
+
+pub fn delete_session(campaign: &CampaignConfig, stem: &str) -> Result<()> {
+    let mut conn = open(campaign)?;
+    delete_session_from(&mut conn, stem)
+}
+
+fn delete_session_from(conn: &mut Connection, stem: &str) -> Result<()> {
+    let transaction = conn.transaction()?;
+    let ids = {
+        let mut statement = transaction.prepare("SELECT id FROM artifacts WHERE session = ?1")?;
+        let ids = statement
+            .query_map([stem], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
     };
+    for id in ids {
+        transaction.execute("DELETE FROM artifacts_fts WHERE rowid = ?1", [id])?;
+    }
+    transaction.execute("DELETE FROM artifacts WHERE session = ?1", [stem])?;
+    transaction.commit()?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn record_into(conn: &Connection, stem: &str, notes_dir: &Path) -> Result<()> {
+    record_into_with_transcript(conn, stem, notes_dir, None)
+}
+
+fn record_into_with_transcript(
+    conn: &Connection,
+    stem: &str,
+    notes_dir: &Path,
+    transcript: Option<&Path>,
+) -> Result<()> {
     let mut indexed_kinds = BTreeSet::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    if let Ok(entries) = std::fs::read_dir(notes_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "md" && ext != "json" {
+                continue;
+            }
+            let kind = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .to_string();
+            record_document(conn, stem, &kind, &path)?;
+            indexed_kinds.insert(kind);
         }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext != "md" && ext != "json" {
-            continue;
-        }
-        let kind = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        indexed_kinds.insert(kind.clone());
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        conn.execute(
-            "INSERT INTO artifacts (session, kind, path, content, updated)
+    }
+    if let Some(path) = transcript.filter(|path| path.is_file()) {
+        record_document(conn, stem, "transcript", path)?;
+        indexed_kinds.insert("transcript".into());
+    }
+    remove_stale_session_records(conn, stem, &indexed_kinds)?;
+    Ok(())
+}
+
+fn record_document(conn: &Connection, stem: &str, kind: &str, path: &Path) -> Result<()> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    conn.execute(
+        "INSERT INTO artifacts (session, kind, path, content, updated)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(session, kind) DO UPDATE SET
                 path = excluded.path,
                 content = excluded.content,
                 updated = excluded.updated",
-            rusqlite::params![stem, kind, path.to_string_lossy(), content, now_secs()],
-        )?;
-        let row_id: i64 = conn.query_row(
-            "SELECT id FROM artifacts WHERE session = ?1 AND kind = ?2",
-            rusqlite::params![stem, kind],
-            |row| row.get(0),
-        )?;
-        conn.execute("DELETE FROM artifacts_fts WHERE rowid = ?1", [row_id])?;
-        conn.execute(
-            "INSERT INTO artifacts_fts(rowid, session, kind, path, content) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![row_id, stem, kind, path.to_string_lossy(), content],
-        )?;
-    }
-    remove_stale_session_records(conn, stem, &indexed_kinds)?;
+        rusqlite::params![stem, kind, path.to_string_lossy(), content, now_secs()],
+    )?;
+    let row_id: i64 = conn.query_row(
+        "SELECT id FROM artifacts WHERE session = ?1 AND kind = ?2",
+        rusqlite::params![stem, kind],
+        |row| row.get(0),
+    )?;
+    conn.execute("DELETE FROM artifacts_fts WHERE rowid = ?1", [row_id])?;
+    conn.execute(
+        "INSERT INTO artifacts_fts(rowid, session, kind, path, content) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![row_id, stem, kind, path.to_string_lossy(), content],
+    )?;
     Ok(())
 }
 
@@ -195,27 +452,52 @@ fn remove_stale_session_records(
 
 /// Full-text-ish search across all indexed artifacts (case-insensitive LIKE).
 pub fn search(campaign: &CampaignConfig, query: &str) -> Result<Vec<SearchHit>> {
+    search_filtered(campaign, query, &[])
+}
+
+pub fn search_filtered(
+    campaign: &CampaignConfig,
+    query: &str,
+    kinds: &[String],
+) -> Result<Vec<SearchHit>> {
     let path = db_path(campaign);
     if !path.exists() {
         return Ok(Vec::new());
     }
     let conn = open(campaign)?;
-    search_conn(&conn, query)
+    search_conn_filtered(&conn, query, kinds)
 }
 
+#[cfg(test)]
 fn search_conn(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
+    search_conn_filtered(conn, query, &[])
+}
+
+fn search_conn_filtered(
+    conn: &Connection,
+    query: &str,
+    kinds: &[String],
+) -> Result<Vec<SearchHit>> {
     if query.contains(['\\', '%', '_']) {
-        return search_like(conn, query);
+        return filter_hits(search_like(conn, query)?, kinds);
     }
     match search_fts(conn, query) {
-        Ok(hits) => Ok(hits),
+        Ok(hits) => filter_hits(hits, kinds),
         Err(error) => {
             crate::ui::warn(&format!(
                 "FTS query unavailable ({error}); using literal search"
             ));
-            search_like(conn, query)
+            filter_hits(search_like(conn, query)?, kinds)
         }
     }
+}
+
+fn filter_hits(mut hits: Vec<SearchHit>, kinds: &[String]) -> Result<Vec<SearchHit>> {
+    if !kinds.is_empty() {
+        hits.retain(|hit| kinds.iter().any(|kind| kind == &hit.kind));
+    }
+    hits.truncate(40);
+    Ok(hits)
 }
 
 fn fts_query(query: &str) -> Option<String> {
@@ -238,7 +520,7 @@ fn search_fts(conn: &Connection, query: &str) -> Result<Vec<SearchHit>> {
          FROM artifacts_fts
          WHERE artifacts_fts MATCH ?1
          ORDER BY bm25(artifacts_fts)
-         LIMIT 40",
+         LIMIT 200",
     )?;
     let rows = stmt.query_map([query], |row| {
         Ok(SearchHit {
@@ -403,6 +685,53 @@ mod tests {
     }
 
     #[test]
+    fn deleting_session_removes_base_and_fts_results() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("summary.md"), "The moonwell opens.").unwrap();
+        record_into(&conn, "old-session", directory.path()).unwrap();
+        assert_eq!(search_conn(&conn, "moonwell").unwrap().len(), 1);
+
+        delete_session_from(&mut conn, "old-session").unwrap();
+
+        assert!(search_conn(&conn, "moonwell").unwrap().is_empty());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artifacts_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn transcript_content_is_indexed_filtered_and_removed_when_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let notes = tempfile::tempdir().unwrap();
+        let transcripts = tempfile::tempdir().unwrap();
+        let transcript = transcripts.path().join("session1.txt");
+        std::fs::write(
+            notes.path().join("summary.md"),
+            "The raven reaches the tower.",
+        )
+        .unwrap();
+        std::fs::write(&transcript, "SPEAKER_00: The moonwell opens below us.").unwrap();
+
+        record_into_with_transcript(&conn, "session1", notes.path(), Some(&transcript)).unwrap();
+        let transcript_kinds = vec!["transcript".to_string()];
+        let summary_kinds = vec!["summary.md".to_string()];
+        let transcript_hits = search_conn_filtered(&conn, "moonwell", &transcript_kinds).unwrap();
+        assert_eq!(transcript_hits.len(), 1);
+        assert_eq!(transcript_hits[0].kind, "transcript");
+        assert!(search_conn_filtered(&conn, "moonwell", &summary_kinds)
+            .unwrap()
+            .is_empty());
+
+        std::fs::remove_file(&transcript).unwrap();
+        record_into_with_transcript(&conn, "session1", notes.path(), Some(&transcript)).unwrap();
+        assert!(search_conn(&conn, "moonwell").unwrap().is_empty());
+    }
+
+    #[test]
     fn reindexing_a_session_removes_deleted_candidate_artifacts() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
@@ -442,6 +771,83 @@ mod tests {
     }
 
     #[test]
+    fn campaign_index_migration_rewrites_paths_and_preserves_fts() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_output = temp.path().join("output/old-name");
+        let new_output = temp.path().join("output/new-name");
+        let old_notes = old_output.join("notes/session1");
+        std::fs::create_dir_all(&old_notes).unwrap();
+        std::fs::write(old_notes.join("summary.md"), "The migrated moonwell opens.").unwrap();
+
+        let mut old_campaign = CampaignConfig::default();
+        old_campaign.campaign.name = "Old Name".into();
+        old_campaign.source_path = Some(temp.path().join("campaigns/old-name.toml"));
+        let mut new_campaign = old_campaign.clone();
+        new_campaign.campaign.name = "New Name".into();
+        new_campaign.source_path = Some(temp.path().join("campaigns/new-name.toml"));
+
+        let old_path = campaign_index_path_at(temp.path(), &old_campaign);
+        std::fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+        let old_connection = Connection::open(&old_path).unwrap();
+        init_schema(&old_connection).unwrap();
+        record_into(&old_connection, "session1", &old_notes).unwrap();
+        drop(old_connection);
+
+        assert!(migrate_campaign_index_at(
+            temp.path(),
+            &old_campaign,
+            &new_campaign,
+            &old_output,
+            &new_output,
+        )
+        .unwrap());
+
+        let new_path = campaign_index_path_at(temp.path(), &new_campaign);
+        let new_connection = Connection::open(new_path).unwrap();
+        let hits = search_conn(&new_connection, "migrated moonwell").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            PathBuf::from(&hits[0].path),
+            new_output.join("notes/session1/summary.md")
+        );
+        assert!(old_path.exists());
+        assert_eq!(
+            search_conn(&Connection::open(old_path).unwrap(), "migrated moonwell")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn campaign_index_migration_refuses_destination_collision() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut old_campaign = CampaignConfig::default();
+        old_campaign.campaign.name = "Old Name".into();
+        old_campaign.source_path = Some(temp.path().join("old.toml"));
+        let mut new_campaign = old_campaign.clone();
+        new_campaign.campaign.name = "New Name".into();
+        new_campaign.source_path = Some(temp.path().join("new.toml"));
+        for campaign in [&old_campaign, &new_campaign] {
+            let path = campaign_index_path_at(temp.path(), campaign);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let connection = Connection::open(path).unwrap();
+            init_schema(&connection).unwrap();
+        }
+
+        let error = migrate_campaign_index_at(
+            temp.path(),
+            &old_campaign,
+            &new_campaign,
+            temp.path(),
+            temp.path(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+        assert!(campaign_index_path_at(temp.path(), &old_campaign).exists());
+    }
+
+    #[test]
     fn legacy_database_migration_preserves_searchable_artifacts() {
         let temp = tempfile::tempdir().unwrap();
         let legacy = temp.path().join("output/index.sqlite");
@@ -461,6 +867,73 @@ mod tests {
         assert!(destination.exists());
         let migrated = Connection::open(destination).unwrap();
         assert_eq!(search_conn(&migrated, "legacy basilisk").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_database_validation_failure_leaves_source_usable() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("output/index.sqlite");
+        let destination = temp.path().join("cache/index.sqlite");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let connection = Connection::open(&legacy).unwrap();
+        init_schema(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO artifacts (session, kind, path, content, updated)
+                 VALUES ('session1', 'summary.md', 'summary.md', 'validation sentinel', 0)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = migrate_legacy_db_with_validator(&legacy, &destination, |_| {
+            bail!("forced validation failure")
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("migrating legacy index"));
+        assert!(legacy.exists());
+        assert!(!destination.exists());
+        assert!(!migration_temporary_path(&destination).exists());
+        let source = Connection::open(&legacy).unwrap();
+        let count: i64 = source
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn legacy_database_migration_captures_wal_backed_search_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("output/index.sqlite");
+        let destination = temp.path().join("cache/index.sqlite");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::create_dir(&notes).unwrap();
+        std::fs::write(notes.join("summary.md"), "WAL-backed searchable sentinel.").unwrap();
+        let connection = Connection::open(&legacy).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        init_schema(&connection).unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        record_into(&connection, "session1", &notes).unwrap();
+        let wal = sidecar_path(&legacy, "-wal");
+        assert!(wal.metadata().unwrap().len() > 0);
+
+        migrate_legacy_db(&legacy, &destination).unwrap();
+        drop(connection);
+
+        let migrated = Connection::open(destination).unwrap();
+        assert_eq!(
+            search_conn(&migrated, "searchable sentinel").unwrap().len(),
+            1
+        );
     }
 
     #[test]

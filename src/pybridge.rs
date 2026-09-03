@@ -138,6 +138,7 @@ fn script_for(engine: AsrEngine) -> Result<(&'static str, String)> {
 
 /// Run transcription for a bridge engine. On success `<out_prefix>.txt` (and
 /// `.srt`) exist on disk.
+#[allow(clippy::too_many_arguments)]
 pub fn run_asr(
     engine: AsrEngine,
     model_ref: &str,
@@ -163,6 +164,7 @@ pub fn run_asr(
 
 /// Run a bridge ASR engine while associating its `uv` process with a
 /// host-owned job. Existing CLI callers use [`run_asr`] without a registry.
+#[allow(clippy::too_many_arguments)]
 pub fn run_asr_with_children(
     engine: AsrEngine,
     model_ref: &str,
@@ -577,6 +579,7 @@ if __name__ == "__main__":
 "#;
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use tempfile::tempdir;

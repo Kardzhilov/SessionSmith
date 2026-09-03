@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use crate::audio;
 use crate::cli::TranscribeArgs;
 use crate::config::GlobalConfig;
-use crate::jobs::procs::ChildRegistry;
 use crate::session::{self, SessionInput};
 use crate::transcribe::{self, TranscribeOpts};
 use crate::{deps, hardware, ui};
@@ -197,20 +196,5 @@ pub async fn pick_and_build_sessions(
 /// If a session has multiple files, concat them to a durable merged file; otherwise
 /// return the single file path directly.
 pub async fn prepare_audio(sess: &SessionInput, merge_dir: &Path) -> Result<PathBuf> {
-    prepare_audio_with_children(sess, merge_dir, None).await
-}
-
-/// Prepare a session's source audio while associating an ffmpeg merge with a
-/// host-owned job. Existing CLI callers use [`prepare_audio`] without a registry.
-pub async fn prepare_audio_with_children(
-    sess: &SessionInput,
-    merge_dir: &Path,
-    children: Option<&ChildRegistry>,
-) -> Result<PathBuf> {
-    if sess.files.len() <= 1 {
-        Ok(sess.files.first().cloned().unwrap_or_default())
-    } else {
-        transcribe::concat_audio_files_with_children(&sess.files, &sess.name, merge_dir, children)
-            .await
-    }
+    session::prepare_audio_with_children(sess, merge_dir, None).await
 }

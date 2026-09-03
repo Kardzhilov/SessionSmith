@@ -1,0 +1,140 @@
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { CircleAlert, LoaderCircle, Palette, Save, SlidersHorizontal } from "lucide-react";
+import { applyTheme, useAppSettings } from "./AppSettingsContext";
+import { desktop, errorMessage } from "../../api/desktop";
+import type { Appearance, DateFormat } from "../../api/types";
+
+export function AppSettingsPage({ onOpenSetup }: { onOpenSetup: () => void }) {
+  const { settings, loading, error, save, reload } = useAppSettings();
+  const [dateFormat, setDateFormat] = useState<DateFormat>(settings.dateFormat);
+  const [appearance, setAppearance] = useState<Appearance>(settings.appearance);
+  const [playerVolume, setPlayerVolume] = useState(settings.playerVolume);
+  const [theme, setTheme] = useState(settings.theme);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [version, setVersion] = useState("1.0.0");
+
+  useEffect(() => {
+    setDateFormat(settings.dateFormat);
+    setAppearance(settings.appearance);
+    setPlayerVolume(settings.playerVolume);
+    setTheme(settings.theme);
+  }, [settings]);
+
+  useEffect(() => {
+    void getVersion().then(setVersion).catch(() => undefined);
+  }, []);
+
+  const dirty = dateFormat !== settings.dateFormat
+    || appearance !== settings.appearance
+    || playerVolume !== settings.playerVolume
+    || theme !== settings.theme;
+
+  useEffect(() => {
+    applyTheme(settings.themes.find((palette) => palette.id === theme));
+    return () => applyTheme(settings.themes.find((palette) => palette.id === settings.theme));
+  }, [settings.theme, settings.themes, theme]);
+
+  const submit = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await save({ dateFormat, appearance, theme, playerVolume });
+      const audio = await desktop.audioState();
+      await desktop.audioSetVolume(audio.sourceId, playerVolume);
+    } catch (nextError) {
+      setSaveError(errorMessage(nextError));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="page-loading"><LoaderCircle className="is-spinning" size={22} /> Loading app settings</div>;
+  }
+
+  return (
+    <div className="settings-page app-settings-page">
+      <header className="section-heading settings-page__header">
+        <div>
+          <p className="eyebrow">Application</p>
+          <h1>App settings</h1>
+          <p>Appearance, formatting, and playback defaults for this device.</p>
+        </div>
+        <button className="button button--primary" type="button" disabled={!dirty || saving} onClick={() => void submit()}>
+          {saving ? <LoaderCircle className="is-spinning" size={16} /> : <Save size={16} />}
+          Save
+        </button>
+      </header>
+
+      {(error || saveError) && (
+        <div className="settings-save-error" role="alert">
+          <CircleAlert size={15} />
+          <span>{saveError ?? error}</span>
+          {error && <button type="button" onClick={() => void reload()}>Retry</button>}
+        </div>
+      )}
+
+      <section className="settings-section app-settings-section">
+        <div className="settings-section__heading">
+          <div className="settings-section__icon"><Palette size={17} /></div>
+          <div><h2>Appearance</h2><p>Follow your system or choose a fixed mode.</p></div>
+        </div>
+        <div className="app-settings-controls">
+          <label>Color mode
+            <select value={appearance} onChange={(event) => setAppearance(event.target.value as Appearance)}>
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+          <label>Theme
+            <select value={theme} onChange={(event) => setTheme(event.target.value)}>
+              {settings.themes.map((palette) => <option value={palette.id} key={palette.id}>{palette.name}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="theme-preview" aria-label="Theme color preview">
+          {settings.themes.find((palette) => palette.id === theme) && Object.entries({
+            Primary: settings.themes.find((palette) => palette.id === theme)!.primary,
+            Accent: settings.themes.find((palette) => palette.id === theme)!.accent,
+            Success: settings.themes.find((palette) => palette.id === theme)!.success,
+            Warning: settings.themes.find((palette) => palette.id === theme)!.warn,
+            Error: settings.themes.find((palette) => palette.id === theme)!.error,
+            Muted: settings.themes.find((palette) => palette.id === theme)!.muted,
+          }).map(([label, color]) => (
+            <span className="theme-preview__swatch" key={label} title={`${label}: ${color}`} style={{ backgroundColor: color }}><span>{label}</span></span>
+          ))}
+        </div>
+      </section>
+
+      <section className="settings-section app-settings-section">
+        <div className="settings-section__heading">
+          <div className="settings-section__icon"><SlidersHorizontal size={17} /></div>
+          <div><h2>Formats and playback</h2><p>Used throughout the library and session workspace.</p></div>
+        </div>
+        <div className="app-settings-controls">
+          <label>Date format
+            <select value={dateFormat} onChange={(event) => setDateFormat(event.target.value as DateFormat)}>
+              <option value="dmy">23 August 2026</option>
+              <option value="mdy">August 23, 2026</option>
+              <option value="ymd">2026 August 23</option>
+              <option value="iso">2026-08-23</option>
+            </select>
+          </label>
+          <label>Default player volume: {playerVolume}%
+            <input type="range" min="0" max="100" value={playerVolume} onChange={(event) => setPlayerVolume(Number(event.target.value))} />
+          </label>
+        </div>
+      </section>
+
+      <section className="settings-section app-settings-about">
+        <p className="eyebrow">About</p>
+        <h2>SessionSmith {version}</h2>
+        <p>Local-first TTRPG transcription and session notes.</p>
+        <button className="button button--quiet" type="button" onClick={onOpenSetup}>Run operational setup</button>
+      </section>
+    </div>
+  );
+}

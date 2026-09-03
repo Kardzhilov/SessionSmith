@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   AudioLines,
   BookOpenText,
@@ -20,23 +20,33 @@ import {
   PanelLeftClose,
   Plus,
   RefreshCw,
+  Radio,
   Search,
   Settings2,
+  SlidersHorizontal,
   Sparkles,
+  UsersRound,
 } from "lucide-react";
-import { desktop, errorMessage } from "./desktop";
-import { CampaignSettingsPage } from "./CampaignSettings";
-import { ExportDialog, type ExportDialogRequest } from "./ExportDialog";
-import { NotesDialog } from "./NotesDialog";
-import { ProcessDialog, type ProcessDialogRequest } from "./ProcessDialog";
-import { RecordDialog } from "./RecordDialog";
-import { SearchDialog } from "./SearchDialog";
-import { SpeakerReviewDialog } from "./SpeakerReviewDialog";
-import "./App.css";
-import { HealthPage } from "./Health";
-import { JobsFlyout } from "./Jobs";
-import { ModelInventoryPage } from "./Models";
-import { CampaignLogPage, SessionWorkspacePage } from "./Workspace";
+import { desktop, errorMessage } from "./api/desktop";
+import { ExportDialog, type ExportDialogRequest } from "./features/dialogs/ExportDialog";
+import { NotesDialog } from "./features/dialogs/NotesDialog";
+import { ProcessDialog, type ProcessDialogRequest } from "./features/dialogs/ProcessDialog";
+import { RecordDialog } from "./features/dialogs/RecordDialog";
+import { RenameSessionDialog } from "./features/dialogs/RenameSessionDialog";
+import { SpeakerReviewDialog } from "./features/dialogs/SpeakerReviewDialog";
+import { HealthPage } from "./features/health/Health";
+import { JobsFlyout } from "./features/jobs/Jobs";
+import { ModelInventoryPage } from "./features/models/Models";
+import { NotificationViewport, type AppNotification } from "./features/notifications/Notifications";
+import { OnboardingScreen } from "./features/onboarding/Onboarding";
+import { SearchDialog } from "./features/search/SearchDialog";
+import { AppSettingsPage } from "./features/settings/AppSettings";
+import { formatTimestamp, useAppSettings } from "./features/settings/AppSettingsContext";
+import { CampaignSettingsPage } from "./features/settings/CampaignSettings";
+import { CampaignLogPage, SessionWorkspacePage } from "./features/workspace/Workspace";
+import "./styles/tokens.css";
+import "./styles/app.css";
+import brandIcon from "../src-tauri/icons/icon.png";
 import type {
   AppBootstrap,
   ArtifactId,
@@ -45,19 +55,36 @@ import type {
   CampaignSummary,
   DesktopJob,
   HealthReport,
+  InboxWatchStatus,
   NotesRequest,
+  OnboardingState,
   SearchResult,
+  SearchSource,
   SessionSummary,
   SpeakerMapping,
-} from "./types";
+} from "./api/types";
 
-type View = "sessions" | "log" | "settings" | "models" | "health";
+type View = "sessions" | "log" | "settings" | "app-settings" | "models" | "health";
 type HealthStatus = "pending" | "ok" | "warn" | "fail";
 type CandidateResolutionContext = {
   campaignId: string;
   stem: string;
   artifactId: ArtifactId;
   action: CandidateAction;
+};
+type SpeakerJobContext = { campaignId: string; stem: string; reset: boolean };
+type SessionRenameJobContext = { campaignId: string; oldStem: string; newStem: string };
+const searchPreferencesKey = "sessionsmith:search-preferences";
+
+const stoppedInboxWatchStatus: InboxWatchStatus = {
+  running: false,
+  campaignId: null,
+  campaignName: null,
+  intervalSecs: null,
+  queued: 0,
+  processingPath: null,
+  overflowCount: 0,
+  lastError: null,
 };
 
 const audioImportFilter = {
@@ -73,6 +100,7 @@ const navItems: Array<{
   { id: "sessions", label: "Sessions", icon: LibraryBig },
   { id: "log", label: "Campaign log", icon: BookOpenText },
   { id: "settings", label: "Campaign settings", icon: Settings2 },
+  { id: "app-settings", label: "App settings", icon: SlidersHorizontal },
   { id: "models", label: "Models", icon: Bot },
   { id: "health", label: "Health", icon: HeartPulse },
 ];
@@ -91,6 +119,7 @@ function App() {
   const [activeArtifactId, setActiveArtifactId] = useState<ArtifactId | null>(null);
   const [activeArtifactCandidate, setActiveArtifactCandidate] = useState(false);
   const [activeAlternateName, setActiveAlternateName] = useState<string | null>(null);
+  const [activeTranscriptLine, setActiveTranscriptLine] = useState<number | null>(null);
   const [healthReport, setHealthReport] = useState<HealthReport | null>(null);
   const [healthLoading, setHealthLoading] = useState(true);
   const [healthError, setHealthError] = useState<string | null>(null);
@@ -117,6 +146,8 @@ function App() {
   const [candidateResolveSubmitting, setCandidateResolveSubmitting] = useState(false);
   const [candidateResolveError, setCandidateResolveError] = useState<string | null>(null);
   const [campaignLogHandoff, setCampaignLogHandoff] = useState<{ campaignId: string; stem: string } | null>(null);
+  const [speakerNotesHandoff, setSpeakerNotesHandoff] = useState<{ campaignId: string; stem: string } | null>(null);
+  const [sessionNameHandoff, setSessionNameHandoff] = useState<{ campaignId: string; stem: string } | null>(null);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
   const [modelReloadKey, setModelReloadKey] = useState(0);
   const [modelActionError, setModelActionError] = useState<string | null>(null);
@@ -126,9 +157,34 @@ function App() {
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportInitialStems, setExportInitialStems] = useState<string[] | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchSources, setSearchSources] = useState<SearchSource[]>([]);
+  const [searchPreferences, setSearchPreferences] = useState(loadSearchPreferences);
   const [reindexSubmitting, setReindexSubmitting] = useState(false);
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [renameSubmitting, setRenameSubmitting] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [inboxWatchStatus, setInboxWatchStatus] = useState<InboxWatchStatus>(stoppedInboxWatchStatus);
+  const [inboxWatchInterval, setInboxWatchInterval] = useState(5);
+  const [inboxWatchSubmitting, setInboxWatchSubmitting] = useState(false);
+  const [inboxWatchError, setInboxWatchError] = useState<string | null>(null);
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  const [onboardingLoading, setOnboardingLoading] = useState(true);
+  const [onboardingLoadError, setOnboardingLoadError] = useState<string | null>(null);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingInitialStep, setOnboardingInitialStep] = useState<"health" | "models" | "campaign" | "backend">("health");
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const activeCampaignIdRef = useRef<string | null>(null);
   const candidateResolutionRef = useRef<CandidateResolutionContext | null>(null);
+  const speakerJobRef = useRef<SpeakerJobContext | null>(null);
+  const sessionRenameJobRef = useRef<SessionRenameJobContext | null>(null);
+  const topbarSearchRef = useRef<HTMLInputElement | null>(null);
+  const notificationKeysRef = useRef(new Set<string>());
+  const notificationIdRef = useRef(0);
+
+  const dismissNotification = useCallback((id: number) => {
+    setNotifications((current) => current.filter((notification) => notification.id !== id));
+  }, []);
 
   useEffect(() => {
     activeCampaignIdRef.current = activeCampaignId;
@@ -137,6 +193,81 @@ function App() {
   useEffect(() => {
     void refresh();
     void refreshHealth();
+    void loadOnboarding();
+    void desktop.searchSources().then((sources) => {
+      setSearchSources(sources);
+      const valid = new Set(sources.map((source) => source.id));
+      setSearchPreferences((current) => ({
+        ...current,
+        sourceKinds: current.sourceKinds.filter((source) => valid.has(source)),
+      }));
+    }).catch(() => setSearchSources([]));
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(searchPreferencesKey, JSON.stringify(searchPreferences));
+  }, [searchPreferences]);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+
+    void desktop.inboxWatchStatus()
+      .then((status) => {
+        if (active) setInboxWatchStatus(status);
+      })
+      .catch((nextError) => {
+        if (active) setInboxWatchError(errorMessage(nextError));
+      });
+    void desktop.inboxWatchListen((status) => {
+      if (active) {
+        setInboxWatchStatus(status);
+        if (status.lastError) {
+          pushNotification({
+            key: `watch:${status.lastError}`,
+            tone: "error",
+            title: "Inbox watch error",
+            message: status.lastError,
+          });
+        }
+      }
+    }).then((stopListening) => {
+      if (active) unlisten = stopListening;
+      else stopListening();
+    }).catch((nextError) => {
+      if (active) setInboxWatchError(errorMessage(nextError));
+    });
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void desktop.audioListen((transition) => {
+      if (active && transition.kind === "error" && transition.snapshot.error) {
+        pushNotification({
+          key: `audio:${transition.snapshot.sourceId ?? "none"}:${transition.snapshot.error}`,
+          tone: "error",
+          title: "Audio playback error",
+          message: transition.snapshot.error,
+        });
+      }
+    }).then((stopListening) => {
+      if (active) unlisten = stopListening;
+      else stopListening();
+    }).catch((nextError) => {
+      if (active) {
+        pushNotification({ key: "audio:listener", tone: "error", title: "Audio status unavailable", message: errorMessage(nextError) });
+      }
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -144,6 +275,7 @@ function App() {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setSearchOpen(true);
+        window.requestAnimationFrame(() => topbarSearchRef.current?.focus());
       }
     }
 
@@ -156,11 +288,19 @@ function App() {
     let unlisten: (() => void) | undefined;
 
     void refreshJobs();
-    void listen<DesktopJob>("job://updated", ({ payload }) => {
+    void desktop.jobListen((payload) => {
       if (!active) {
         return;
       }
       setJobs((currentJobs) => upsertJob(currentJobs, payload));
+      if (isTerminalJob(payload)) {
+        pushNotification({
+          key: `job:${payload.id}:${payload.state}`,
+          tone: payload.state === "failed" ? "error" : payload.state === "succeeded" ? "success" : "info",
+          title: payload.state === "succeeded" ? `${payload.title} completed` : payload.state === "failed" ? `${payload.title} failed` : `${payload.title} cancelled`,
+          message: payload.summary ?? undefined,
+        });
+      }
       if (payload.kind === "doctor" && isTerminalJob(payload)) {
         void refreshHealth();
       }
@@ -172,9 +312,21 @@ function App() {
       }
       if ((payload.kind === "run" || payload.kind === "transcribe" || payload.kind === "notes") && payload.state === "succeeded") {
         setWorkspaceReloadKey((current) => current + 1);
+        const campaignId = activeCampaignIdRef.current;
+        const stem = activeSessionStem;
+        if (payload.kind === "notes" && campaignId && stem && isDateDerivedSessionStem(stem)) {
+          setSessionNameHandoff({ campaignId, stem });
+        }
       }
       if (payload.kind === "speakerMap" && payload.state === "succeeded") {
         setWorkspaceReloadKey((current) => current + 1);
+        const context = speakerJobRef.current;
+        speakerJobRef.current = null;
+        if (context && !context.reset) {
+          setSpeakerNotesHandoff({ campaignId: context.campaignId, stem: context.stem });
+        }
+      } else if (payload.kind === "speakerMap" && isTerminalJob(payload)) {
+        speakerJobRef.current = null;
       }
       if (payload.kind === "candidateResolve" && isTerminalJob(payload)) {
         const resolution = candidateResolutionRef.current;
@@ -188,6 +340,20 @@ function App() {
           ) {
             setCampaignLogHandoff({ campaignId: resolution.campaignId, stem: resolution.stem });
           }
+        }
+      }
+      if (payload.kind === "sessionRename" && isTerminalJob(payload)) {
+        const context = sessionRenameJobRef.current;
+        sessionRenameJobRef.current = null;
+        if (context && payload.state === "succeeded") {
+          setActiveSessionStem(context.newStem);
+          setWorkspaceReloadKey((current) => current + 1);
+          setCampaignLogHandoff({ campaignId: context.campaignId, stem: context.newStem });
+          setSessionNameHandoff(null);
+          void loadLibrary(context.campaignId);
+        } else if (context) {
+          setRenameError(payload.summary ?? "The session rename failed.");
+          setRenameDialogOpen(true);
         }
       }
       if (payload.kind === "rebuildLog" && payload.state === "succeeded") {
@@ -218,6 +384,63 @@ function App() {
     };
   }, []);
 
+  function pushNotification(notification: Omit<AppNotification, "id">) {
+    if (notificationKeysRef.current.has(notification.key)) return;
+    if (notificationKeysRef.current.size >= 200) notificationKeysRef.current.clear();
+    notificationKeysRef.current.add(notification.key);
+    notificationIdRef.current += 1;
+    setNotifications((current) => [...current, { ...notification, id: notificationIdRef.current }].slice(-5));
+  }
+
+  async function loadOnboarding() {
+    setOnboardingLoading(true);
+    setOnboardingLoadError(null);
+    try {
+      const next = await desktop.onboardingState();
+      setOnboarding(next);
+      setOnboardingOpen(next.required);
+    } catch (nextError) {
+      setOnboardingLoadError(errorMessage(nextError));
+    } finally {
+      setOnboardingLoading(false);
+    }
+  }
+
+  async function completeOnboarding(outcome: "finished" | "skipped") {
+    if (!onboarding) return;
+    const next = await desktop.onboardingComplete({
+      expectedRevision: onboarding.revision,
+      version: onboarding.currentVersion,
+      outcome,
+    });
+    setOnboarding(next);
+    setOnboardingOpen(false);
+    pushNotification({
+      key: `onboarding:${next.completedVersion}:${outcome}`,
+      tone: outcome === "finished" ? "success" : "info",
+      title: outcome === "finished" ? "Setup completed" : "Setup skipped",
+      message: "You can run setup again from App Settings.",
+    });
+  }
+
+  function openOnboarding(step: "health" | "models" | "campaign" | "backend" = "health") {
+    setOnboardingInitialStep(step);
+    void desktop.onboardingState()
+      .then((next) => {
+        setOnboarding(next);
+        setOnboardingOpen(true);
+      })
+      .catch((nextError) => {
+        pushNotification({ key: `onboarding:open:${errorMessage(nextError)}`, tone: "error", title: "Setup could not be opened", message: errorMessage(nextError) });
+      });
+  }
+
+  function handoffOnboarding(destination: "health" | "models" | "settings") {
+    setOnboardingOpen(false);
+    setActiveView(destination);
+    setActiveSessionStem(null);
+  }
+
   async function refresh(preferredCampaignId = activeCampaignId) {
     setLoading(true);
     setError(null);
@@ -231,6 +454,9 @@ function App() {
         ) ?? nextBootstrap.campaigns.find((campaign) => !campaign.loadError);
 
       if (selectedCampaign) {
+        if (inboxWatchStatus.running && inboxWatchStatus.campaignId !== selectedCampaign.id) {
+          setInboxWatchStatus(await desktop.inboxWatchStop());
+        }
         setActiveCampaignId(selectedCampaign.id);
         await loadLibrary(selectedCampaign.id);
       } else {
@@ -353,6 +579,39 @@ function App() {
     }
   }
 
+  async function startInboxWatch() {
+    const campaignId = activeCampaignIdRef.current;
+    if (!campaignId) return;
+    setInboxWatchSubmitting(true);
+    setInboxWatchError(null);
+    try {
+      setInboxWatchStatus(await desktop.inboxWatchStart({
+        campaignId,
+        intervalSecs: inboxWatchInterval,
+      }));
+    } catch (nextError) {
+      const message = errorMessage(nextError);
+      setInboxWatchError(message);
+      pushNotification({ key: `watch:start:${message}`, tone: "error", title: "Inbox watch did not start", message });
+    } finally {
+      setInboxWatchSubmitting(false);
+    }
+  }
+
+  async function stopInboxWatch() {
+    setInboxWatchSubmitting(true);
+    setInboxWatchError(null);
+    try {
+      setInboxWatchStatus(await desktop.inboxWatchStop());
+    } catch (nextError) {
+      const message = errorMessage(nextError);
+      setInboxWatchError(message);
+      pushNotification({ key: `watch:stop:${message}`, tone: "error", title: "Inbox watch did not stop", message });
+    } finally {
+      setInboxWatchSubmitting(false);
+    }
+  }
+
   async function startExport(request: ExportDialogRequest) {
     const campaignId = activeCampaignIdRef.current;
     if (!campaignId) {
@@ -451,7 +710,7 @@ function App() {
     }
   }
 
-  async function startSpeakerMapping(mappings: SpeakerMapping[]) {
+  async function startSpeakerMapping(mappings: SpeakerMapping[], defaultMappings: SpeakerMapping[]) {
     const campaignId = activeCampaignIdRef.current;
     if (!campaignId || !speakerStem) {
       return;
@@ -459,15 +718,71 @@ function App() {
 
     setSpeakerSubmitting(true);
     setSpeakerError(null);
+    speakerJobRef.current = { campaignId, stem: speakerStem, reset: false };
     try {
+      if (defaultMappings.length > 0) {
+        const settings = await desktop.campaignSettings(campaignId);
+        const selected = new Map(defaultMappings.map((mapping) => [mapping.label, mapping.name]));
+        const speakers = settings.transcription.speakers
+          .filter((mapping) => !selected.has(mapping.label))
+          .concat(defaultMappings);
+        await desktop.campaignSettingsWrite({
+          campaignId,
+          players: settings.players,
+          vocabulary: settings.transcription.vocabulary,
+          replacements: settings.transcription.replacements,
+          speakers,
+          expectedRevision: settings.revision,
+        });
+      }
       await desktop.jobSubmitSpeakerMap({ campaignId, stem: speakerStem, mappings });
       setSpeakerDialogOpen(false);
       setJobsOpen(true);
       await refreshJobs();
     } catch (nextError) {
+      speakerJobRef.current = null;
       setSpeakerError(errorMessage(nextError));
     } finally {
       setSpeakerSubmitting(false);
+    }
+  }
+
+  async function resetSpeakerMapping() {
+    const campaignId = activeCampaignIdRef.current;
+    if (!campaignId || !speakerStem) return;
+    setSpeakerSubmitting(true);
+    setSpeakerError(null);
+    speakerJobRef.current = { campaignId, stem: speakerStem, reset: true };
+    try {
+      await desktop.jobSubmitSpeakerReset({ campaignId, stem: speakerStem });
+      setSpeakerDialogOpen(false);
+      setJobsOpen(true);
+      await refreshJobs();
+    } catch (nextError) {
+      speakerJobRef.current = null;
+      setSpeakerError(errorMessage(nextError));
+    } finally {
+      setSpeakerSubmitting(false);
+    }
+  }
+
+  async function startSessionRename(newStem: string) {
+    const campaignId = activeCampaignIdRef.current;
+    if (!campaignId || !activeSessionStem) return;
+    const context = { campaignId, oldStem: activeSessionStem, newStem };
+    setRenameSubmitting(true);
+    setRenameError(null);
+    sessionRenameJobRef.current = context;
+    try {
+      await desktop.jobSubmitSessionRename(context);
+      setRenameDialogOpen(false);
+      setJobsOpen(true);
+      await refreshJobs();
+    } catch (nextError) {
+      sessionRenameJobRef.current = null;
+      setRenameError(errorMessage(nextError));
+    } finally {
+      setRenameSubmitting(false);
     }
   }
 
@@ -511,7 +826,11 @@ function App() {
     setActiveArtifactId(null);
     setActiveArtifactCandidate(false);
     setActiveAlternateName(null);
+    setActiveTranscriptLine(null);
     if (result.campaignId !== activeCampaignId) {
+      if (inboxWatchStatus.running && inboxWatchStatus.campaignId !== result.campaignId) {
+        await stopInboxWatch();
+      }
       setActiveCampaignId(result.campaignId);
       setActiveView("sessions");
       await loadLibrary(result.campaignId);
@@ -519,6 +838,7 @@ function App() {
     setActiveArtifactId(result.artifactId);
     setActiveArtifactCandidate(result.candidate);
     setActiveAlternateName(result.alternateName);
+    setActiveTranscriptLine(result.transcript ? result.transcriptLine : null);
     setActiveSessionStem(result.stem);
   }
 
@@ -545,12 +865,16 @@ function App() {
 
   async function chooseCampaign(campaign: CampaignSummary) {
     setCampaignPickerOpen(false);
+    if (inboxWatchStatus.running && inboxWatchStatus.campaignId !== campaign.id) {
+      await stopInboxWatch();
+    }
     setActiveCampaignId(campaign.id);
     setActiveView("sessions");
     setActiveSessionStem(null);
     setActiveArtifactId(null);
     setActiveArtifactCandidate(false);
     setActiveAlternateName(null);
+    setActiveTranscriptLine(null);
     await loadLibrary(campaign.id);
   }
 
@@ -583,16 +907,49 @@ function App() {
   const candidateResolving = candidateResolveSubmitting || jobs.some(
     (job) => job.kind === "candidateResolve" && !isTerminalJob(job),
   );
+  const sessionRenaming = renameSubmitting || jobs.some(
+    (job) => job.kind === "sessionRename" && !isTerminalJob(job),
+  );
   const reindexing = reindexSubmitting || jobs.some(
     (job) => job.kind === "reindex" && !isTerminalJob(job),
   );
+
+  if (onboardingLoading) {
+    return <main className="setup-gate" aria-live="polite"><LoaderCircle className="is-spinning" size={22} aria-hidden="true" /><span>Loading operational setup</span></main>;
+  }
+
+  if (onboardingLoadError && !onboarding) {
+    return <main className="setup-gate setup-gate--error" role="alert"><CircleAlert size={22} aria-hidden="true" /><span>{onboardingLoadError}</span><button className="button button--quiet" type="button" onClick={() => void loadOnboarding()}>Retry</button></main>;
+  }
+
+  if (onboardingOpen && onboarding) {
+    return (
+      <OnboardingScreen
+        state={onboarding}
+        health={healthReport}
+        healthLoading={healthLoading}
+        healthError={healthError}
+        initialCampaignId={activeCampaignId}
+        initialStep={onboardingInitialStep}
+        onRefreshHealth={() => void refreshHealth()}
+        onRunChecks={() => void startSystemCheck()}
+        onHandoff={handoffOnboarding}
+        onCampaignCreated={async (result) => {
+          await refresh(result.campaignId);
+          pushNotification({ key: `campaign:${result.campaignId}`, tone: "success", title: "Campaign created", message: result.name });
+        }}
+        onComplete={completeOnboarding}
+        onClose={onboarding.required ? undefined : () => setOnboardingOpen(false)}
+      />
+    );
+  }
 
   return (
     <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
       <header className="topbar">
         <div className="brand-cluster">
           <div className="brand-mark" aria-hidden="true">
-            <AudioLines size={19} strokeWidth={2.2} />
+            <img src={brandIcon} alt="" />
           </div>
           <span className="brand-name">SessionSmith</span>
         </div>
@@ -641,7 +998,7 @@ function App() {
                 </button>
               ))}
               <div className="campaign-menu__divider" />
-              <button className="campaign-menu__new" type="button" disabled title="Campaign creation is next in the GUI rewrite.">
+              <button className="campaign-menu__new" type="button" onClick={() => { setCampaignPickerOpen(false); openOnboarding("campaign"); }}>
                 <Plus size={16} aria-hidden="true" />
                 New campaign
               </button>
@@ -654,15 +1011,22 @@ function App() {
             <Command size={14} aria-hidden="true" />
             Local workspace
           </span>
-          <button
-            className="icon-button"
-            type="button"
-            onClick={() => setSearchOpen(true)}
-            title="Search indexed notes"
-            aria-label="Search indexed notes"
-          >
+          <label className="topbar-search">
             <Search size={17} aria-hidden="true" />
-          </button>
+            <span className="sr-only">Search notes and transcripts</span>
+            <input
+              ref={topbarSearchRef}
+              type="search"
+              value={searchQuery}
+              placeholder="Search notes and transcripts"
+              onFocus={() => setSearchOpen(true)}
+              onChange={(event) => {
+                setSearchQuery(event.target.value);
+                setSearchOpen(true);
+              }}
+            />
+            <kbd>Ctrl K</kbd>
+          </label>
           <button
             className="icon-button"
             type="button"
@@ -743,6 +1107,12 @@ function App() {
       </aside>
 
       <main className="content">
+        {onboarding?.required && (
+          <button className="setup-resume" type="button" onClick={() => openOnboarding()}>
+            <HeartPulse size={16} aria-hidden="true" />
+            Resume setup
+          </button>
+        )}
         {activeSessionStem && library ? (
           <SessionWorkspacePage
             campaignId={library.campaign.id}
@@ -750,11 +1120,13 @@ function App() {
             initialArtifactId={activeArtifactId}
             initialViewingCandidate={activeArtifactCandidate}
             initialAlternateName={activeAlternateName}
+            initialTranscriptLine={activeTranscriptLine}
             onBack={() => {
               setActiveSessionStem(null);
               setActiveArtifactId(null);
               setActiveArtifactCandidate(false);
               setActiveAlternateName(null);
+              setActiveTranscriptLine(null);
             }}
             onGenerateNotes={() => {
               setNotesStem(activeSessionStem);
@@ -773,6 +1145,11 @@ function App() {
               setSpeakerError(null);
               setSpeakerDialogOpen(true);
             }}
+            onRename={() => {
+              setRenameError(null);
+              setRenameDialogOpen(true);
+            }}
+            renaming={sessionRenaming}
             speakerMapping={speakerMapping}
             candidateResolving={candidateResolving}
             candidateResolveError={candidateResolveError}
@@ -784,6 +1161,27 @@ function App() {
             campaignLogRebuilding={logRebuilding}
             onRebuildCampaignLog={() => void startLogRebuild()}
             onDismissCampaignLogRebuild={() => setCampaignLogHandoff(null)}
+            speakerNotesRegenerationRecommended={
+              speakerNotesHandoff?.campaignId === library.campaign.id
+              && speakerNotesHandoff.stem === activeSessionStem
+            }
+            onRegenerateSpeakerNotes={() => {
+              setSpeakerNotesHandoff(null);
+              setNotesStem(activeSessionStem);
+              setNotesError(null);
+              setNotesDialogOpen(true);
+            }}
+            onDismissSpeakerNotesRegeneration={() => setSpeakerNotesHandoff(null)}
+            sessionNameRecommended={
+              sessionNameHandoff?.campaignId === library.campaign.id
+              && sessionNameHandoff.stem === activeSessionStem
+            }
+            onNameSession={() => {
+              setSessionNameHandoff(null);
+              setRenameError(null);
+              setRenameDialogOpen(true);
+            }}
+            onDismissSessionName={() => setSessionNameHandoff(null)}
             refreshKey={workspaceReloadKey}
           />
         ) : activeView === "sessions" ? (
@@ -797,6 +1195,11 @@ function App() {
               setActiveArtifactCandidate(false);
               setActiveAlternateName(null);
               setActiveSessionStem(stem);
+            }}
+            onReviewSpeakers={(stem) => {
+              setSpeakerStem(stem);
+              setSpeakerError(null);
+              setSpeakerDialogOpen(true);
             }}
             onRecord={() => {
               setRecordError(null);
@@ -816,6 +1219,14 @@ function App() {
               setProcessDialogOpen(true);
             }}
             processing={processingRunning}
+            onCreateCampaign={() => openOnboarding("campaign")}
+            inboxWatchStatus={inboxWatchStatus}
+            inboxWatchInterval={inboxWatchInterval}
+            inboxWatchSubmitting={inboxWatchSubmitting}
+            inboxWatchError={inboxWatchError}
+            onInboxWatchIntervalChange={setInboxWatchInterval}
+            onInboxWatchStart={() => void startInboxWatch()}
+            onInboxWatchStop={() => void stopInboxWatch()}
           />
         ) : activeView === "log" ? (
           <CampaignLogPage
@@ -832,7 +1243,12 @@ function App() {
             }}
           />
         ) : activeView === "settings" ? (
-          <CampaignSettingsPage campaign={library?.campaign} />
+          <CampaignSettingsPage
+            campaign={library?.campaign}
+            onCampaignRenamed={(campaignId) => void refresh(campaignId)}
+          />
+        ) : activeView === "app-settings" ? (
+          <AppSettingsPage onOpenSetup={() => openOnboarding()} />
         ) : activeView === "models" ? (
           <ModelInventoryPage
             refreshKey={modelReloadKey}
@@ -851,8 +1267,12 @@ function App() {
             error={healthError}
             onRefresh={() => void refreshHealth()}
             onRunChecks={() => void startSystemCheck()}
-            onOpenModels={() => {
-              setActiveView("models");
+            onRemedy={(remedy) => {
+              if (remedy === "open-models" || remedy === "open-backend-settings") {
+                setActiveView(remedy === "open-models" ? "models" : "settings");
+              } else {
+                void openUrl("https://github.com/mythos/SessionSmith/blob/main/docs/setup.md");
+              }
               setActiveSessionStem(null);
               setActiveArtifactId(null);
               setActiveArtifactCandidate(false);
@@ -878,6 +1298,13 @@ function App() {
         onClose={() => setSearchOpen(false)}
         onReindex={() => void startReindex()}
         onOpenResult={(result) => void openSearchResult(result)}
+        query={searchQuery}
+        onQueryChange={setSearchQuery}
+        allCampaigns={searchPreferences.allCampaigns}
+        onAllCampaignsChange={(allCampaigns) => setSearchPreferences((current) => ({ ...current, allCampaigns }))}
+        sourceKinds={searchPreferences.sourceKinds}
+        onSourceKindsChange={(sourceKinds) => setSearchPreferences((current) => ({ ...current, sourceKinds }))}
+        sourceOptions={searchSources}
       />
       <RecordDialog
         open={recordDialogOpen}
@@ -922,8 +1349,20 @@ function App() {
         submitting={speakerSubmitting}
         error={speakerError}
         onClose={() => setSpeakerDialogOpen(false)}
-        onSubmit={(mappings) => void startSpeakerMapping(mappings)}
+        onSubmit={(mappings, defaultMappings) => void startSpeakerMapping(mappings, defaultMappings)}
+        onReset={() => void resetSpeakerMapping()}
       />
+      <RenameSessionDialog
+        open={renameDialogOpen}
+        campaignId={activeCampaignId}
+        stem={activeSessionStem}
+        submitting={sessionRenaming}
+        error={renameError}
+        onClose={() => setRenameDialogOpen(false)}
+        onClearError={() => setRenameError(null)}
+        onSubmit={(newStem) => void startSessionRename(newStem)}
+      />
+      <NotificationViewport notifications={notifications} onDismiss={dismissNotification} />
     </div>
   );
 }
@@ -934,6 +1373,7 @@ function SessionLibrary({
   error,
   loading,
   onOpenSession,
+  onReviewSpeakers,
   onRecord,
   recording,
   onImport,
@@ -942,12 +1382,21 @@ function SessionLibrary({
   exporting,
   onProcess,
   processing,
+  onCreateCampaign,
+  inboxWatchStatus,
+  inboxWatchInterval,
+  inboxWatchSubmitting,
+  inboxWatchError,
+  onInboxWatchIntervalChange,
+  onInboxWatchStart,
+  onInboxWatchStop,
 }: {
   bootstrap: AppBootstrap | null;
   library: CampaignLibrary | null;
   error: string | null;
   loading: boolean;
   onOpenSession: (stem: string) => void;
+  onReviewSpeakers: (stem: string) => void;
   onRecord: () => void;
   recording: boolean;
   onImport: () => void;
@@ -956,7 +1405,17 @@ function SessionLibrary({
   exporting: boolean;
   onProcess: () => void;
   processing: boolean;
+  onCreateCampaign: () => void;
+  inboxWatchStatus: InboxWatchStatus;
+  inboxWatchInterval: number;
+  inboxWatchSubmitting: boolean;
+  inboxWatchError: string | null;
+  onInboxWatchIntervalChange: (seconds: number) => void;
+  onInboxWatchStart: () => void;
+  onInboxWatchStop: () => void;
 }) {
+  const { settings: appSettings } = useAppSettings();
+
   if (loading) {
     return <LibraryLoading />;
   }
@@ -981,7 +1440,8 @@ function SessionLibrary({
         <div>
           <p className="eyebrow">No campaign files found</p>
           <h1>This workspace has no campaigns yet.</h1>
-          <p>Create a campaign in the existing CLI/TUI, or set `SESSIONSMITH_WORKSPACE` to a workspace with a `campaigns/` directory.</p>
+          <p>Create a campaign to establish validated configuration and output paths.</p>
+          <button className="button button--primary" type="button" onClick={onCreateCampaign}><Plus size={16} aria-hidden="true" />Create campaign</button>
         </div>
       </section>
     );
@@ -1046,6 +1506,41 @@ function SessionLibrary({
         </div>
       </header>
 
+      <section className="inbox-watch" aria-label="Inbox watch">
+        <div className={inboxWatchStatus.running ? "inbox-watch__signal inbox-watch__signal--active" : "inbox-watch__signal"}>
+          <Radio size={17} aria-hidden="true" />
+        </div>
+        <div className="inbox-watch__body">
+          <strong>Inbox watch</strong>
+          <span>{formatInboxWatchStatus(inboxWatchStatus, library.campaign.name)}</span>
+          {(inboxWatchError || inboxWatchStatus.lastError) && (
+            <small role="status">{inboxWatchError ?? inboxWatchStatus.lastError}</small>
+          )}
+        </div>
+        <label className="inbox-watch__interval">
+          <span>Interval</span>
+          <select
+            value={inboxWatchInterval}
+            onChange={(event) => onInboxWatchIntervalChange(Number(event.target.value))}
+            disabled={inboxWatchStatus.running || inboxWatchSubmitting}
+          >
+            <option value={2}>2 seconds</option>
+            <option value={5}>5 seconds</option>
+            <option value={10}>10 seconds</option>
+            <option value={30}>30 seconds</option>
+          </select>
+        </label>
+        <button
+          className={inboxWatchStatus.running ? "button button--quiet" : "button button--primary"}
+          type="button"
+          disabled={inboxWatchSubmitting}
+          onClick={inboxWatchStatus.running ? onInboxWatchStop : onInboxWatchStart}
+        >
+          {inboxWatchSubmitting ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <Radio size={16} aria-hidden="true" />}
+          {inboxWatchStatus.running ? "Stop watch" : "Start watch"}
+        </button>
+      </section>
+
       {library.inbox.length > 0 && (
         <section className="library-section">
           <SectionHeader label="Inbox" count={library.inbox.length} detail="Audio waiting to become a session" />
@@ -1057,7 +1552,7 @@ function SessionLibrary({
                 </div>
                 <div className="inbox-row__body">
                   <strong>{audio.name}</strong>
-                  <span>{formatBytes(audio.sizeBytes)} · {formatDate(audio.modifiedAt)}</span>
+                  <span>{formatBytes(audio.sizeBytes)} · {formatTimestamp(audio.modifiedAt, appSettings.dateFormat)}</span>
                 </div>
                 <span className="inbox-row__status">Ready</span>
               </article>
@@ -1071,7 +1566,7 @@ function SessionLibrary({
         {library.sessions.length > 0 ? (
           <div className="session-list">
             {library.sessions.map((session) => (
-              <SessionRow key={session.stem} session={session} onOpen={() => onOpenSession(session.stem)} />
+              <SessionRow key={session.stem} session={session} onOpen={() => onOpenSession(session.stem)} onReviewSpeakers={() => onReviewSpeakers(session.stem)} />
             ))}
           </div>
         ) : (
@@ -1099,7 +1594,18 @@ function SectionHeader({ label, count, detail }: { label: string; count: number;
   );
 }
 
-function SessionRow({ session, onOpen }: { session: SessionSummary; onOpen: () => void }) {
+function formatInboxWatchStatus(status: InboxWatchStatus, selectedCampaignName: string) {
+  if (!status.running) return `Stopped · ${selectedCampaignName}`;
+  const campaign = status.campaignName ?? selectedCampaignName;
+  if (status.processingPath) {
+    const name = status.processingPath.split(/[\\/]/).pop() ?? status.processingPath;
+    return `${campaign} · Processing ${name} · ${status.queued} queued`;
+  }
+  return `${campaign} · Watching · ${status.queued} queued`;
+}
+
+function SessionRow({ session, onOpen, onReviewSpeakers }: { session: SessionSummary; onOpen: () => void; onReviewSpeakers: () => void }) {
+  const { settings: appSettings } = useAppSettings();
   const action = session.artifacts.length > 0 || session.hasTranscript ? "Open session" : "View session";
 
   return (
@@ -1110,7 +1616,7 @@ function SessionRow({ session, onOpen }: { session: SessionSummary; onOpen: () =
         </span>
         <div>
           <h3>{session.stem}</h3>
-          <p>{formatDate(session.modifiedAt)}</p>
+          <p>{formatTimestamp(session.modifiedAt, appSettings.dateFormat)}</p>
         </div>
       </div>
       <div className="session-row__pipeline" aria-label={`Pipeline status: ${session.stage}`}>
@@ -1123,6 +1629,12 @@ function SessionRow({ session, onOpen }: { session: SessionSummary; onOpen: () =
           <span>{session.artifacts.map(formatArtifact).join(" · ")}</span>
         ) : (
           <span>Awaiting {session.stage === "audio" ? "transcription" : "notes"}</span>
+        )}
+        {session.unmappedSpeakerCount > 0 && (
+          <button className="session-row__speaker-hint" type="button" onClick={onReviewSpeakers}>
+            <UsersRound size={13} aria-hidden="true" />
+            {session.unmappedSpeakerCount} unnamed {pluralize(session.unmappedSpeakerCount, "speaker")} · Review speakers
+          </button>
         )}
       </div>
       <button className="row-action" type="button" onClick={onOpen} title={`Open ${session.stem}`}>
@@ -1166,15 +1678,6 @@ function formatArtifact(artifact: string) {
     .split("-")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
-}
-
-function formatDate(timestamp: number | null) {
-  if (!timestamp) {
-    return "No modified date";
-  }
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(
-    new Date(timestamp * 1000),
-  );
 }
 
 function formatBytes(bytes: number) {
@@ -1223,6 +1726,26 @@ function healthStatusLabel(status: HealthStatus) {
 
 function isTerminalJob(job: DesktopJob) {
   return job.state === "succeeded" || job.state === "failed" || job.state === "cancelled";
+}
+
+function loadSearchPreferences(): { allCampaigns: boolean; sourceKinds: string[] } {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(searchPreferencesKey) ?? "null") as unknown;
+    if (!value || typeof value !== "object") return { allCampaigns: false, sourceKinds: [] };
+    const record = value as Record<string, unknown>;
+    return {
+      allCampaigns: record.allCampaigns === true,
+      sourceKinds: Array.isArray(record.sourceKinds)
+        ? record.sourceKinds.filter((source): source is string => typeof source === "string")
+        : [],
+    };
+  } catch {
+    return { allCampaigns: false, sourceKinds: [] };
+  }
+}
+
+function isDateDerivedSessionStem(stem: string) {
+  return /^\d{4}-\d{2}-\d{2}(?:[-_T]\d{2}(?:[-_:]?\d{2}){0,2})?$/.test(stem);
 }
 
 function upsertJob(currentJobs: DesktopJob[], nextJob: DesktopJob) {

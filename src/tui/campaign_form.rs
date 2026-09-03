@@ -281,7 +281,7 @@ impl CampaignFormState {
             CampaignFormPage::List { target, .. } => {
                 let mut rows: Vec<CampaignFormRow> = self
                     .list_values(*target)
-                    .into_iter()
+                    .iter()
                     .enumerate()
                     .map(|(index, value)| CampaignFormRow {
                         label: format!("{}", index + 1),

@@ -107,8 +107,8 @@ pub fn detect_timed_samples(srt: &str) -> Vec<TimedSpeakerSample> {
         }
     }
     samples
-        .into_iter()
-        .flat_map(|(_, mut cues)| {
+        .into_values()
+        .flat_map(|mut cues| {
             cues.sort_by_key(|cue| std::cmp::Reverse(cue.text.chars().count()));
             cues.into_iter().take(3)
         })
@@ -224,6 +224,37 @@ pub fn apply_to_session(
             .with_context(|| format!("saving speaker map for {stem}"))?;
     }
     Ok(())
+}
+
+/// Restore the preserved diarized transcript files and clear the recorded map.
+/// Raw backups remain in place so the session can be reviewed again later.
+pub fn reset_session_mapping(transcripts_dir: &Path, stem: &str) -> Result<usize> {
+    let mut restored = 0;
+    for extension in ["txt", "srt", "vtt"] {
+        let live = transcripts_dir.join(format!("{stem}.{extension}"));
+        let raw = transcripts_dir.join(format!("{stem}.diarized.{extension}"));
+        if !raw.is_file() {
+            continue;
+        }
+        let contents = std::fs::read(&raw)
+            .with_context(|| format!("reading raw diarized transcript: {}", raw.display()))?;
+        let revision = crate::util::content_revision(
+            &std::fs::read(&live)
+                .with_context(|| format!("reading mapped transcript: {}", live.display()))?,
+        );
+        crate::util::atomic_replace_if_revision(&live, &revision, &contents)
+            .with_context(|| format!("restoring raw diarized transcript: {}", live.display()))?;
+        restored += 1;
+    }
+    if restored == 0 {
+        anyhow::bail!("no raw diarized transcript backups exist for '{stem}'");
+    }
+    if let Some(mut session) = crate::meta::load(transcripts_dir, stem) {
+        session.speaker_map = None;
+        crate::meta::save(transcripts_dir, stem, &session)
+            .with_context(|| format!("clearing speaker map for {stem}"))?;
+    }
+    Ok(restored)
 }
 
 /// Parse a repeatable CLI mapping in the form `SPEAKER_00=Alice`.
@@ -403,5 +434,55 @@ mod tests {
             ));
             assert_eq!(std::fs::read_to_string(raw).unwrap(), "SPEAKER_00: Hello");
         }
+    }
+
+    #[test]
+    fn resets_mapped_transcripts_without_removing_raw_backups() {
+        let temp = tempfile::tempdir().unwrap();
+        for extension in ["txt", "srt"] {
+            std::fs::write(
+                temp.path().join(format!("session.{extension}")),
+                "Alice: Hello",
+            )
+            .unwrap();
+            std::fs::write(
+                temp.path().join(format!("session.diarized.{extension}")),
+                "SPEAKER_00: Hello",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            crate::meta::path(temp.path(), "session"),
+            r#"{"model":"test","speaker_map":{"SPEAKER_00":"Alice"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(reset_session_mapping(temp.path(), "session").unwrap(), 2);
+        for extension in ["txt", "srt"] {
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join(format!("session.{extension}"))).unwrap(),
+                "SPEAKER_00: Hello"
+            );
+            assert!(temp
+                .path()
+                .join(format!("session.diarized.{extension}"))
+                .is_file());
+        }
+        assert_eq!(
+            crate::meta::load(temp.path(), "session")
+                .unwrap()
+                .speaker_map,
+            None
+        );
+    }
+
+    #[test]
+    fn reset_requires_a_raw_diarized_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("session.txt"), "Alice: Hello").unwrap();
+        let error = reset_session_mapping(temp.path(), "session").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no raw diarized transcript backups"));
     }
 }

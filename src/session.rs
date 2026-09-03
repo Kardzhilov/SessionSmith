@@ -11,7 +11,7 @@
 use anyhow::{anyhow, Result};
 use inquire::{Confirm, Select, Text};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::audio::AudioFile;
 use crate::config::GlobalConfig;
@@ -24,6 +24,26 @@ pub struct SessionInput {
     pub files: Vec<PathBuf>,
     /// Stem used for all output file naming.
     pub name: String,
+}
+
+/// Prepare one logical session's audio, concatenating multi-file sessions
+/// through the caller's managed child registry when provided.
+pub async fn prepare_audio_with_children(
+    session: &SessionInput,
+    merge_dir: &Path,
+    children: Option<&crate::jobs::procs::ChildRegistry>,
+) -> Result<PathBuf> {
+    if session.files.len() <= 1 {
+        Ok(session.files.first().cloned().unwrap_or_default())
+    } else {
+        crate::transcribe::concat_audio_files_with_children(
+            &session.files,
+            &session.name,
+            merge_dir,
+            children,
+        )
+        .await
+    }
 }
 
 /// Convert a list of `AudioFile` selections into `SessionInput` values,

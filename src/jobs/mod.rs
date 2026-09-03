@@ -5,6 +5,7 @@
 
 pub mod import_audio;
 pub mod manager;
+pub mod orchestrate;
 pub mod procs;
 pub mod record;
 pub mod report;

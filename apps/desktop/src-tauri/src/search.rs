@@ -1,18 +1,13 @@
 use crate::{commands, workspace};
 use serde::Serialize;
-use sessionsmith::{
-    candidates,
-    config::CampaignConfig,
-    index,
-    pipeline,
-    prompts::ALL_ARTIFACTS,
-};
+use sessionsmith::{candidates, config::CampaignConfig, index, pipeline, prompts::ALL_ARTIFACTS};
 use std::collections::BTreeSet;
+use std::path::Path;
 
 const MAX_QUERY_CHARS: usize = 160;
 const MAX_RESULTS: usize = 60;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
     pub campaign_id: String,
@@ -22,14 +17,38 @@ pub struct SearchResult {
     pub artifact_label: String,
     pub candidate: bool,
     pub alternate_name: Option<String>,
+    pub transcript: bool,
     pub snippet: String,
+    #[specta(type = Option<specta_typescript::Number>)]
+    pub transcript_line: Option<usize>,
+    pub transcript_timestamp: Option<f64>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq, specta::Type)]
+pub struct SearchSource {
+    pub id: String,
+    pub label: String,
+}
+
+pub(crate) fn sources() -> Vec<SearchSource> {
+    std::iter::once(SearchSource {
+        id: "transcript".into(),
+        label: "Transcripts".into(),
+    })
+    .chain(ALL_ARTIFACTS.iter().map(|artifact| SearchSource {
+        id: artifact.id().into(),
+        label: artifact.label().into(),
+    }))
+    .collect()
 }
 
 pub(crate) fn query(
     campaign_id: Option<String>,
     query: String,
+    source_kinds: Vec<String>,
 ) -> Result<Vec<SearchResult>, String> {
     let query = validate_query(&query)?;
+    let index_kinds = validate_source_kinds(source_kinds)?;
     if query.is_empty() {
         return Ok(Vec::new());
     }
@@ -52,7 +71,7 @@ pub(crate) fn query(
 
     let mut results = Vec::new();
     for campaign_id in campaign_ids {
-        results.extend(search_campaign(&campaign_id, &query)?);
+        results.extend(search_campaign(&campaign_id, &query, &index_kinds)?);
         if results.len() >= MAX_RESULTS {
             results.truncate(MAX_RESULTS);
             break;
@@ -61,7 +80,11 @@ pub(crate) fn query(
     Ok(results)
 }
 
-fn search_campaign(campaign_id: &str, query: &str) -> Result<Vec<SearchResult>, String> {
+fn search_campaign(
+    campaign_id: &str,
+    query: &str,
+    index_kinds: &[String],
+) -> Result<Vec<SearchResult>, String> {
     let library = commands::campaign_library(campaign_id.to_string())?;
     let campaign_path = workspace::campaign_config_path(&workspace::workspace_root(), campaign_id)?;
     let campaign = CampaignConfig::load(&campaign_path).map_err(|error| error.to_string())?;
@@ -71,12 +94,19 @@ fn search_campaign(campaign_id: &str, query: &str) -> Result<Vec<SearchResult>, 
         .map(|session| session.stem.as_str())
         .collect::<BTreeSet<_>>();
 
-    let results = index::search(&campaign, query)
+    let results = index::search_filtered(&campaign, query, index_kinds)
         .map_err(|error| format!("Could not search the campaign index: {error}"))?
         .into_iter()
         .filter(|hit| known_stems.contains(hit.session.as_str()))
         .map(|hit| {
-            let (artifact_id, artifact_label, candidate, alternate_name) = artifact_details(&hit.kind);
+            let (artifact_id, artifact_label, candidate, alternate_name) =
+                artifact_details(&hit.kind);
+            let transcript = hit.kind == "transcript";
+            let (transcript_line, transcript_timestamp) = if transcript {
+                transcript_hint(Path::new(&hit.path), &hit.session, query)
+            } else {
+                (None, None)
+            };
             SearchResult {
                 campaign_id: campaign_id.to_string(),
                 campaign_name: library.campaign.name.clone(),
@@ -85,11 +115,53 @@ fn search_campaign(campaign_id: &str, query: &str) -> Result<Vec<SearchResult>, 
                 artifact_label,
                 candidate,
                 alternate_name,
+                transcript,
                 snippet: sanitize_snippet(&hit.snippet),
+                transcript_line,
+                transcript_timestamp,
             }
         })
         .collect::<Vec<_>>();
     Ok(results)
+}
+
+fn transcript_hint(path: &Path, stem: &str, query: &str) -> (Option<usize>, Option<f64>) {
+    let Some(directory) = path.parent() else {
+        return (None, None);
+    };
+    let query = query.to_lowercase();
+    crate::transcript::read(directory, stem, &Default::default())
+        .ok()
+        .and_then(|entries| {
+            entries.into_iter().enumerate().find_map(|(index, entry)| {
+                (entry.text.to_lowercase().contains(&query)
+                    || entry
+                        .speaker
+                        .as_deref()
+                        .is_some_and(|speaker| speaker.to_lowercase().contains(&query)))
+                .then_some((Some(index + 1), entry.t0))
+            })
+        })
+        .unwrap_or((None, None))
+}
+
+fn validate_source_kinds(source_kinds: Vec<String>) -> Result<Vec<String>, String> {
+    let mut kinds = BTreeSet::new();
+    for source in source_kinds {
+        if source == "transcript" {
+            kinds.insert(source);
+            continue;
+        }
+        let Some(artifact) = ALL_ARTIFACTS
+            .iter()
+            .find(|artifact| artifact.id() == source)
+        else {
+            return Err("Select only known search sources.".into());
+        };
+        kinds.insert(artifact.filename().to_string());
+        kinds.insert(pipeline::artifact_file(*artifact, true));
+    }
+    Ok(kinds.into_iter().collect())
 }
 
 fn validate_query(value: &str) -> Result<String, String> {
@@ -108,6 +180,9 @@ fn validate_query(value: &str) -> Result<String, String> {
 }
 
 fn artifact_details(kind: &str) -> (Option<String>, String, bool, Option<String>) {
+    if kind == "transcript" {
+        return (None, "Transcript".into(), false, None);
+    }
     ALL_ARTIFACTS
         .iter()
         .find_map(|artifact| {
@@ -177,7 +252,10 @@ fn sanitize_snippet(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{artifact_details, sanitize_snippet, validate_query};
+    use super::{
+        artifact_details, sanitize_snippet, sources, transcript_hint, validate_query,
+        validate_source_kinds,
+    };
 
     #[test]
     fn search_queries_are_bounded_and_printable() {
@@ -196,7 +274,12 @@ mod tests {
         );
         assert_eq!(
             artifact_details("summary.candidate.md"),
-            (Some("summary".into()), "Summary candidate".into(), true, None)
+            (
+                Some("summary".into()),
+                "Summary candidate".into(),
+                true,
+                None
+            )
         );
         assert_eq!(
             artifact_details("summary-alt-2.md"),
@@ -211,6 +294,58 @@ mod tests {
             artifact_details("unrecognized.json"),
             (None, "Generated document".into(), false, None)
         );
-        assert_eq!(sanitize_snippet("A\u{0000} raven\narrives"), "A raven arrives");
+        assert_eq!(
+            sanitize_snippet("A\u{0000} raven\narrives"),
+            "A raven arrives"
+        );
+    }
+
+    #[test]
+    fn search_sources_are_bounded_to_known_artifacts_and_transcripts() {
+        let kinds = validate_source_kinds(vec!["summary".into(), "transcript".into()]).unwrap();
+        assert!(kinds.contains(&"summary.md".into()));
+        assert!(kinds.contains(&"summary.candidate.md".into()));
+        assert!(kinds.contains(&"transcript".into()));
+        assert!(validate_source_kinds(vec!["filesystem".into()]).is_err());
+        assert_eq!(
+            artifact_details("transcript"),
+            (None, "Transcript".into(), false, None)
+        );
+        assert_eq!(
+            sources().len(),
+            sessionsmith::prompts::ALL_ARTIFACTS.len() + 1
+        );
+        assert!(sources().iter().any(|source| source.id == "story"));
+        assert!(sources().iter().any(|source| source.id == "quotes"));
+    }
+
+    #[test]
+    fn transcript_hint_returns_first_logical_line_and_timestamp() {
+        let directory = std::env::temp_dir().join(format!(
+            "sessionsmith-search-hint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("session.txt");
+        std::fs::write(&path, "first\nmoonwell opens\nthird").unwrap();
+        assert_eq!(
+            transcript_hint(&path, "session", "moonwell"),
+            (Some(2), None)
+        );
+
+        std::fs::write(
+            directory.join("session.srt"),
+            "1\n00:00:01,500 --> 00:00:02,000\nfirst\n\n2\n00:00:04,250 --> 00:00:05,000\nmoonwell opens\n",
+        )
+        .unwrap();
+        assert_eq!(
+            transcript_hint(&path, "session", "moonwell"),
+            (Some(2), Some(4.25))
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

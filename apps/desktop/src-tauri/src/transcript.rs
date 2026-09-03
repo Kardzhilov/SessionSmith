@@ -1,9 +1,5 @@
 use serde::Deserialize;
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptEntry {
@@ -11,6 +7,23 @@ pub struct TranscriptEntry {
     pub t0: Option<f64>,
     pub t1: Option<f64>,
     pub speaker: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptLocation {
+    pub offset_line: usize,
+    pub line_number: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowLocation {
+    Match(TranscriptLocation),
+    FilteredOut,
+    Unavailable,
+}
+
+pub fn bounded_page_size(page_size: usize) -> usize {
+    page_size.clamp(1, 1_000)
 }
 
 pub fn read(
@@ -60,14 +73,65 @@ pub fn filter(entries: Vec<TranscriptEntry>, query: Option<&str>) -> Vec<Transcr
     let query = query.to_lowercase();
     entries
         .into_iter()
-        .filter(|entry| {
-            entry.text.to_lowercase().contains(&query)
-                || entry
-                    .speaker
-                    .as_deref()
-                    .is_some_and(|speaker| speaker.to_lowercase().contains(&query))
-        })
+        .filter(|entry| matches_query(entry, &query))
         .collect()
+}
+
+pub fn locate_for_playback(
+    entries: &[TranscriptEntry],
+    playback_seconds: f64,
+    page_size: usize,
+    query: Option<&str>,
+) -> FollowLocation {
+    if !playback_seconds.is_finite() || playback_seconds < 0.0 {
+        return FollowLocation::Unavailable;
+    }
+    let Some(active_index) = active_entry_index(entries, playback_seconds) else {
+        return FollowLocation::Unavailable;
+    };
+    let query = query.map(str::trim).filter(|query| !query.is_empty());
+    let filtered_index = if let Some(query) = query {
+        let query = query.to_lowercase();
+        if !matches_query(&entries[active_index], &query) {
+            return FollowLocation::FilteredOut;
+        }
+        entries[..active_index]
+            .iter()
+            .filter(|entry| matches_query(entry, &query))
+            .count()
+    } else {
+        active_index
+    };
+    let page_size = bounded_page_size(page_size);
+    FollowLocation::Match(TranscriptLocation {
+        offset_line: filtered_index / page_size * page_size,
+        line_number: filtered_index + 1,
+    })
+}
+
+fn active_entry_index(entries: &[TranscriptEntry], playback_seconds: f64) -> Option<usize> {
+    let mut most_recent = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(start) = entry.t0 else {
+            continue;
+        };
+        if start > playback_seconds {
+            continue;
+        }
+        most_recent = Some(index);
+        if entry.t1.is_some_and(|end| playback_seconds <= end) {
+            return Some(index);
+        }
+    }
+    most_recent
+}
+
+fn matches_query(entry: &TranscriptEntry, query: &str) -> bool {
+    entry.text.to_lowercase().contains(query)
+        || entry
+            .speaker
+            .as_deref()
+            .is_some_and(|speaker| speaker.to_lowercase().contains(query))
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,7 +161,10 @@ struct JsonWord {
     speaker: Option<String>,
 }
 
-fn parse_json(contents: &str, speaker_map: &BTreeMap<String, String>) -> Option<Vec<TranscriptEntry>> {
+fn parse_json(
+    contents: &str,
+    speaker_map: &BTreeMap<String, String>,
+) -> Option<Vec<TranscriptEntry>> {
     let document = serde_json::from_str::<JsonTranscript>(contents).ok()?;
     let segments = match document {
         JsonTranscript::WithSegments { segments } | JsonTranscript::Segments(segments) => segments,
@@ -154,9 +221,7 @@ fn parse_tsv(contents: &str, speaker_map: &BTreeMap<String, String>) -> Vec<Tran
             .and_then(valid_timestamp)
             .map(|milliseconds| milliseconds / 1_000.0);
         let text = fields.get(text_column).copied().unwrap_or_default();
-        let speaker = speaker_column
-            .and_then(|index| fields.get(index))
-            .copied();
+        let speaker = speaker_column.and_then(|index| fields.get(index)).copied();
         entry(text, start, end, speaker, speaker_map)
     })
     .collect()
@@ -242,7 +307,9 @@ fn is_speaker_label(value: &str) -> bool {
     value
         .strip_prefix("[S")
         .and_then(|value| value.strip_suffix(']'))
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .is_some_and(|digits| {
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn display_speaker(value: &str, speaker_map: &BTreeMap<String, String>) -> Option<String> {
@@ -250,7 +317,10 @@ fn display_speaker(value: &str, speaker_map: &BTreeMap<String, String>) -> Optio
     if value.is_empty() {
         return None;
     }
-    let mapped = speaker_map.get(&value).map(String::as_str).unwrap_or(&value);
+    let mapped = speaker_map
+        .get(&value)
+        .map(String::as_str)
+        .unwrap_or(&value);
     let mapped = normalize_text(mapped);
     (!mapped.is_empty()).then_some(mapped)
 }
@@ -297,8 +367,12 @@ fn parse_caption_timestamp(value: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter, parse_captions, parse_json, parse_text, parse_tsv};
+    use super::{
+        bounded_page_size, filter, locate_for_playback, parse_captions, parse_json, parse_text,
+        parse_tsv, FollowLocation, TranscriptEntry, TranscriptLocation,
+    };
     use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn json_segments_prefer_explicit_speakers_and_apply_mappings() {
@@ -319,7 +393,10 @@ mod tests {
 
     #[test]
     fn tsv_milliseconds_become_seconds_and_caption_formats_preserve_timing() {
-        let entries = parse_tsv("start\tend\ttext\n125\t2500\t[S01]: Hello", &BTreeMap::new());
+        let entries = parse_tsv(
+            "start\tend\ttext\n125\t2500\t[S01]: Hello",
+            &BTreeMap::new(),
+        );
         assert_eq!(entries[0].t0, Some(0.125));
         assert_eq!(entries[0].t1, Some(2.5));
         assert_eq!(entries[0].speaker.as_deref(), Some("[S01]"));
@@ -351,5 +428,82 @@ mod tests {
         assert_eq!(filter(entries.clone(), Some("table")).len(), 1);
         assert_eq!(filter(entries.clone(), Some("s02"))[0].text, "Goodbye");
         assert_eq!(filter(entries, Some("missing")).len(), 0);
+    }
+
+    #[test]
+    fn playback_location_uses_bounded_filtered_page_offsets() {
+        let entries = (0..20_000)
+            .map(|line| TranscriptEntry {
+                text: if line % 2 == 0 {
+                    format!("matching line {line}")
+                } else {
+                    format!("other line {line}")
+                },
+                t0: Some(line as f64),
+                t1: Some(line as f64 + 0.9),
+                speaker: Some(format!("SPEAKER_{:02}", line % 8)),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            locate_for_playback(&entries, 12_345.5, 240, None),
+            FollowLocation::Match(TranscriptLocation {
+                offset_line: 12_240,
+                line_number: 12_346,
+            })
+        );
+        assert_eq!(
+            locate_for_playback(&entries, 12_344.5, 240, Some("matching")),
+            FollowLocation::Match(TranscriptLocation {
+                offset_line: 6_000,
+                line_number: 6_173,
+            })
+        );
+        assert_eq!(
+            locate_for_playback(&entries, 12_345.5, 240, Some("matching")),
+            FollowLocation::FilteredOut
+        );
+        assert_eq!(
+            locate_for_playback(&entries, -1.0, 240, None),
+            FollowLocation::Unavailable
+        );
+        assert_eq!(bounded_page_size(0), 1);
+        assert_eq!(bounded_page_size(240), 240);
+        assert_eq!(bounded_page_size(10_000), 1_000);
+        assert_eq!(
+            locate_for_playback(&entries, 12_345.5, 10_000, None),
+            FollowLocation::Match(TranscriptLocation {
+                offset_line: 12_000,
+                line_number: 12_346,
+            })
+        );
+    }
+
+    #[test]
+    fn twenty_thousand_line_transcript_remains_bounded() {
+        let transcript = (0..20_000)
+            .map(|line| {
+                let marker = if line % 997 == 0 { " moonwell" } else { "" };
+                format!("SPEAKER_{:02}: Session line {line}{marker}\n", line % 8)
+            })
+            .collect::<String>();
+        let started = Instant::now();
+
+        let entries = parse_text(&transcript, &BTreeMap::new());
+        let matches = filter(entries.clone(), Some("moonwell"));
+        let page = entries
+            .into_iter()
+            .skip(12_000)
+            .take(1_000)
+            .collect::<Vec<_>>();
+        let elapsed = started.elapsed();
+
+        assert_eq!(matches.len(), 21);
+        assert_eq!(page.len(), 1_000);
+        assert_eq!(page[0].text, "Session line 12000");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "20k-line parse/filter/page took {elapsed:?}"
+        );
     }
 }

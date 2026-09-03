@@ -1,0 +1,13 @@
+@import '@fontsource-variable/bricolage-grotesque';
+
+:root {
+  font-family: 'Bricolage Grotesque Variable', sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+img, svg { max-width: 100%; }
+::selection { background: #ffbd2e; color: #101313; }

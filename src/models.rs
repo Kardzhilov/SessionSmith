@@ -15,6 +15,11 @@ pub struct WhisperModel {
     pub sha256: &'static str,
     /// Approximate public release date (`YYYY-MM`) for the "age at a glance" column.
     pub released: &'static str,
+    pub params: u64,
+    pub langs: &'static str,
+    pub languages: &'static [&'static str],
+    pub license: &'static str,
+    pub note: &'static str,
 }
 
 pub const WHISPER_MODELS: &[WhisperModel] = &[
@@ -23,36 +28,66 @@ pub const WHISPER_MODELS: &[WhisperModel] = &[
         filename: "ggml-tiny.bin",
         sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
         released: "2022-09",
+        params: 39_000_000,
+        langs: "99 langs",
+        languages: &["Multilingual"],
+        license: "MIT",
+        note: "Local GGML speech-to-text model",
     },
     WhisperModel {
         id: "base",
         filename: "ggml-base.bin",
         sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
         released: "2022-09",
+        params: 74_000_000,
+        langs: "99 langs",
+        languages: &["Multilingual"],
+        license: "MIT",
+        note: "tiny + fast; low accuracy, good for smoke tests",
     },
     WhisperModel {
         id: "small",
         filename: "ggml-small.bin",
         sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
         released: "2022-09",
+        params: 244_000_000,
+        langs: "99 langs",
+        languages: &["Multilingual"],
+        license: "MIT",
+        note: "Local GGML speech-to-text model",
     },
     WhisperModel {
         id: "medium",
         filename: "ggml-medium.bin",
         sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
         released: "2022-09",
+        params: 769_000_000,
+        langs: "99 langs",
+        languages: &["Multilingual"],
+        license: "MIT",
+        note: "lighter; good on CPU-only machines",
     },
     WhisperModel {
         id: "large-v3",
         filename: "ggml-large-v3.bin",
         sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
         released: "2023-11",
+        params: 1_550_000_000,
+        langs: "99 langs",
+        languages: &["Multilingual"],
+        license: "MIT",
+        note: "most accurate whisper; slower than turbo",
     },
     WhisperModel {
         id: "large-v3-turbo",
         filename: "ggml-large-v3-turbo.bin",
         sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
         released: "2024-10",
+        params: 809_000_000,
+        langs: "99 langs",
+        languages: &["Multilingual"],
+        license: "MIT",
+        note: "fast multilingual default; runs on CPU or GPU",
     },
 ];
 
@@ -531,11 +566,17 @@ pub struct OllamaOption {
     pub pull: &'static str,
     /// Approximate download size in bytes (refined from Ollama after a pull).
     pub size: u64,
+    /// Published parameter count represented by this exact pull option.
+    pub params: u64,
 }
 
 pub struct OllamaModel {
     pub display: &'static str,
     pub released: &'static str,
+    pub langs: Option<&'static str>,
+    pub languages: &'static [&'static str],
+    pub license: Option<&'static str>,
+    pub note: Option<&'static str>,
     pub options: &'static [OllamaOption],
 }
 
@@ -543,149 +584,209 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "qwen3.8",
         released: "2026-08",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated 27B Ollama option."),
         options: &[OllamaOption {
             label: "27b",
             pull: "qwen3.8:27b",
             size: 18_000_000_000,
+            params: 27_000_000_000,
         }],
     },
     OllamaModel {
         display: "qwen3.5",
         released: "2026-03",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated Ollama options from 0.8B through 122B."),
         options: &[
             OllamaOption {
                 label: "0.8b",
                 pull: "qwen3.5:0.8b",
                 size: 1_000_000_000,
+                params: 800_000_000,
             },
             OllamaOption {
                 label: "2b",
                 pull: "qwen3.5:2b",
                 size: 2_700_000_000,
+                params: 2_000_000_000,
             },
             OllamaOption {
                 label: "4b",
                 pull: "qwen3.5:4b",
                 size: 3_400_000_000,
+                params: 4_000_000_000,
             },
             OllamaOption {
                 label: "9b",
                 pull: "qwen3.5:9b",
                 size: 6_600_000_000,
+                params: 9_000_000_000,
             },
             OllamaOption {
                 label: "27b",
                 pull: "qwen3.5:27b",
                 size: 17_000_000_000,
+                params: 27_000_000_000,
             },
             OllamaOption {
                 label: "35b",
                 pull: "qwen3.5:35b",
                 size: 24_000_000_000,
+                params: 35_000_000_000,
             },
             OllamaOption {
                 label: "122b",
                 pull: "qwen3.5:122b",
                 size: 81_000_000_000,
+                params: 122_000_000_000,
             },
         ],
     },
     OllamaModel {
         display: "ornith",
         released: "2026-06",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated 9B and 35B Ollama options."),
         options: &[
             OllamaOption {
                 label: "9b",
                 pull: "ornith:9b",
                 size: 5_600_000_000,
+                params: 9_000_000_000,
             },
             OllamaOption {
                 label: "35b",
                 pull: "ornith:35b",
                 size: 21_000_000_000,
+                params: 35_000_000_000,
             },
         ],
     },
     OllamaModel {
         display: "Agents-A1",
         released: "2026-06",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated 35B Q4_K_M GGUF option served through Ollama."),
         options: &[OllamaOption {
             label: "35b Q4_K_M",
             pull: "hf.co/InternScience/Agents-A1-Q4_K_M-GGUF",
             size: 22_800_000_000,
+            params: 35_000_000_000,
         }],
     },
     OllamaModel {
         display: "llama3.3",
         released: "2024-12",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated 70B Ollama option."),
         options: &[OllamaOption {
             label: "70b",
             pull: "llama3.3:70b",
             size: 43_000_000_000,
+            params: 70_000_000_000,
         }],
     },
     OllamaModel {
         display: "llama3.2",
         released: "2024-09",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated compact 1B and 3B Ollama options."),
         options: &[
             OllamaOption {
                 label: "1b",
                 pull: "llama3.2:1b",
                 size: 1_300_000_000,
+                params: 1_000_000_000,
             },
             OllamaOption {
                 label: "3b",
                 pull: "llama3.2:3b",
                 size: 2_000_000_000,
+                params: 3_000_000_000,
             },
         ],
     },
     OllamaModel {
         display: "gemma3",
         released: "2025-03",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated 4B, 12B, and 27B Ollama options."),
         options: &[
             OllamaOption {
                 label: "4b",
                 pull: "gemma3:4b",
                 size: 3_300_000_000,
+                params: 4_000_000_000,
             },
             OllamaOption {
                 label: "12b",
                 pull: "gemma3:12b",
                 size: 8_100_000_000,
+                params: 12_000_000_000,
             },
             OllamaOption {
                 label: "27b",
                 pull: "gemma3:27b",
                 size: 17_000_000_000,
+                params: 27_000_000_000,
             },
         ],
     },
     OllamaModel {
         display: "mistral",
         released: "2023-09",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated 7B Ollama option."),
         options: &[OllamaOption {
             label: "7b",
             pull: "mistral:7b",
             size: 4_100_000_000,
+            params: 7_000_000_000,
         }],
     },
     OllamaModel {
         display: "phi4",
         released: "2024-12",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated 14B Ollama option."),
         options: &[OllamaOption {
             label: "14b",
             pull: "phi4:14b",
             size: 9_100_000_000,
+            params: 14_000_000_000,
         }],
     },
     OllamaModel {
         display: "phi4-mini",
         released: "2025-02",
+        langs: None,
+        languages: &[],
+        license: None,
+        note: Some("Curated compact 3.8B Ollama option."),
         options: &[OllamaOption {
             label: "3.8b",
             pull: "phi4-mini:3.8b",
             size: 2_500_000_000,
+            params: 3_800_000_000,
         }],
     },
 ];
@@ -874,6 +975,32 @@ mod tests {
                 .chars()
                 .all(|character| character.is_ascii_hexdigit()));
         }
+    }
+
+    #[test]
+    fn catalog_metadata_is_structured_at_the_source() {
+        let whisper = WHISPER_MODELS
+            .iter()
+            .find(|model| model.id == "large-v3-turbo")
+            .expect("Whisper turbo is cataloged");
+        assert_eq!(whisper.params, 809_000_000);
+        assert_eq!(whisper.languages, &["Multilingual"]);
+        assert_eq!(whisper.license, "MIT");
+        assert!(!whisper.note.is_empty());
+
+        let ollama = OLLAMA_CATALOG
+            .iter()
+            .find(|model| model.display == "qwen3.5")
+            .expect("qwen3.5 is cataloged");
+        let option = ollama
+            .options
+            .iter()
+            .find(|option| option.pull == "qwen3.5:9b")
+            .expect("qwen3.5:9b is cataloged");
+        assert_eq!(option.params, 9_000_000_000);
+        assert_eq!(ollama.languages, &[] as &[&str]);
+        assert_eq!(ollama.license, None);
+        assert!(ollama.note.is_some());
     }
 
     fn remote_meta(url: String, etag: &str, length: u64) -> HfFileMeta {

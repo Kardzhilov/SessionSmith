@@ -1,20 +1,21 @@
 use serde::{Deserialize, Serialize};
 use sessionsmith::{
     audio,
-    commands::{
-        export::{ExportFormat as CoreExportFormat, ExportRequest as CoreExportRequest},
-        record::RecordingRequest,
-    },
     config::{self, CampaignConfig, GlobalConfig},
+    export::{ExportFormat as CoreExportFormat, ExportRequest as CoreExportRequest},
     hardware,
     jobs::{
         manager::{JobId, JobKind, JobManager, JobSnapshot as ManagedJobSnapshot, JobState},
+        orchestrate::{
+            spawn_model_with_reporter, spawn_with_reporter, JobKind as PipelineJobKind, JobRequest,
+            ModelJob,
+        },
+        record::RecordingRequest,
         report::{JobEvent, Reporter},
     },
     pipeline,
     prompts::Artifact,
     session::SessionInput,
-    tui::{spawn_model_with_reporter, spawn_with_reporter, JobRequest, ModelJob, PipelineJobKind},
     ui,
 };
 use std::{
@@ -30,25 +31,31 @@ pub const JOB_UPDATED_EVENT: &str = "job://updated";
 
 const LOG_TAIL_LIMIT: usize = 80;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobProgress {
     pub label: String,
+    #[specta(type = specta_typescript::Number)]
     pub position: u64,
+    #[specta(type = specta_typescript::Number)]
     pub total: u64,
     pub rate: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobSnapshot {
+    #[specta(type = specta_typescript::Number)]
     pub id: JobId,
     pub kind: String,
     pub title: String,
     pub state: String,
+    #[specta(type = Option<specta_typescript::Number>)]
     pub started_at: Option<u64>,
+    #[specta(type = Option<specta_typescript::Number>)]
     pub finished_at: Option<u64>,
     pub summary: Option<String>,
+    #[specta(type = specta_typescript::Number)]
     pub active_children: usize,
     pub phase: Option<String>,
     pub progress: Option<JobProgress>,
@@ -56,33 +63,34 @@ pub struct JobSnapshot {
     pub can_cancel: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobSubmission {
+    #[specta(type = specta_typescript::Number)]
     pub id: JobId,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordRequest {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportAudioRequest {
     pub campaign_id: String,
     pub source_paths: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ExportFormat {
     Html,
     Obsidian,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
     pub campaign_id: String,
@@ -95,7 +103,7 @@ pub struct ExportRequest {
     pub player_safe: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessRequest {
     pub campaign_id: String,
@@ -120,7 +128,7 @@ pub struct ProcessRequest {
     pub session_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct NotesRequest {
     pub campaign_id: String,
@@ -131,7 +139,7 @@ pub struct NotesRequest {
     pub candidate: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscribeRequest {
     pub campaign_id: String,
@@ -151,7 +159,7 @@ pub struct TranscribeRequest {
     pub session_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelAction {
     DownloadWhisper,
@@ -162,14 +170,14 @@ pub enum ModelAction {
     DeleteOllama,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRequest {
     pub action: ModelAction,
     pub model_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerMapRequest {
     pub campaign_id: String,
@@ -177,14 +185,29 @@ pub struct SpeakerMapRequest {
     pub mappings: Vec<SpeakerMapEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerResetRequest {
+    pub campaign_id: String,
+    pub stem: String,
+}
+
+#[derive(Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRenameRequest {
+    pub campaign_id: String,
+    pub old_stem: String,
+    pub new_stem: String,
+}
+
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerMapEntry {
     pub label: String,
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum CandidateAction {
     KeepCandidate,
@@ -192,7 +215,7 @@ pub enum CandidateAction {
     DiscardCandidate,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateResolveRequest {
     pub campaign_id: String,
@@ -244,47 +267,67 @@ struct ProcessingContext {
     transcripts_dir: PathBuf,
 }
 
+#[derive(Clone)]
+pub(crate) struct WatchCampaignContext {
+    pub campaign_name: String,
+    pub audio_dir: PathBuf,
+    pub transcripts_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WatchJobState {
+    Active,
+    Succeeded,
+    Failed(String),
+    Cancelled,
+}
+
 impl DesktopJobs {
     pub fn submit_doctor(&self, app: AppHandle) -> Result<JobSubmission, String> {
         let manager = self.manager()?;
         let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
-        let id = manager.submit(JobKind::Doctor, "System check", reporter.clone(), move |context| async move {
-            let reporter = context.reporter();
-            ui::with_reporter(reporter, async move {
-                ui::header("System check");
-                ui::phase("Readiness");
+        let id = manager.submit(
+            JobKind::Doctor,
+            "System check",
+            reporter.clone(),
+            move |context| async move {
+                let reporter = context.reporter();
+                ui::with_reporter(reporter, async move {
+                    ui::header("System check");
+                    ui::phase("Readiness");
 
-                let report = crate::health::report()
-                    .await
-                    .map_err(std::io::Error::other)?;
-                let mut failures = 0usize;
-                let mut warnings = 0usize;
+                    let report = crate::health::report()
+                        .await
+                        .map_err(std::io::Error::other)?;
+                    let mut failures = 0usize;
+                    let mut warnings = 0usize;
 
-                for check in report.checks {
-                    let message = format!("{}: {}", check.label, check.detail);
-                    match check.state.as_str() {
-                        "ok" => ui::ok(&message),
-                        "warn" => {
-                            warnings += 1;
-                            ui::warn(&message);
-                        }
-                        _ => {
-                            failures += 1;
-                            ui::error(&message);
+                    for check in report.checks {
+                        let message = format!("{}: {}", check.label, check.detail);
+                        match check.state.as_str() {
+                            "ok" => ui::ok(&message),
+                            "warn" => {
+                                warnings += 1;
+                                ui::warn(&message);
+                            }
+                            _ => {
+                                failures += 1;
+                                ui::error(&message);
+                            }
                         }
                     }
-                }
 
-                Ok(if failures == 0 && warnings == 0 {
-                    "all checks are ready".into()
-                } else if failures == 0 {
-                    format!("{warnings} optional check(s) unavailable")
-                } else {
-                    format!("{failures} check(s) need attention")
+                    Ok(if failures == 0 && warnings == 0 {
+                        "all checks are ready".into()
+                    } else if failures == 0 {
+                        format!("{warnings} optional check(s) unavailable")
+                    } else {
+                        format!("{failures} check(s) need attention")
+                    })
                 })
-            })
-            .await
-        });
+                .await
+            },
+        );
 
         reporter.bind(id);
         self.emit_snapshot(&app, id);
@@ -346,7 +389,9 @@ impl DesktopJobs {
         let request = process_request(request)?;
         let manager = self.manager()?;
         if self.artifact_mutation_active() {
-            return Err("Wait for the active document update before starting a pipeline job.".into());
+            return Err(
+                "Wait for the active document update before starting a pipeline job.".into(),
+            );
         }
         if pipeline_job_active(&manager) {
             return Err("A pipeline job is already active.".into());
@@ -359,6 +404,73 @@ impl DesktopJobs {
         Ok(JobSubmission { id })
     }
 
+    pub(crate) fn watch_campaign_context(
+        &self,
+        campaign_id: &str,
+    ) -> Result<WatchCampaignContext, String> {
+        let context = processing_context(campaign_id)?;
+        Ok(WatchCampaignContext {
+            campaign_name: context.campaign.campaign.name,
+            audio_dir: resolve_workspace_path(&workspace_root(), &config::audio_dir()),
+            transcripts_dir: context.transcripts_dir,
+        })
+    }
+
+    pub(crate) fn submit_watch_process(
+        &self,
+        app: AppHandle,
+        campaign_id: String,
+        source_path: PathBuf,
+    ) -> Result<JobSubmission, String> {
+        let context = processing_context(&campaign_id)?;
+        self.submit_process(
+            app,
+            ProcessRequest {
+                campaign_id,
+                source_paths: vec![source_path.to_string_lossy().into_owned()],
+                all_inbox: false,
+                artifact_ids: context.campaign.outputs.default,
+                resume: true,
+                force: false,
+                candidate: false,
+                asr_model: None,
+                language: None,
+                session_date: None,
+                diarize: false,
+                vad: false,
+                backend_kind: None,
+                llm_model: None,
+                combine: false,
+                session_name: None,
+            },
+        )
+    }
+
+    pub(crate) fn pipeline_busy(&self) -> bool {
+        self.artifact_mutation_active()
+            || self
+                .manager_if_initialized()
+                .is_some_and(|manager| pipeline_job_active(&manager))
+    }
+
+    pub(crate) fn watch_job_state(&self, id: JobId) -> Option<WatchJobState> {
+        let snapshot = self
+            .manager_if_initialized()?
+            .list()
+            .into_iter()
+            .find(|job| job.id == id)?;
+        Some(match snapshot.state {
+            JobState::Queued | JobState::Running | JobState::Cancelling => WatchJobState::Active,
+            JobState::Succeeded => WatchJobState::Succeeded,
+            JobState::Failed => WatchJobState::Failed(
+                snapshot
+                    .summary
+                    .unwrap_or_else(|| "Pipeline job failed.".into()),
+            ),
+            JobState::Cancelled => WatchJobState::Cancelled,
+        })
+    }
+
     pub fn submit_log_rebuild(
         &self,
         app: AppHandle,
@@ -367,7 +479,9 @@ impl DesktopJobs {
         let request = log_rebuild_request(&campaign_id)?;
         let manager = self.manager()?;
         if self.artifact_mutation_active() {
-            return Err("Wait for the active local update before rebuilding the campaign log.".into());
+            return Err(
+                "Wait for the active local update before rebuilding the campaign log.".into(),
+            );
         }
         if pipeline_job_active(&manager) {
             return Err("A pipeline job is already active.".into());
@@ -389,7 +503,10 @@ impl DesktopJobs {
         let manager = self.manager()?;
         if manager.list().iter().any(|job| {
             job.kind == JobKind::Reindex
-                && !matches!(job.state, JobState::Succeeded | JobState::Failed | JobState::Cancelled)
+                && !matches!(
+                    job.state,
+                    JobState::Succeeded | JobState::Failed | JobState::Cancelled
+                )
         }) {
             return Err("A search index rebuild is already active.".into());
         }
@@ -397,22 +514,27 @@ impl DesktopJobs {
         let title = format!("Rebuild search index · {}", context.campaign.campaign.name);
         let campaign = context.campaign;
         let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
-        let id = manager.submit(JobKind::Reindex, title, reporter.clone(), move |context| async move {
-            let reporter = context.reporter();
-            ui::with_reporter(reporter, async move {
-                ui::phase("Index session notes");
-                let indexed = tauri::async_runtime::spawn_blocking(move || {
-                    sessionsmith::campaign_ops::reindex_campaign(&campaign)
-                        .map_err(std::io::Error::other)
+        let id = manager.submit(
+            JobKind::Reindex,
+            title,
+            reporter.clone(),
+            move |context| async move {
+                let reporter = context.reporter();
+                ui::with_reporter(reporter, async move {
+                    ui::phase("Index session notes");
+                    let indexed = tauri::async_runtime::spawn_blocking(move || {
+                        sessionsmith::campaign_ops::reindex_campaign(&campaign)
+                            .map_err(std::io::Error::other)
+                    })
+                    .await
+                    .map_err(std::io::Error::other)??;
+                    let summary = format!("indexed {indexed} session(s)");
+                    ui::ok(&summary);
+                    Ok(summary)
                 })
                 .await
-                .map_err(std::io::Error::other)??;
-                let summary = format!("indexed {indexed} session(s)");
-                ui::ok(&summary);
-                Ok(summary)
-            })
-            .await
-        });
+            },
+        );
         reporter.bind(id);
         self.emit_snapshot(&app, id);
         Ok(JobSubmission { id })
@@ -430,7 +552,10 @@ impl DesktopJobs {
         }
         if manager.list().iter().any(|job| {
             job.kind == JobKind::Export
-                && !matches!(job.state, JobState::Succeeded | JobState::Failed | JobState::Cancelled)
+                && !matches!(
+                    job.state,
+                    JobState::Succeeded | JobState::Failed | JobState::Cancelled
+                )
         }) {
             return Err("An export is already active.".into());
         }
@@ -440,25 +565,37 @@ impl DesktopJobs {
         let format = export_format_label(export.format);
         let player_safe = export.player_safe;
         let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
-        let id = manager.submit(JobKind::Export, title, reporter.clone(), move |context| async move {
-            let reporter = context.reporter();
-            ui::with_reporter(reporter, async move {
-                ui::phase("Build managed export");
-                let summary = tauri::async_runtime::spawn_blocking(move || {
-                    sessionsmith::commands::export::export(export)
-                        .map(|result| {
-                            let audience = if player_safe { " player-safe" } else { "" };
-                            format!("exported {} {format}{audience} session(s)", result.session_count)
-                        })
-                        .map_err(|_| std::io::Error::other("The selected session notes could not be exported."))
+        let id = manager.submit(
+            JobKind::Export,
+            title,
+            reporter.clone(),
+            move |context| async move {
+                let reporter = context.reporter();
+                ui::with_reporter(reporter, async move {
+                    ui::phase("Build managed export");
+                    let summary = tauri::async_runtime::spawn_blocking(move || {
+                        sessionsmith::export::export(export)
+                            .map(|result| {
+                                let audience = if player_safe { " player-safe" } else { "" };
+                                format!(
+                                    "exported {} {format}{audience} session(s)",
+                                    result.session_count
+                                )
+                            })
+                            .map_err(|_| {
+                                std::io::Error::other(
+                                    "The selected session notes could not be exported.",
+                                )
+                            })
+                    })
+                    .await
+                    .map_err(std::io::Error::other)??;
+                    ui::ok(&summary);
+                    Ok(summary)
                 })
                 .await
-                .map_err(std::io::Error::other)??;
-                ui::ok(&summary);
-                Ok(summary)
-            })
-            .await
-        });
+            },
+        );
         reporter.bind(id);
         self.emit_snapshot(&app, id);
         Ok(JobSubmission { id })
@@ -512,43 +649,161 @@ impl DesktopJobs {
         let manager = self.manager()?;
         if manager.list().iter().any(|job| {
             job.kind == JobKind::SpeakerMap
-                && !matches!(job.state, JobState::Succeeded | JobState::Failed | JobState::Cancelled)
+                && !matches!(
+                    job.state,
+                    JobState::Succeeded | JobState::Failed | JobState::Cancelled
+                )
         }) {
             return Err("A speaker mapping update is already active.".into());
         }
 
         let title = format!("Map speakers · {}", request.stem);
         let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
-        let id = manager.submit(JobKind::SpeakerMap, title, reporter.clone(), move |context| async move {
-            let reporter = context.reporter();
-            let cancellation = context.cancellation();
-            ui::with_reporter(reporter, async move {
-                if cancellation.is_cancelled() {
-                    return Err(std::io::Error::other("cancelled").into());
-                }
-                ui::phase("Apply speaker mapping");
-                let summary = tauri::async_runtime::spawn_blocking(move || -> Result<String, std::io::Error> {
+        let id = manager.submit(
+            JobKind::SpeakerMap,
+            title,
+            reporter.clone(),
+            move |context| async move {
+                let reporter = context.reporter();
+                let cancellation = context.cancellation();
+                ui::with_reporter(reporter, async move {
                     if cancellation.is_cancelled() {
-                        return Err(std::io::Error::other("cancelled"));
+                        return Err(std::io::Error::other("cancelled").into());
                     }
-                    sessionsmith::speakers::apply_to_session(
-                        &request.transcripts_dir,
-                        &request.stem,
-                        &request.mappings,
+                    ui::phase("Apply speaker mapping");
+                    let summary = tauri::async_runtime::spawn_blocking(
+                        move || -> Result<String, std::io::Error> {
+                            if cancellation.is_cancelled() {
+                                return Err(std::io::Error::other("cancelled"));
+                            }
+                            sessionsmith::speakers::apply_to_session(
+                                &request.transcripts_dir,
+                                &request.stem,
+                                &request.mappings,
+                            )
+                            .map_err(std::io::Error::other)?;
+                            Ok(format!(
+                                "mapped {} speaker label(s)",
+                                request.mappings.len()
+                            ))
+                        },
                     )
-                    .map_err(std::io::Error::other)?;
-                    Ok(format!(
-                        "mapped {} speaker label(s)",
-                        request.mappings.len()
-                    ))
+                    .await
+                    .map_err(std::io::Error::other)??;
+                    ui::ok(&summary);
+                    Ok(summary)
                 })
                 .await
-                .map_err(std::io::Error::other)??;
-                ui::ok(&summary);
-                Ok(summary)
-            })
-            .await
-        });
+            },
+        );
+        reporter.bind(id);
+        self.emit_snapshot(&app, id);
+        Ok(JobSubmission { id })
+    }
+
+    pub fn submit_speaker_reset(
+        &self,
+        app: AppHandle,
+        request: SpeakerResetRequest,
+    ) -> Result<JobSubmission, String> {
+        let request = speaker_reset_request(request)?;
+        let manager = self.manager()?;
+        if manager.list().iter().any(|job| {
+            job.kind == JobKind::SpeakerMap
+                && !matches!(
+                    job.state,
+                    JobState::Succeeded | JobState::Failed | JobState::Cancelled
+                )
+        }) {
+            return Err("A speaker mapping update is already active.".into());
+        }
+
+        let title = format!("Reset speakers · {}", request.stem);
+        let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
+        let id = manager.submit(
+            JobKind::SpeakerMap,
+            title,
+            reporter.clone(),
+            move |context| async move {
+                let reporter = context.reporter();
+                ui::with_reporter(reporter, async move {
+                    ui::phase("Restore raw speaker labels");
+                    let summary = tauri::async_runtime::spawn_blocking(
+                        move || -> Result<String, std::io::Error> {
+                            let count = sessionsmith::speakers::reset_session_mapping(
+                                &request.transcripts_dir,
+                                &request.stem,
+                            )
+                            .map_err(std::io::Error::other)?;
+                            Ok(format!("restored {count} raw transcript file(s)"))
+                        },
+                    )
+                    .await
+                    .map_err(std::io::Error::other)??;
+                    ui::ok(&summary);
+                    Ok(summary)
+                })
+                .await
+            },
+        );
+        reporter.bind(id);
+        self.emit_snapshot(&app, id);
+        Ok(JobSubmission { id })
+    }
+
+    pub fn submit_session_rename(
+        &self,
+        app: AppHandle,
+        request: SessionRenameRequest,
+    ) -> Result<JobSubmission, String> {
+        let request = session_rename_request(request)?;
+        let manager = self.manager()?;
+        if pipeline_job_active(&manager) {
+            return Err("Wait for the active pipeline job before renaming a session.".into());
+        }
+        if manager.list().iter().any(|job| {
+            job.kind == JobKind::SessionRename
+                && !matches!(
+                    job.state,
+                    JobState::Succeeded | JobState::Failed | JobState::Cancelled
+                )
+        }) {
+            return Err("A session rename is already active.".into());
+        }
+        let mutation = self.begin_artifact_mutation()?;
+        let title = format!("Rename session · {}", request.old_stem);
+        let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
+        let id = manager.submit(
+            JobKind::SessionRename,
+            title,
+            reporter.clone(),
+            move |context| async move {
+                let _mutation = mutation;
+                let reporter = context.reporter();
+                ui::with_reporter(reporter, async move {
+                    ui::phase("Rename session artifacts");
+                    let outcome = tauri::async_runtime::spawn_blocking(move || {
+                        sessionsmith::campaign_ops::rename_session_at(
+                            &request.campaign,
+                            &request.transcripts_dir,
+                            &request.notes_dir,
+                            &request.old_stem,
+                            &request.new_stem,
+                        )
+                        .map_err(std::io::Error::other)
+                    })
+                    .await
+                    .map_err(std::io::Error::other)??;
+                    let summary = format!(
+                        "Renamed {} to {}. Rebuild the Campaign Log to update session references.",
+                        outcome.old_stem, outcome.new_stem
+                    );
+                    ui::ok(&summary);
+                    Ok(summary)
+                })
+                .await
+            },
+        );
         reporter.bind(id);
         self.emit_snapshot(&app, id);
         Ok(JobSubmission { id })
@@ -566,67 +821,89 @@ impl DesktopJobs {
         }
         if manager.list().iter().any(|job| {
             job.kind == JobKind::CandidateResolve
-                && !matches!(job.state, JobState::Succeeded | JobState::Failed | JobState::Cancelled)
+                && !matches!(
+                    job.state,
+                    JobState::Succeeded | JobState::Failed | JobState::Cancelled
+                )
         }) {
             return Err("A candidate resolution is already active.".into());
         }
         let mutation = self.begin_artifact_mutation()?;
 
-        let title = format!("{} candidate · {}", candidate_action_label(request.action), request.stem);
+        let title = format!(
+            "{} candidate · {}",
+            candidate_action_label(request.action),
+            request.stem
+        );
         let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
-        let id = manager.submit(JobKind::CandidateResolve, title, reporter.clone(), move |context| async move {
-            let _mutation = mutation;
-            let reporter = context.reporter();
-            ui::with_reporter(reporter, async move {
-                ui::phase("Resolve candidate artifact");
-                let (summary, index_warning) = tauri::async_runtime::spawn_blocking(move || -> Result<_, std::io::Error> {
-                    let summary = match request.action {
-                        CandidateAction::KeepCandidate => {
-                            sessionsmith::candidates::promote(&request.candidate_path, &request.current_path)
-                                .map_err(std::io::Error::other)?;
-                            format!(
-                                "kept candidate {}",
-                                request.artifact.label()
-                            )
-                        }
-                        CandidateAction::KeepBoth => {
-                            let alternate = sessionsmith::candidates::keep_both(
-                                &request.candidate_path,
-                                &request.current_path,
-                            )
-                            .map_err(std::io::Error::other)?;
-                            let name = alternate.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
-                                std::io::Error::other("alternate artifact has no UTF-8 file name")
-                            })?;
-                            format!("kept candidate as {name}")
-                        }
-                        CandidateAction::DiscardCandidate => {
-                            sessionsmith::candidates::discard(&request.candidate_path)
-                                .map_err(std::io::Error::other)?;
-                            format!("discarded candidate {}", request.artifact.label())
-                        }
-                    };
-                    let index_warning = request.index_enabled.then(|| {
-                        sessionsmith::index::record_session(
-                            &request.campaign,
-                            &request.stem,
-                            &request.notes_dir,
-                        )
-                        .err()
-                        .map(|error| format!("Search index needs rebuilding: {error}"))
-                    }).flatten();
-                    Ok((summary, index_warning))
+        let id = manager.submit(
+            JobKind::CandidateResolve,
+            title,
+            reporter.clone(),
+            move |context| async move {
+                let _mutation = mutation;
+                let reporter = context.reporter();
+                ui::with_reporter(reporter, async move {
+                    ui::phase("Resolve candidate artifact");
+                    let (summary, index_warning) = tauri::async_runtime::spawn_blocking(
+                        move || -> Result<_, std::io::Error> {
+                            let summary = match request.action {
+                                CandidateAction::KeepCandidate => {
+                                    sessionsmith::candidates::promote(
+                                        &request.candidate_path,
+                                        &request.current_path,
+                                    )
+                                    .map_err(std::io::Error::other)?;
+                                    format!("kept candidate {}", request.artifact.label())
+                                }
+                                CandidateAction::KeepBoth => {
+                                    let alternate = sessionsmith::candidates::keep_both(
+                                        &request.candidate_path,
+                                        &request.current_path,
+                                    )
+                                    .map_err(std::io::Error::other)?;
+                                    let name = alternate
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .ok_or_else(|| {
+                                            std::io::Error::other(
+                                                "alternate artifact has no UTF-8 file name",
+                                            )
+                                        })?;
+                                    format!("kept candidate as {name}")
+                                }
+                                CandidateAction::DiscardCandidate => {
+                                    sessionsmith::candidates::discard(&request.candidate_path)
+                                        .map_err(std::io::Error::other)?;
+                                    format!("discarded candidate {}", request.artifact.label())
+                                }
+                            };
+                            let index_warning = request
+                                .index_enabled
+                                .then(|| {
+                                    sessionsmith::index::record_session(
+                                        &request.campaign,
+                                        &request.stem,
+                                        &request.notes_dir,
+                                    )
+                                    .err()
+                                    .map(|error| format!("Search index needs rebuilding: {error}"))
+                                })
+                                .flatten();
+                            Ok((summary, index_warning))
+                        },
+                    )
+                    .await
+                    .map_err(std::io::Error::other)??;
+                    if let Some(warning) = index_warning {
+                        ui::warn(&warning);
+                    }
+                    ui::ok(&summary);
+                    Ok(summary)
                 })
                 .await
-                .map_err(std::io::Error::other)??;
-                if let Some(warning) = index_warning {
-                    ui::warn(&warning);
-                }
-                ui::ok(&summary);
-                Ok(summary)
-            })
-            .await
-        });
+            },
+        );
         reporter.bind(id);
         self.emit_snapshot(&app, id);
         Ok(JobSubmission { id })
@@ -901,6 +1178,7 @@ fn job_kind(kind: &JobKind) -> &'static str {
         JobKind::Reindex => "reindex",
         JobKind::CandidateResolve => "candidateResolve",
         JobKind::SpeakerMap => "speakerMap",
+        JobKind::SessionRename => "sessionRename",
         JobKind::Model => "model",
         JobKind::Export => "export",
         JobKind::Record => "record",
@@ -910,7 +1188,11 @@ fn job_kind(kind: &JobKind) -> &'static str {
 fn job_supports_cancellation(kind: &JobKind) -> bool {
     !matches!(
         kind,
-        JobKind::Reindex | JobKind::CandidateResolve | JobKind::SpeakerMap | JobKind::Export
+        JobKind::Reindex
+            | JobKind::CandidateResolve
+            | JobKind::SpeakerMap
+            | JobKind::SessionRename
+            | JobKind::Export
     )
 }
 
@@ -940,7 +1222,9 @@ fn recording_request(request: RecordRequest) -> Result<RecordingRequest, String>
     Ok(request)
 }
 
-fn import_request(request: ImportAudioRequest) -> Result<sessionsmith::jobs::import_audio::AudioImportRequest, String> {
+fn import_request(
+    request: ImportAudioRequest,
+) -> Result<sessionsmith::jobs::import_audio::AudioImportRequest, String> {
     let campaign_id = request.campaign_id.trim();
     if campaign_id.is_empty() {
         return Err("A campaign is required for audio import.".into());
@@ -951,13 +1235,21 @@ fn import_request(request: ImportAudioRequest) -> Result<sessionsmith::jobs::imp
     if request.source_paths.len() > 100 {
         return Err("Select no more than 100 audio files at a time.".into());
     }
-    if request.source_paths.iter().any(|path| path.trim().is_empty()) {
+    if request
+        .source_paths
+        .iter()
+        .any(|path| path.trim().is_empty())
+    {
         return Err("Selected audio paths must not be empty.".into());
     }
 
     Ok(sessionsmith::jobs::import_audio::AudioImportRequest {
         inbox: campaign_inbox_dir(campaign_id)?,
-        sources: request.source_paths.into_iter().map(PathBuf::from).collect(),
+        sources: request
+            .source_paths
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
     })
 }
 
@@ -1031,7 +1323,11 @@ fn export_request(request: ExportRequest) -> Result<ValidatedExportRequest, Stri
         ExportFormat::Html => CoreExportFormat::Html,
         ExportFormat::Obsidian => CoreExportFormat::Obsidian,
     };
-    let title = format!("Export {} · {}", export_format_label(format), campaign.campaign.name);
+    let title = format!(
+        "Export {} · {}",
+        export_format_label(format),
+        campaign.campaign.name
+    );
     let output_dir = managed_export_dir(&root, &campaign.slug())?;
 
     Ok(ValidatedExportRequest {
@@ -1047,9 +1343,7 @@ fn export_request(request: ExportRequest) -> Result<ValidatedExportRequest, Stri
 }
 
 fn is_valid_export_stem(stem: &str) -> bool {
-    is_simple_session_stem(stem)
-        && stem.len() <= 100
-        && !stem.chars().any(char::is_control)
+    is_simple_session_stem(stem) && stem.len() <= 100 && !stem.chars().any(char::is_control)
 }
 
 fn approved_export_session_dir(notes_dir: &Path, stem: &str) -> Option<PathBuf> {
@@ -1115,11 +1409,8 @@ fn process_request(request: ProcessRequest) -> Result<JobRequest, String> {
         request.diarize,
         request.vad,
     )?;
-    let model_override = apply_notes_overrides(
-        &mut context.global,
-        request.backend_kind,
-        request.llm_model,
-    )?;
+    let model_override =
+        apply_notes_overrides(&mut context.global, request.backend_kind, request.llm_model)?;
 
     Ok(JobRequest {
         kind: PipelineJobKind::Run,
@@ -1252,7 +1543,9 @@ fn validate_language(value: Option<String>) -> Result<String, String> {
         return Err("Use 'auto' or a standard language tag such as 'en' or 'pt-br'.".into());
     };
     let valid_primary = (2..=3).contains(&primary.len())
-        && primary.bytes().all(|character| character.is_ascii_lowercase());
+        && primary
+            .bytes()
+            .all(|character| character.is_ascii_lowercase());
     let valid_subtags = parts.all(|part| {
         (2..=8).contains(&part.len())
             && part.bytes().all(|character| character.is_ascii_lowercase())
@@ -1370,6 +1663,78 @@ struct ValidatedSpeakerMapRequest {
     stem: String,
     transcripts_dir: PathBuf,
     mappings: BTreeMap<String, String>,
+}
+
+struct ValidatedSpeakerResetRequest {
+    stem: String,
+    transcripts_dir: PathBuf,
+}
+
+struct ValidatedSessionRenameRequest {
+    campaign: CampaignConfig,
+    old_stem: String,
+    new_stem: String,
+    transcripts_dir: PathBuf,
+    notes_dir: PathBuf,
+}
+
+fn session_rename_request(
+    request: SessionRenameRequest,
+) -> Result<ValidatedSessionRenameRequest, String> {
+    let campaign_id = request.campaign_id.trim();
+    if campaign_id.is_empty() {
+        return Err("A campaign is required to rename a session.".into());
+    }
+    let old_stem = request.old_stem.trim();
+    let new_stem = request.new_stem.trim();
+    crate::workspace::session_workspace(campaign_id.to_string(), old_stem.to_string())?;
+    let context = processing_context(campaign_id)?;
+    let notes_dir = context
+        .transcripts_dir
+        .parent()
+        .map(|output_root| output_root.join("notes"))
+        .ok_or_else(|| "Could not resolve the campaign notes directory.".to_string())?;
+    sessionsmith::campaign_ops::check_session_rename_at(
+        &context.transcripts_dir,
+        &notes_dir,
+        old_stem,
+        new_stem,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ValidatedSessionRenameRequest {
+        campaign: context.campaign,
+        old_stem: old_stem.into(),
+        new_stem: new_stem.into(),
+        transcripts_dir: context.transcripts_dir,
+        notes_dir,
+    })
+}
+
+fn speaker_reset_request(
+    request: SpeakerResetRequest,
+) -> Result<ValidatedSpeakerResetRequest, String> {
+    let campaign_id = request.campaign_id.trim();
+    if campaign_id.is_empty() {
+        return Err("A campaign is required to reset speaker mapping.".into());
+    }
+    let stem = request.stem.trim();
+    if !is_simple_session_stem(stem) {
+        return Err("Select a valid session transcript to reset speakers.".into());
+    }
+    crate::workspace::session_workspace(campaign_id.to_string(), stem.to_string())?;
+    let context = processing_context(campaign_id)?;
+    if !["txt", "srt", "vtt"].iter().any(|extension| {
+        context
+            .transcripts_dir
+            .join(format!("{stem}.diarized.{extension}"))
+            .is_file()
+    }) {
+        return Err("This session has no raw diarized transcript backup.".into());
+    }
+    Ok(ValidatedSpeakerResetRequest {
+        stem: stem.into(),
+        transcripts_dir: context.transcripts_dir,
+    })
 }
 
 fn speaker_map_request(request: SpeakerMapRequest) -> Result<ValidatedSpeakerMapRequest, String> {
@@ -1509,7 +1874,11 @@ fn selected_inbox_sessions(
     if !all_inbox && source_paths.is_empty() {
         return Err("Select at least one Inbox audio file to process.".into());
     }
-    if !combine && session_name.as_deref().is_some_and(|name| !name.trim().is_empty()) {
+    if !combine
+        && session_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty())
+    {
         return Err("A combined session name requires combining the selected files.".into());
     }
 
@@ -1535,7 +1904,8 @@ fn selected_inbox_sessions(
                 return Err("An Inbox audio file was selected more than once.".into());
             }
             let path = available_paths.remove(source_path).ok_or_else(|| {
-                "Selected audio must still be an unprocessed file in this campaign's Inbox.".to_string()
+                "Selected audio must still be an unprocessed file in this campaign's Inbox."
+                    .to_string()
             })?;
             selected_files.push(path);
         }
@@ -1599,9 +1969,7 @@ fn session_name_from_path(path: &Path) -> Result<String, String> {
 }
 
 fn is_valid_new_session_stem(stem: &str) -> bool {
-    is_simple_session_stem(stem)
-        && stem.len() <= 100
-        && !stem.chars().any(char::is_control)
+    is_simple_session_stem(stem) && stem.len() <= 100 && !stem.chars().any(char::is_control)
 }
 
 fn log_rebuild_request(campaign_id: &str) -> Result<JobRequest, String> {
@@ -1680,7 +2048,10 @@ fn pipeline_job_active(manager: &JobManager) -> bool {
 fn model_job_active(manager: &JobManager) -> bool {
     manager.list().iter().any(|job| {
         job.kind == JobKind::Model
-            && !matches!(job.state, JobState::Succeeded | JobState::Failed | JobState::Cancelled)
+            && !matches!(
+                job.state,
+                JobState::Succeeded | JobState::Failed | JobState::Cancelled
+            )
     })
 }
 
@@ -1712,8 +2083,8 @@ fn processing_context(campaign_id: &str) -> Result<ProcessingContext, String> {
     let campaign_path = campaign_config_path(&root, campaign_id)?;
     let campaign = CampaignConfig::load(&campaign_path).map_err(|error| error.to_string())?;
     let global = config::effective(&global, &campaign);
-    let preset = sessionsmith::presets::load(&campaign.system.preset)
-        .map_err(|error| error.to_string())?;
+    let preset =
+        sessionsmith::presets::load(&campaign.system.preset).map_err(|error| error.to_string())?;
     let asr_model = global.asr.model.clone().unwrap_or_else(|| {
         hardware::recommend(&hardware::detect())
             .whisper_model
@@ -1745,10 +2116,7 @@ fn processing_context(campaign_id: &str) -> Result<ProcessingContext, String> {
 fn is_simple_session_stem(stem: &str) -> bool {
     !stem.is_empty()
         && !stem.starts_with('.')
-        && Path::new(stem)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(stem)
+        && Path::new(stem).file_name().and_then(|name| name.to_str()) == Some(stem)
 }
 
 fn campaign_config_path(root: &Path, campaign_id: &str) -> Result<PathBuf, String> {
@@ -1840,12 +2208,13 @@ fn workspace_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_event, artifacts_from_ids, import_request, log_rebuild_request, notes_request,
-        approved_export_session_dir, managed_export_dir, process_request, push_log,
-        recording_request, ExportFormat, ExportRequest, ModelAction, ModelRequest,
-        ImportAudioRequest, JobDetails, NotesRequest, ProcessRequest, RecordRequest,
-        CandidateAction, CandidateResolveRequest, SpeakerMapEntry, SpeakerMapRequest, TranscribeRequest, validate_asr_model,
-        validate_backend_kind, validate_language, validate_session_date, LOG_TAIL_LIMIT,
+        apply_event, approved_export_session_dir, artifacts_from_ids, import_request,
+        log_rebuild_request, managed_export_dir, notes_request, process_request, push_log,
+        recording_request, validate_asr_model, validate_backend_kind, validate_language,
+        validate_session_date, CandidateAction, CandidateResolveRequest, ExportFormat,
+        ExportRequest, ImportAudioRequest, JobDetails, ModelAction, ModelRequest, NotesRequest,
+        ProcessRequest, RecordRequest, SpeakerMapEntry, SpeakerMapRequest, TranscribeRequest,
+        LOG_TAIL_LIMIT,
     };
     use sessionsmith::jobs::report::JobEvent;
     use std::{
@@ -1887,8 +2256,14 @@ mod tests {
         );
 
         assert_eq!(details.phase.as_deref(), Some("Readiness"));
-        assert_eq!(details.progress.as_ref().map(|progress| progress.position), Some(2));
-        assert_eq!(details.log_tail.front().map(String::as_str), Some("Readiness"));
+        assert_eq!(
+            details.progress.as_ref().map(|progress| progress.position),
+            Some(2)
+        );
+        assert_eq!(
+            details.log_tail.front().map(String::as_str),
+            Some("Readiness")
+        );
     }
 
     #[test]
@@ -2157,9 +2532,15 @@ mod tests {
 
     #[test]
     fn processing_overrides_accept_only_bounded_values() {
-        assert_eq!(validate_asr_model("large-v3-turbo").as_deref(), Ok("large-v3-turbo"));
+        assert_eq!(
+            validate_asr_model("large-v3-turbo").as_deref(),
+            Ok("large-v3-turbo")
+        );
         assert!(validate_asr_model("../../arbitrary").is_err());
-        assert_eq!(validate_language(Some("PT-BR".into())).as_deref(), Ok("pt-br"));
+        assert_eq!(
+            validate_language(Some("PT-BR".into())).as_deref(),
+            Ok("pt-br")
+        );
         assert!(validate_language(Some("english".into())).is_err());
         assert_eq!(
             validate_session_date(Some("2026-08-23".into())),
@@ -2212,13 +2593,18 @@ mod tests {
                 .map(String::as_str),
             Some("Avery")
         );
-        assert!(super::validate_speaker_mappings(vec![entry("SPEAKER_01", "Avery")], &labels).is_err());
+        assert!(
+            super::validate_speaker_mappings(vec![entry("SPEAKER_01", "Avery")], &labels).is_err()
+        );
         assert!(super::validate_speaker_mappings(
             vec![entry("SPEAKER_00", "Avery"), entry("SPEAKER_00", "Morgan")],
             &labels,
         )
         .is_err());
-        assert!(super::validate_speaker_mappings(vec![entry("SPEAKER_00", "Avery\n")], &labels).is_err());
+        assert!(
+            super::validate_speaker_mappings(vec![entry("SPEAKER_00", "Avery\n")], &labels)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2231,8 +2617,16 @@ mod tests {
         };
 
         assert!(super::candidate_resolve_request(request("", "session-1", "summary")).is_err());
-        assert!(super::candidate_resolve_request(request("test", "../session-1", "summary")).is_err());
-        assert!(super::candidate_resolve_request(request("test", "session-1", "../../outside")).is_err());
-        assert_eq!(super::candidate_action_label(CandidateAction::KeepBoth), "Keep both");
+        assert!(
+            super::candidate_resolve_request(request("test", "../session-1", "summary")).is_err()
+        );
+        assert!(
+            super::candidate_resolve_request(request("test", "session-1", "../../outside"))
+                .is_err()
+        );
+        assert_eq!(
+            super::candidate_action_label(CandidateAction::KeepBoth),
+            "Keep both"
+        );
     }
 }

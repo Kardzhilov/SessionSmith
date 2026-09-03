@@ -13,7 +13,7 @@ SOURCES := $(shell find src -name '*.rs') Cargo.toml Cargo.lock
 # Ensure cargo is on PATH even if the shell didn't source ~/.cargo/env
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: all run init transcribe notes log doctor systems models dev help
+.PHONY: all run init transcribe notes log doctor systems models dev bump-version check-version help
 
 # Default: full interactive pipeline
 all: run
@@ -57,6 +57,14 @@ models: $(BINARY)
 ## Delegate to src/Makefile — usage: make dev TARGET=test
 dev:
 	@$(MAKE) -C src $(TARGET)
+
+## Synchronize the release version — usage: make bump-version VERSION=1.2.3
+bump-version:
+	@scripts/bump-version.sh "$(VERSION)"
+
+## Verify all release version fields match — optionally set VERSION=1.2.3
+check-version:
+	@scripts/bump-version.sh --check $(if $(VERSION),$(VERSION))
 
 ## Print this help
 help:

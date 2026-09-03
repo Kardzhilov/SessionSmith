@@ -6,7 +6,7 @@ use sessionsmith::{
     hardware, models, util,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthCheck {
     pub id: String,
@@ -16,19 +16,22 @@ pub struct HealthCheck {
     pub remedy: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthGpu {
     pub vendor: String,
     pub name: String,
+    #[specta(type = specta_typescript::Number)]
     pub vram_gb: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthHardware {
     pub os: String,
+    #[specta(type = specta_typescript::Number)]
     pub cpu_cores: usize,
+    #[specta(type = specta_typescript::Number)]
     pub ram_gb: u64,
     pub gpu: Option<HealthGpu>,
     pub recommended_asr_model: String,
@@ -36,7 +39,7 @@ pub struct HealthHardware {
     pub recommendation_reason: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthReport {
     pub checks: Vec<HealthCheck>,
@@ -100,7 +103,10 @@ fn advanced_asr_model_check(spec: &AsrModelSpec) -> DepStatus {
         detail: if prepared {
             format!("{} is prepared for {}", spec.display, spec.engine.label())
         } else {
-            format!("{} is not prepared; open Models to prepare it", spec.display)
+            format!(
+                "{} is not prepared; open Models to prepare it",
+                spec.display
+            )
         },
     }
 }
@@ -156,7 +162,10 @@ fn health_id(label: &str) -> String {
 }
 
 fn remedy_for(label: &str) -> &'static str {
-    if label.starts_with("ffmpeg") || label.starts_with("ffprobe") || label == "desktop audio playback" {
+    if label.starts_with("ffmpeg")
+        || label.starts_with("ffprobe")
+        || label == "desktop audio playback"
+    {
         "install-ffmpeg"
     } else if label.starts_with("uv") {
         "install-uv"

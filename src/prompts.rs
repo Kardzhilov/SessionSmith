@@ -378,6 +378,47 @@ pub fn user_quotes_from_transcript(transcript: &str) -> String {
     format!("Timestamped transcript (lines prefixed with [HH:MM:SS]):\n\n{transcript}")
 }
 
+pub fn session_name_suggest_system(campaign: &CampaignConfig, preset: &Preset) -> String {
+    let base = "\
+You name tabletop roleplaying sessions from a summary or transcript excerpt. \
+Return exactly five short, evocative titles as a JSON array of strings. Titles \
+must describe distinctive events from this session, remain under 100 bytes, and \
+work as plain file names. Output only the JSON array with no markdown or preamble.";
+    compose_system(base, campaign, preset, "", true)
+}
+
+pub fn user_session_name_suggest(source: &str) -> String {
+    format!("Session material:\n\n{source}")
+}
+
+pub fn parse_session_name_suggestions(response: &str) -> Vec<String> {
+    let Some(start) = response.find('[') else {
+        return Vec::new();
+    };
+    let Some(end) = response.rfind(']') else {
+        return Vec::new();
+    };
+    if end < start {
+        return Vec::new();
+    }
+    let Ok(values) = serde_json::from_str::<Vec<String>>(&response[start..=end]) else {
+        return Vec::new();
+    };
+    let mut suggestions = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for value in values {
+        let title = value.trim();
+        let key = title.to_lowercase();
+        if crate::campaign_ops::validate_session_stem(title).is_ok() && seen.insert(key) {
+            suggestions.push(title.to_string());
+            if suggestions.len() == 5 {
+                break;
+            }
+        }
+    }
+    suggestions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +466,33 @@ mod tests {
         assert!(s.contains("D&D 5e"));
         assert!(s.contains("milestone XP"));
         assert!(s.contains("HP"));
+    }
+
+    #[test]
+    fn session_name_prompt_requires_five_json_titles() {
+        let prompt = session_name_suggest_system(&camp(), &presets::load("dnd5e").unwrap());
+        assert!(prompt.contains("exactly five"));
+        assert!(prompt.contains("JSON array of strings"));
+        assert!(prompt.contains("D&D 5e"));
+    }
+
+    #[test]
+    fn session_name_parser_filters_deduplicates_and_caps_results() {
+        let response = r#"Here are titles:
+```json
+["Moonwell Rising", "moonwell rising", "../escape", ".hidden", "Siege at Dawn", "The Broken Crown", "A Long Road", "Last Light", "ignored"]
+```"#;
+        assert_eq!(
+            parse_session_name_suggestions(response),
+            [
+                "Moonwell Rising",
+                "Siege at Dawn",
+                "The Broken Crown",
+                "A Long Road",
+                "Last Light",
+            ]
+        );
+        assert!(parse_session_name_suggestions("not json").is_empty());
+        assert!(parse_session_name_suggestions("[\"unterminated]").is_empty());
     }
 }

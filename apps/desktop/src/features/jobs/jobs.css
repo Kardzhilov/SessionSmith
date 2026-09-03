@@ -1,0 +1,250 @@
+.jobs-flyout {
+  position: fixed;
+  top: 72px;
+  right: 18px;
+  z-index: 30;
+  width: min(426px, calc(100vw - 36px));
+  max-height: calc(100vh - 90px);
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: 0 18px 42px rgba(35, 52, 37, 0.2);
+}
+
+.jobs-flyout__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 16px 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.jobs-flyout__header .eyebrow {
+  margin-bottom: 3px;
+}
+
+.jobs-flyout__header h2,
+.jobs-flyout__section h3,
+.job-row h4,
+.job-row p {
+  margin: 0;
+}
+
+.jobs-flyout__header h2 {
+  color: var(--ink);
+  font-family: "Source Serif 4", Georgia, serif;
+  font-size: 19px;
+  font-weight: 650;
+}
+
+.jobs-flyout__header h2 span,
+.jobs-flyout__section h3 span {
+  color: var(--faint);
+  font-family: "IBM Plex Sans", "Aptos", sans-serif;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.jobs-flyout__error {
+  margin: 12px 16px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.jobs-flyout__section {
+  padding: 14px 16px 16px;
+}
+
+.jobs-flyout__section + .jobs-flyout__section {
+  border-top: 1px solid var(--line);
+}
+
+.jobs-flyout__section h3 {
+  margin-bottom: 8px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.jobs-flyout__list {
+  display: grid;
+  gap: 7px;
+}
+
+.job-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+}
+
+.job-row--succeeded {
+  border-color: var(--pine);
+}
+
+.job-row--failed {
+  border-color: var(--red);
+  background: var(--red-soft);
+}
+
+.job-row--cancelled {
+  border-color: var(--line-strong);
+}
+
+.job-row__icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  color: var(--muted);
+}
+
+.job-row--running .job-row__icon,
+.job-row--queued .job-row__icon {
+  color: var(--pine);
+}
+
+.job-row--succeeded .job-row__icon {
+  color: var(--pine);
+}
+
+.job-row--failed .job-row__icon {
+  color: var(--red);
+}
+
+.job-row--cancelled .job-row__icon,
+.job-row--cancelling .job-row__icon {
+  color: var(--amber);
+}
+
+.job-row__body {
+  min-width: 0;
+}
+
+.job-row__title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.job-row h4 {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row__title span {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.job-row__phase {
+  overflow: hidden;
+  margin-top: 3px !important;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row__progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.job-row__progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--pine-soft);
+}
+
+.job-row__progress-track i {
+  display: block;
+  width: 38%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--pine);
+}
+
+.job-row__progress span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row__log {
+  display: grid;
+  gap: 2px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.job-row__log span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row__cancel {
+  align-self: start;
+  width: 28px;
+  height: 28px;
+  color: var(--amber);
+}
+
+.jobs-flyout__empty {
+  display: flex;
+  min-height: 72px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+.jobs-flyout__empty p {
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .jobs-flyout {
+    top: 10px;
+    right: 10px;
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 80px);
+  }
+
+  .health-page__actions {
+    justify-content: flex-start;
+  }
+}

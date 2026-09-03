@@ -1,0 +1,57 @@
+:root {
+  --canvas: #f1f5f0;
+  --canvas-deep: #e4ebe3;
+  --surface: #f8faf7;
+  --surface-raised: #ffffff;
+  --ink: #16251b;
+  --muted: #465a4b;
+  --faint: #596c5d;
+  --line: #859789;
+  --line-strong: #65796a;
+  --pine: #176737;
+  --pine-dark: #14532d;
+  --pine-soft: #dcefe1;
+  --amber: #8a4b08;
+  --amber-soft: #f7e5c9;
+  --red: #a12828;
+  --red-soft: #f8dddd;
+  --blue: #245d7a;
+  --on-primary: #ffffff;
+  --focus: #0b6bcb;
+  --scrim: rgba(9, 20, 13, 0.68);
+  --surface-glass: color-mix(in srgb, var(--surface-raised) 92%, transparent);
+  --surface-subtle: color-mix(in srgb, var(--surface-raised) 78%, var(--canvas));
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: "IBM Plex Sans", "Aptos", "Noto Sans", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root[data-appearance="dark"] {
+  color: #f2f7f3;
+  background: #101713;
+  color-scheme: dark;
+  --canvas: #101713;
+  --canvas-deep: #172019;
+  --surface: #1a241d;
+  --surface-raised: #222e25;
+  --ink: #f2f7f3;
+  --muted: #c1cec3;
+  --faint: #a9b9ac;
+  --line: #718075;
+  --line-strong: #91a095;
+  --pine: #9ce6ad;
+  --pine-dark: #21663b;
+  --pine-soft: #173c25;
+  --amber: #f4bd75;
+  --amber-soft: #493418;
+  --red: #ffaaa2;
+  --red-soft: #502421;
+  --blue: #9ed4f2;
+  --on-primary: #ffffff;
+  --focus: #67b7ff;
+  --scrim: rgba(0, 0, 0, 0.76);
+}

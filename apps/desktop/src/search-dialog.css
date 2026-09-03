@@ -83,6 +83,32 @@
   accent-color: var(--pine);
 }
 
+.search-dialog__filters {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.search-filter {
+  min-height: 28px;
+  flex: 0 0 auto;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.search-filter--active {
+  border-color: var(--pine);
+  color: var(--pine-dark);
+  background: var(--pine-soft);
+}
+
 .search-dialog__results {
   display: grid;
   max-height: min(520px, calc(100vh - 220px));

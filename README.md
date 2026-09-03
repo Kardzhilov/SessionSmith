@@ -279,6 +279,16 @@ Build with `--features cuda` (or `vulkan`/`metal`) for GPU acceleration; see
 
 ---
 
+## 🌐 Website
+
+The product and download site is published at
+[kardzhilov.github.io/SessionSmith](https://kardzhilov.github.io/SessionSmith/).
+Its Vite source, local development commands, and deployment notes live in
+[website/README.md](website/README.md). Pushes to `main` that change the website
+are deployed by [.github/workflows/website.yml](.github/workflows/website.yml).
+
+---
+
 ## 🤝 Contributing
 
 ```bash
@@ -290,6 +300,29 @@ make all            # release build + run
 To add a game system, drop a TOML in `presets/` following the pattern in
 [docs/presets.md](docs/presets.md) and register it in
 [src/presets.rs](src/presets.rs).
+
+### Cutting a release
+
+The desktop package version in
+[apps/desktop/src-tauri/Cargo.toml](apps/desktop/src-tauri/Cargo.toml) is the
+source of truth. Check synchronization without changing files, then apply a
+strict `MAJOR.MINOR.PATCH` release version:
+
+```bash
+make check-version
+make bump-version VERSION=1.2.3
+make check-version VERSION=1.2.3
+```
+
+The bump updates the root and desktop Cargo manifests and lockfiles plus the
+npm manifest and lockfile. It does not commit, tag, or push. After reviewing
+the diff and running CI-equivalent checks, the maintainer commits the release
+and creates the tag that triggers the desktop release workflow:
+
+```bash
+git tag -a v1.2.3 -m "SessionSmith 1.2.3"
+git push origin v1.2.3
+```
 
 ---
 

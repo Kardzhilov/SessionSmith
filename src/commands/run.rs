@@ -1,8 +1,5 @@
 use anyhow::{bail, Result};
-use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::time::SystemTime;
 
 use crate::audio;
 use crate::cli::RunArgs;
@@ -11,6 +8,7 @@ use crate::pipeline::{self, PipelineOpts, Session};
 use crate::presets;
 use crate::session::SessionInput;
 use crate::transcribe::{self, TranscribeOpts};
+use crate::watch::StableFileDetector;
 use crate::{commands, deps, hardware, ui};
 
 static WATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -182,36 +180,6 @@ async fn run_once(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WatchFingerprint {
-    size_bytes: u64,
-    mtime: SystemTime,
-}
-
-fn stable_new_files(
-    files: &[audio::AudioFile],
-    previous: &mut BTreeMap<PathBuf, WatchFingerprint>,
-    handled: &HashSet<PathBuf>,
-) -> Vec<PathBuf> {
-    let mut current = BTreeMap::new();
-    let mut ready = Vec::new();
-    for file in files {
-        let fingerprint = WatchFingerprint {
-            size_bytes: file.size_bytes,
-            mtime: file.mtime,
-        };
-        if !file.already_transcribed
-            && !handled.contains(&file.path)
-            && previous.get(&file.path) == Some(&fingerprint)
-        {
-            ready.push(file.path.clone());
-        }
-        current.insert(file.path.clone(), fingerprint);
-    }
-    *previous = current;
-    ready
-}
-
 async fn watch(mut args: RunArgs) -> Result<()> {
     if !args.files.is_empty() {
         bail!("--watch scans the configured audio directory; do not pass audio files");
@@ -221,8 +189,7 @@ async fn watch(mut args: RunArgs) -> Result<()> {
     let campaign = commands::load_campaign_or_die(&camp_path)?;
     let interval = std::time::Duration::from_secs(args.watch_interval);
     let _watch_guard = WatchGuard::new();
-    let mut previous = BTreeMap::new();
-    let mut handled = HashSet::new();
+    let mut detector = StableFileDetector::default();
     args.watch = false;
     args.all = false;
 
@@ -237,14 +204,14 @@ async fn watch(mut args: RunArgs) -> Result<()> {
             return Ok(());
         }
         let files = audio::scan(&crate::config::audio_dir(), &campaign.transcripts_dir())?;
-        for path in stable_new_files(&files, &mut previous, &handled) {
+        for path in detector.observe(&files) {
             ui::info(&format!("stable recording detected: {}", path.display()));
             let mut single_run = args.clone();
             single_run.files = vec![path.clone()];
             if let Err(err) = run_once(single_run).await {
                 ui::warn(&format!("watch failed for {}: {err:#}", path.display()));
             }
-            handled.insert(path);
+            detector.mark_handled(path);
             if WATCH_INTERRUPTS.load(Ordering::SeqCst) > 0 {
                 ui::info("watch stopped after the current recording");
                 return Ok(());
@@ -268,49 +235,5 @@ impl Drop for WatchGuard {
     fn drop(&mut self) {
         WATCH_ACTIVE.store(false, Ordering::SeqCst);
         WATCH_INTERRUPTS.store(0, Ordering::SeqCst);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn watch_requires_two_identical_scans_before_processing() {
-        let path = PathBuf::from("session.wav");
-        let file = audio::AudioFile {
-            path: path.clone(),
-            mtime: SystemTime::UNIX_EPOCH,
-            duration_secs: None,
-            size_bytes: 10,
-            already_transcribed: false,
-        };
-        let mut previous = BTreeMap::new();
-        let handled = HashSet::new();
-        assert!(stable_new_files(std::slice::from_ref(&file), &mut previous, &handled).is_empty());
-        assert_eq!(
-            stable_new_files(&[file], &mut previous, &handled),
-            vec![path]
-        );
-    }
-
-    #[test]
-    fn staged_recording_is_processed_once_after_it_stabilizes() {
-        let path = PathBuf::from("session.wav");
-        let make_file = |size_bytes| audio::AudioFile {
-            path: path.clone(),
-            mtime: SystemTime::UNIX_EPOCH,
-            duration_secs: None,
-            size_bytes,
-            already_transcribed: false,
-        };
-        let mut previous = BTreeMap::new();
-        let mut handled = HashSet::new();
-        assert!(stable_new_files(&[make_file(10)], &mut previous, &handled).is_empty());
-        assert!(stable_new_files(&[make_file(20)], &mut previous, &handled).is_empty());
-        let ready = stable_new_files(&[make_file(20)], &mut previous, &handled);
-        assert_eq!(ready, vec![path.clone()]);
-        handled.insert(path.clone());
-        assert!(stable_new_files(&[make_file(20)], &mut previous, &handled).is_empty());
     }
 }

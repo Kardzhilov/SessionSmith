@@ -187,6 +187,7 @@ pub(super) struct TextPromptState {
     pub action: TextPromptAction,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Overlay {
     None,
     Help,

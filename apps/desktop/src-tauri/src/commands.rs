@@ -2,16 +2,18 @@ use serde::Serialize;
 use sessionsmith::{
     audio,
     config::{self, CampaignConfig, GlobalConfig},
+    meta,
     prompts::ALL_ARTIFACTS,
+    speakers,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CampaignSummary {
     pub id: String,
@@ -20,12 +22,13 @@ pub struct CampaignSummary {
     pub setting: String,
     pub preset_id: String,
     pub backend_kind: String,
+    #[specta(type = specta_typescript::Number)]
     pub session_count: usize,
     pub has_campaign_log: bool,
     pub load_error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AppBootstrap {
     pub app_name: &'static str,
@@ -34,7 +37,7 @@ pub struct AppBootstrap {
     pub campaigns: Vec<CampaignSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     pub stem: String,
@@ -42,19 +45,24 @@ pub struct SessionSummary {
     pub has_transcript: bool,
     pub artifacts: Vec<String>,
     pub stage: &'static str,
+    #[specta(type = Option<specta_typescript::Number>)]
     pub modified_at: Option<u64>,
+    #[specta(type = specta_typescript::Number)]
+    pub unmapped_speaker_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InboxAudio {
     pub name: String,
     pub path: String,
+    #[specta(type = specta_typescript::Number)]
     pub size_bytes: u64,
+    #[specta(type = Option<specta_typescript::Number>)]
     pub modified_at: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CampaignLibrary {
     pub campaign: CampaignSummary,
@@ -67,6 +75,7 @@ struct CampaignRecord {
     config: Option<CampaignConfig>,
 }
 
+#[specta::specta]
 #[tauri::command]
 pub fn app_bootstrap() -> Result<AppBootstrap, String> {
     let (root, global) = load_context()?;
@@ -81,7 +90,15 @@ pub fn app_bootstrap() -> Result<AppBootstrap, String> {
     })
 }
 
+pub(crate) fn recover_campaign_renames() -> Result<(), String> {
+    let root = workspace_root();
+    let output_root = resolve_workspace_path(&root, &config::output_dir());
+    sessionsmith::campaign_ops::recover_campaign_renames(&root.join("campaigns"), &output_root)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
+#[specta::specta]
 pub fn campaign_library(campaign_id: String) -> Result<CampaignLibrary, String> {
     let (root, global) = load_context()?;
     let record = campaign_records(&root, &global)
@@ -98,7 +115,7 @@ pub fn campaign_library(campaign_id: String) -> Result<CampaignLibrary, String> 
     })?;
     let paths = campaign_paths(&root, &config);
     let stems = session_stems(&paths.transcripts, &paths.notes);
-    let sessions = session_summaries(&stems, &paths);
+    let sessions = session_summaries(&stems, &paths, &config.transcription.speakers);
     let inbox = inbox_audio(&stems, &paths);
 
     Ok(CampaignLibrary {
@@ -249,7 +266,9 @@ fn session_stems(transcripts: &Path, notes: &Path) -> BTreeSet<String> {
         for path in entries.flatten().map(|entry| entry.path()) {
             if path.extension().and_then(|extension| extension.to_str()) == Some("txt") {
                 if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-                    stems.insert(stem.to_string());
+                    if !speakers::is_raw_diarized_stem(stem) {
+                        stems.insert(stem.to_string());
+                    }
                 }
             }
         }
@@ -269,7 +288,11 @@ fn session_stems(transcripts: &Path, notes: &Path) -> BTreeSet<String> {
     stems
 }
 
-fn session_summaries(stems: &BTreeSet<String>, paths: &CampaignPaths) -> Vec<SessionSummary> {
+fn session_summaries(
+    stems: &BTreeSet<String>,
+    paths: &CampaignPaths,
+    speaker_defaults: &BTreeMap<String, String>,
+) -> Vec<SessionSummary> {
     let mut sessions: Vec<_> = stems
         .iter()
         .map(|stem| {
@@ -294,11 +317,36 @@ fn session_summaries(stems: &BTreeSet<String>, paths: &CampaignPaths) -> Vec<Ses
                 stage: session_stage(has_audio, has_transcript, &artifacts),
                 artifacts,
                 modified_at: m_at,
+                unmapped_speaker_count: unmapped_speaker_count(
+                    &paths.transcripts,
+                    stem,
+                    speaker_defaults,
+                ),
             }
         })
         .collect();
     sessions.sort_by_key(|session| std::cmp::Reverse(session.modified_at.unwrap_or_default()));
     sessions
+}
+
+fn unmapped_speaker_count(
+    transcripts: &Path,
+    stem: &str,
+    speaker_defaults: &BTreeMap<String, String>,
+) -> usize {
+    let raw = transcripts.join(format!("{stem}.diarized.txt"));
+    let live = transcripts.join(format!("{stem}.txt"));
+    let source = if raw.is_file() { raw } else { live };
+    let Ok(text) = fs::read_to_string(source) else {
+        return 0;
+    };
+    let mapped = meta::load(transcripts, stem)
+        .and_then(|session| session.speaker_map)
+        .unwrap_or_else(|| speaker_defaults.clone());
+    speakers::labels(&text)
+        .into_iter()
+        .filter(|label| !mapped.contains_key(label))
+        .count()
 }
 
 fn inbox_audio(stems: &BTreeSet<String>, paths: &CampaignPaths) -> Vec<InboxAudio> {
@@ -355,7 +403,9 @@ fn latest(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::session_stage;
+    use super::{session_stage, session_stems, unmapped_speaker_count};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
 
     #[test]
     fn notes_take_precedence_over_transcript_and_audio() {
@@ -367,5 +417,37 @@ mod tests {
         assert_eq!(session_stage(true, false, &[]), "audio");
         assert_eq!(session_stage(false, true, &[]), "transcript");
         assert_eq!(session_stage(false, false, &[]), "unknown");
+    }
+
+    #[test]
+    fn raw_diarized_backups_are_not_library_sessions() {
+        let directory = std::env::temp_dir().join(format!(
+            "sessionsmith-library-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let transcripts = directory.join("transcripts");
+        let notes = directory.join("notes");
+        fs::create_dir_all(&transcripts).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(transcripts.join("session.txt"), "Alice: Hello").unwrap();
+        fs::write(
+            transcripts.join("session.diarized.txt"),
+            "SPEAKER_00: Hello\nSPEAKER_01: Hi",
+        )
+        .unwrap();
+
+        assert_eq!(
+            session_stems(&transcripts, &notes),
+            BTreeSet::from(["session".to_string()])
+        );
+        assert_eq!(
+            unmapped_speaker_count(&transcripts, "session", &BTreeMap::new()),
+            2
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 }

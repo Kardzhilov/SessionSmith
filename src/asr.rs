@@ -67,10 +67,15 @@ pub struct AsrModelSpec {
     pub model_ref: &'static str,
     /// Approximate download size in bytes (weights), for the manager.
     pub size: u64,
+    /// Published parameter count, when established by the catalog research.
+    pub params: Option<u64>,
     /// Approximate public release date (`YYYY-MM`).
     pub released: &'static str,
     /// Language coverage, short form.
     pub langs: &'static str,
+    /// Filterable language names, or a broad coverage category when the
+    /// repository does not enumerate every supported language.
+    pub languages: &'static [&'static str],
     /// License, short form.
     pub license: &'static str,
     /// One-line note shown in the manager.
@@ -90,8 +95,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::WhisperCpp,
         model_ref: "large-v3-turbo",
         size: 1_620_000_000,
+        params: Some(809_000_000),
         released: "2024-10",
         langs: "99 langs",
+        languages: &["Multilingual"],
         license: "MIT",
         note: "fast multilingual default; runs on CPU or GPU",
     },
@@ -101,8 +108,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::WhisperCpp,
         model_ref: "large-v3",
         size: 3_100_000_000,
+        params: Some(1_550_000_000),
         released: "2023-11",
         langs: "99 langs",
+        languages: &["Multilingual"],
         license: "MIT",
         note: "most accurate whisper; slower than turbo",
     },
@@ -112,8 +121,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::WhisperCpp,
         model_ref: "medium",
         size: 1_530_000_000,
+        params: Some(769_000_000),
         released: "2022-09",
         langs: "99 langs",
+        languages: &["Multilingual"],
         license: "MIT",
         note: "lighter; good on CPU-only machines",
     },
@@ -123,8 +134,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::WhisperCpp,
         model_ref: "base",
         size: 148_000_000,
+        params: Some(74_000_000),
         released: "2022-09",
         langs: "99 langs",
+        languages: &["Multilingual"],
         license: "MIT",
         note: "tiny + fast; low accuracy, good for smoke tests",
     },
@@ -135,8 +148,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::FasterWhisper,
         model_ref: "large-v3-turbo",
         size: 1_620_000_000,
+        params: Some(809_000_000),
         released: "2024-10",
         langs: "99 langs",
+        languages: &["Multilingual"],
         license: "MIT",
         note: "CTranslate2 build; batched, low VRAM, CPU int8 capable",
     },
@@ -146,8 +161,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::FasterWhisper,
         model_ref: "large-v3",
         size: 3_100_000_000,
+        params: Some(1_550_000_000),
         released: "2023-11",
         langs: "99 langs",
+        languages: &["Multilingual"],
         license: "MIT",
         note: "CTranslate2 large-v3; accurate, GPU-friendly",
     },
@@ -157,8 +174,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::FasterWhisper,
         model_ref: "distil-large-v3",
         size: 1_500_000_000,
+        params: None,
         released: "2024-03",
         langs: "English",
+        languages: &["English"],
         license: "MIT",
         note: "distilled, ~2x faster than large-v3, English-focused",
     },
@@ -169,8 +188,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::Parakeet,
         model_ref: "nvidia/parakeet-tdt-0.6b-v3",
         size: 2_500_000_000,
+        params: Some(600_000_000),
         released: "2025-08",
         langs: "25 EU langs (auto)",
+        languages: &["Multilingual"],
         license: "CC-BY-4.0",
         note: "very fast (RTFx ~3300), multilingual, word timestamps",
     },
@@ -180,8 +201,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::Parakeet,
         model_ref: "nvidia/parakeet-tdt-0.6b-v2",
         size: 2_500_000_000,
+        params: Some(600_000_000),
         released: "2025-05",
         langs: "English",
+        languages: &["English"],
         license: "CC-BY-4.0",
         note: "fastest English ASR (WER 6.05); NeMo/CUDA",
     },
@@ -192,8 +215,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::CanaryQwen,
         model_ref: "nvidia/canary-qwen-2.5b",
         size: 5_000_000_000,
+        params: Some(2_500_000_000),
         released: "2025-07",
         langs: "English",
+        languages: &["English"],
         license: "CC-BY-4.0",
         note: "best English WER (5.63); FastConformer + Qwen3 LLM; NeMo/CUDA",
     },
@@ -204,8 +229,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::Voxtral,
         model_ref: "mistralai/Voxtral-Mini-3B-2507",
         size: 9_500_000_000,
+        params: Some(3_000_000_000),
         released: "2025-07",
         langs: "8 langs",
+        languages: &["Multilingual"],
         license: "Apache-2.0",
         note: "audio LLM: transcription + understanding; ~9.5GB VRAM",
     },
@@ -216,8 +243,17 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::GraniteSpeech,
         model_ref: "ibm-granite/granite-speech-4.1-2b",
         size: 4_000_000_000,
+        params: Some(2_000_000_000),
         released: "2026-04",
         langs: "EN, FR, DE, ES, PT, JA",
+        languages: &[
+            "English",
+            "French",
+            "German",
+            "Spanish",
+            "Portuguese",
+            "Japanese",
+        ],
         license: "Apache-2.0",
         note: "far-field accuracy + keyword biasing; GPU recommended",
     },
@@ -228,8 +264,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::MossTranscribeDiarize,
         model_ref: "OpenMOSS-Team/MOSS-Transcribe-Diarize",
         size: 1_800_000_000,
+        params: Some(900_000_000),
         released: "2026-07",
         langs: "50+ langs",
+        languages: &["Multilingual"],
         license: "Apache-2.0",
         note: "speaker labels, timestamps, and hotword prompting; CUDA recommended",
     },
@@ -240,8 +278,10 @@ pub const ASR_CATALOG: &[AsrModelSpec] = &[
         engine: AsrEngine::TranscribeCpp,
         model_ref: "handy-computer/cohere-transcribe-03-2026-gguf",
         size: 1_770_270_208,
+        params: None,
         released: "2026-03",
         langs: "14 langs",
+        languages: &["Multilingual"],
         license: "Apache-2.0",
         note: "local GGUF Q5_K_M; runs with transcribe.cpp",
     },
@@ -259,6 +299,7 @@ pub fn engine_of(id: &str) -> AsrEngine {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -272,6 +313,25 @@ mod tests {
         assert_eq!(moss.engine, AsrEngine::MossTranscribeDiarize);
         assert_eq!(moss.model_ref, "OpenMOSS-Team/MOSS-Transcribe-Diarize");
         assert!(moss.engine.is_bridge());
+    }
+
+    #[test]
+    fn catalog_metadata_is_structured_at_the_source() {
+        let granite = find("granite-speech-4.1-2b").expect("Granite Speech is cataloged");
+        assert_eq!(granite.params, Some(2_000_000_000));
+        assert_eq!(
+            granite.languages,
+            &[
+                "English",
+                "French",
+                "German",
+                "Spanish",
+                "Portuguese",
+                "Japanese",
+            ]
+        );
+        assert_eq!(granite.license, "Apache-2.0");
+        assert!(!granite.note.is_empty());
     }
 }
 

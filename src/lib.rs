@@ -11,6 +11,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod deps;
+pub mod export;
 pub mod hardware;
 pub mod index;
 pub mod jobs;
@@ -23,11 +24,13 @@ pub mod prompts;
 pub mod pybridge;
 pub mod session;
 pub mod speakers;
+pub mod themes;
 pub mod transcribe;
 pub mod transcribe_cpp;
 pub mod tui;
 pub mod ui;
 pub mod util;
+pub mod watch;
 #[cfg(feature = "local-whisper")]
 pub mod whisper_local;
 

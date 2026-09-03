@@ -56,6 +56,77 @@
   padding: 18px;
 }
 
+.rename-dialog {
+  width: min(560px, 100%);
+}
+
+.rename-dialog__field {
+  display: grid;
+  gap: 7px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.rename-dialog__field input {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+
+.rename-dialog__field input:focus {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.rename-dialog__suggest-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.rename-dialog__suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rename-dialog__suggestion {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.rename-dialog__suggestion:hover,
+.rename-dialog__suggestion--selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (max-width: 560px) {
+  .rename-dialog__suggest-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .process-dialog__mode {
   display: inline-flex;
   justify-self: start;
@@ -459,10 +530,18 @@
   font-weight: 700;
 }
 
-.speaker-review__summary span:first-child,
+.speaker-review__summary strong,
 .speaker-review__evidence strong {
   color: var(--ink);
   font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+}
+
+.speaker-review__summary p {
+  max-width: 520px;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.45;
 }
 
 .speaker-review__list {
@@ -504,8 +583,53 @@
   -webkit-line-clamp: 2;
 }
 
+.speaker-review__sample {
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+}
+
+.speaker-review__sample > .icon-button {
+  width: 27px;
+  height: 27px;
+}
+
+.speaker-review__sample time {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--pine);
+  font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .speaker-review__field {
   align-self: stretch;
+}
+
+.speaker-review__default-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.speaker-review__reset-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.speaker-review__reset-confirm + .button,
+.process-dialog__actions > .speaker-review__reset-confirm:first-child {
+  margin-left: 0;
 }
 
 @media (max-width: 720px) {

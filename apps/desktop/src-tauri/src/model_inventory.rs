@@ -6,7 +6,7 @@ use sessionsmith::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelEntry {
     pub id: String,
@@ -16,12 +16,19 @@ pub struct ModelEntry {
     pub engine: String,
     pub state: String,
     pub is_default: bool,
+    #[specta(type = specta_typescript::Number)]
     pub size_bytes: u64,
     pub released: String,
     pub detail: String,
+    #[specta(type = Option<specta_typescript::Number>)]
+    pub params: Option<u64>,
+    pub languages: Option<Vec<String>>,
+    pub language_summary: Option<String>,
+    pub license: Option<String>,
+    pub note: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct OllamaService {
     pub reachable: bool,
@@ -29,7 +36,7 @@ pub struct OllamaService {
     pub detail: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInventory {
     pub whisper: Vec<ModelEntry>,
@@ -38,14 +45,14 @@ pub struct ModelInventory {
     pub ollama_service: OllamaService,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelDefaultKind {
     Transcription,
     Llm,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDefaultRequest {
     pub kind: ModelDefaultKind,
@@ -71,18 +78,12 @@ pub(crate) async fn inventory() -> Result<ModelInventory, String> {
             let size_bytes = std::fs::metadata(&path)
                 .map(|metadata| metadata.len())
                 .unwrap_or_else(|_| models::whisper_approx_size(model.id));
-            Ok(ModelEntry {
-                id: model.id.into(),
-                label: format!("Whisper {}", model.id),
-                family: None,
-                cataloged: true,
-                engine: "whisper.cpp".into(),
-                state: if installed { "installed" } else { "available" }.into(),
-                is_default: asr_default == Some(model.id),
+            Ok(whisper_entry(
+                model,
+                installed,
+                asr_default == Some(model.id),
                 size_bytes,
-                released: model.released.into(),
-                detail: "Local GGML speech-to-text model".into(),
-            })
+            ))
         })
         .collect::<Result<Vec<_>, String>>()?;
 
@@ -98,18 +99,7 @@ pub(crate) async fn inventory() -> Result<ModelInventory, String> {
             } else {
                 asr::is_prepared(model.id)
             };
-            ModelEntry {
-                id: model.id.into(),
-                label: model.display.into(),
-                family: Some(model.engine.label().into()),
-                cataloged: true,
-                engine: model.engine.label().into(),
-                state: if installed { "ready" } else { "available" }.into(),
-                is_default: asr_default == Some(model.id),
-                size_bytes: model.size,
-                released: model.released.into(),
-                detail: model.note.into(),
-            }
+            asr_entry(model, installed, asr_default == Some(model.id))
         })
         .collect();
 
@@ -218,6 +208,11 @@ fn ollama_entries(
             size_bytes: *size_bytes,
             released: models::ollama_released(id).into(),
             detail: "Installed outside the curated catalog".into(),
+            params: None,
+            languages: None,
+            language_summary: None,
+            license: None,
+            note: None,
         });
     }
 
@@ -252,14 +247,74 @@ fn catalog_entries(
                 size_bytes: installed_size.unwrap_or(option.size),
                 released: model.released.into(),
                 detail: "Local language model".into(),
+                params: Some(option.params),
+                languages: language_list(model.languages),
+                language_summary: model.langs.map(str::to_string),
+                license: model.license.map(str::to_string),
+                note: model.note.map(str::to_string),
             }
         })
         .collect()
 }
 
+fn whisper_entry(
+    model: &models::WhisperModel,
+    installed: bool,
+    is_default: bool,
+    size_bytes: u64,
+) -> ModelEntry {
+    ModelEntry {
+        id: model.id.into(),
+        label: format!("Whisper {}", model.id),
+        family: None,
+        cataloged: true,
+        engine: "whisper.cpp".into(),
+        state: if installed { "installed" } else { "available" }.into(),
+        is_default,
+        size_bytes,
+        released: model.released.into(),
+        detail: "Local GGML speech-to-text model".into(),
+        params: Some(model.params),
+        languages: language_list(model.languages),
+        language_summary: Some(model.langs.into()),
+        license: Some(model.license.into()),
+        note: Some(model.note.into()),
+    }
+}
+
+fn asr_entry(model: &asr::AsrModelSpec, installed: bool, is_default: bool) -> ModelEntry {
+    ModelEntry {
+        id: model.id.into(),
+        label: model.display.into(),
+        family: Some(model.engine.label().into()),
+        cataloged: true,
+        engine: model.engine.label().into(),
+        state: if installed { "ready" } else { "available" }.into(),
+        is_default,
+        size_bytes: model.size,
+        released: model.released.into(),
+        detail: model.note.into(),
+        params: model.params,
+        languages: language_list(model.languages),
+        language_summary: Some(model.langs.into()),
+        license: Some(model.license.into()),
+        note: Some(model.note.into()),
+    }
+}
+
+fn language_list(languages: &[&str]) -> Option<Vec<String>> {
+    (!languages.is_empty()).then(|| {
+        languages
+            .iter()
+            .map(|language| (*language).into())
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ollama_entries;
+    use super::{asr_entry, ollama_entries, whisper_entry};
+    use sessionsmith::{asr, models};
     use std::collections::BTreeMap;
 
     #[test]
@@ -279,6 +334,46 @@ mod tests {
         assert_eq!(default.state, "installed");
         assert!(default.is_default);
         assert_eq!(default.size_bytes, 6_500_000_000);
+        assert_eq!(default.params, Some(9_000_000_000));
+        assert_eq!(default.languages, None);
+        assert_eq!(default.license, None);
+        assert!(default.note.is_some());
         assert!(entries.iter().any(|entry| entry.id == "local:latest"));
+    }
+
+    #[test]
+    fn whisper_entry_carries_catalog_metadata() {
+        let model = models::WHISPER_MODELS
+            .iter()
+            .find(|model| model.id == "large-v3-turbo")
+            .expect("Whisper turbo is cataloged");
+        let entry = whisper_entry(model, false, false, 1_620_000_000);
+
+        assert_eq!(entry.params, Some(809_000_000));
+        assert_eq!(entry.languages, Some(vec!["Multilingual".into()]));
+        assert_eq!(entry.language_summary.as_deref(), Some("99 langs"));
+        assert_eq!(entry.license.as_deref(), Some("MIT"));
+        assert!(entry.note.is_some());
+    }
+
+    #[test]
+    fn advanced_asr_entry_carries_catalog_metadata() {
+        let model = asr::find("granite-speech-4.1-2b").expect("Granite Speech is cataloged");
+        let entry = asr_entry(model, false, false);
+
+        assert_eq!(entry.params, Some(2_000_000_000));
+        assert_eq!(
+            entry.languages,
+            Some(vec![
+                "English".into(),
+                "French".into(),
+                "German".into(),
+                "Spanish".into(),
+                "Portuguese".into(),
+                "Japanese".into(),
+            ])
+        );
+        assert_eq!(entry.license.as_deref(), Some("Apache-2.0"));
+        assert!(entry.note.is_some());
     }
 }
