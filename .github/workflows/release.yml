@@ -2,7 +2,7 @@ name: Desktop Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -21,8 +21,131 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.plan.outputs.should_release }}
+      tag: ${{ steps.plan.outputs.tag }}
+      changes_url: ${{ steps.changes.outputs.url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Plan release
+        id: plan
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ ! "$DISPATCH_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Manual release tags must use vMAJOR.MINOR.PATCH format." >&2
+              exit 1
+            fi
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          messages="$(jq -r '.commits[]?.message, .head_commit.message // empty' "$GITHUB_EVENT_PATH")"
+          bump=""
+          if grep -Eq '(^|[^[:alnum:]_])MAJOR([^[:alnum:]_]|$)' <<< "$messages"; then
+            bump="major"
+          elif grep -Eq '(^|[^[:alnum:]_])MINOR([^[:alnum:]_]|$)' <<< "$messages"; then
+            bump="minor"
+          elif grep -Eq '(^|[^[:alnum:]_])PATCH([^[:alnum:]_]|$)' <<< "$messages"; then
+            bump="patch"
+          fi
+
+          if [[ -z "$bump" ]]; then
+            echo "No MAJOR, MINOR, or PATCH release marker found."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          current="$(node -p "require('./apps/desktop/package.json').version")"
+          if [[ ! "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Current app version is not semantic: $current" >&2
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+          case "$bump" in
+            major) next="$((major + 1)).0.0" ;;
+            minor) next="$major.$((minor + 1)).0" ;;
+            patch) next="$major.$minor.$((patch + 1))" ;;
+          esac
+          tag="v$next"
+          if git rev-parse --verify --quiet "refs/tags/$tag"; then
+            echo "Release tag already exists: $tag" >&2
+            exit 1
+          fi
+
+          echo "Release marker $bump requests $current -> $next."
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'push' && steps.plan.outputs.should_release == 'true'
+      - name: Update and tag version
+        if: github.event_name == 'push' && steps.plan.outputs.should_release == 'true'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          RELEASE_TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          npm --prefix apps/desktop version "$RELEASE_VERSION" --no-git-tag-version
+          sed -i "0,/^version = \".*\"/s//version = \"$RELEASE_VERSION\"/" Cargo.toml
+          sed -i "0,/^version = \".*\"/s//version = \"$RELEASE_VERSION\"/" apps/desktop/src-tauri/Cargo.toml
+          cargo metadata --format-version 1 --no-deps >/dev/null
+          cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --format-version 1 --no-deps >/dev/null
+
+          package_version="$(node -p "require('./apps/desktop/package.json').version")"
+          desktop_version="$(awk -F '"' '/^version = / { print $2; exit }' apps/desktop/src-tauri/Cargo.toml)"
+          core_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          test "$package_version" = "$RELEASE_VERSION"
+          test "$desktop_version" = "$RELEASE_VERSION"
+          test "$core_version" = "$RELEASE_VERSION"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock \
+            apps/desktop/package.json apps/desktop/package-lock.json \
+            apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/Cargo.lock
+          git commit -m "chore(release): prepare $RELEASE_TAG"
+          git tag -a "$RELEASE_TAG" -m "SessionSmith $RELEASE_TAG"
+          git push --atomic origin "HEAD:$GITHUB_REF_NAME" "refs/tags/$RELEASE_TAG"
+      - name: Build changes link
+        if: steps.plan.outputs.should_release == 'true'
+        id: changes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          previous_tag="$(
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+              --json tagName,isDraft,publishedAt \
+              | jq -r --arg tag "$RELEASE_TAG" \
+                '[.[] | select(.tagName != $tag and .isDraft == false)] | sort_by(.publishedAt) | reverse | .[0].tagName // empty'
+          )"
+          if [[ -n "$previous_tag" ]]; then
+            url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$previous_tag...$RELEASE_TAG"
+          else
+            url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commits/$RELEASE_TAG"
+          fi
+          echo "Previous release: ${previous_tag:-none}"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
   release:
     name: Bundle (${{ matrix.platform }})
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +161,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -75,7 +198,7 @@ jobs:
       - name: Verify tag matches the app version
         shell: bash
         run: |
-          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          tag="${{ needs.prepare.outputs.tag }}"
           package_version="$(node -p "require('./apps/desktop/package.json').version")"
           desktop_version="$(awk -F '"' '/^version = / { print $2; exit }' apps/desktop/src-tauri/Cargo.toml)"
           core_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
@@ -88,19 +211,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: apps/desktop
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          releaseName: SessionSmith ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          releaseBody: See the assets below to install SessionSmith for your platform.
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: SessionSmith ${{ needs.prepare.outputs.tag }}
+          releaseBody: |
+            See the assets below to install SessionSmith for your platform.
+
+            **Changes:** [Compare this release with the previous release](${{ needs.prepare.outputs.changes_url }})
+          generateReleaseNotes: true
           releaseDraft: true
           prerelease: false
 
   publish:
     name: Publish release
-    needs: release
+    needs: [prepare, release]
     runs-on: ubuntu-latest
     steps:
       - name: Publish completed draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"

@@ -303,26 +303,23 @@ To add a game system, drop a TOML in `presets/` following the pattern in
 
 ### Cutting a release
 
-The desktop package version in
-[apps/desktop/src-tauri/Cargo.toml](apps/desktop/src-tauri/Cargo.toml) is the
-source of truth. Check synchronization without changing files, then apply a
-strict `MAJOR.MINOR.PATCH` release version:
+Push a commit to `main` whose message contains one of these standalone,
+case-sensitive markers:
 
-```bash
-make check-version
-make bump-version VERSION=1.2.3
-make check-version VERSION=1.2.3
-```
+- `PATCH` increments `1.2.3` to `1.2.4`.
+- `MINOR` increments `1.2.3` to `1.3.0`.
+- `MAJOR` increments `1.2.3` to `2.0.0`.
 
-The bump updates the root and desktop Cargo manifests and lockfiles plus the
-npm manifest and lockfile. It does not commit, tag, or push. After reviewing
-the diff and running CI-equivalent checks, the maintainer commits the release
-and creates the tag that triggers the desktop release workflow:
+The release workflow scans every commit message in the push. If multiple
+markers occur, `MAJOR` takes precedence over `MINOR`, which takes precedence
+over `PATCH`. Pushes without a marker skip release builds.
 
-```bash
-git tag -a v1.2.3 -m "SessionSmith 1.2.3"
-git push origin v1.2.3
-```
+For a marked push, the workflow synchronizes the Cargo and npm versions and
+lockfiles, commits the bump, creates the semantic version tag, builds all
+desktop bundles, and publishes the release. GitHub-generated release notes
+and a comparison link describe the changes since the previous published
+release. The workflow can also be dispatched manually to rebuild an existing
+`vMAJOR.MINOR.PATCH` tag without incrementing it.
 
 ---
 
