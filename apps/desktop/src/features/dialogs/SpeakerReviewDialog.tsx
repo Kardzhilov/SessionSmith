@@ -202,9 +202,6 @@ export function SpeakerReviewDialog({
               <span>{mappings.length} mapped</span>
             </div>
             {previewError && <p className="process-dialog__error" role="alert">{previewError}</p>}
-            <datalist id={suggestionsId}>
-              {review.suggestedNames.map((name) => <option key={name} value={name} />)}
-            </datalist>
             <div className="speaker-review__list">
               {review.speakers.map((speaker, index) => (
                 <article className="speaker-review__entry" key={speaker.label}>
@@ -226,18 +223,21 @@ export function SpeakerReviewDialog({
                   </div>
                   <div className="process-dialog__field speaker-review__field">
                     <label htmlFor={`${suggestionsId}-speaker-${index}`}>Assigned name</label>
-                    <input
+                    <select
                       id={`${suggestionsId}-speaker-${index}`}
-                      type="text"
-                      list={suggestionsId}
                       value={names[speaker.label] ?? ""}
-                      maxLength={100}
                       disabled={submitting}
                       onChange={(event) => setNames((current) => ({
                         ...current,
                         [speaker.label]: event.target.value,
                       }))}
-                    />
+                    >
+                      <option value="">Choose a participant</option>
+                      {names[speaker.label] && !review.suggestedNames.includes(names[speaker.label]) && (
+                        <option value={names[speaker.label]}>{names[speaker.label]}</option>
+                      )}
+                      {review.suggestedNames.map((name) => <option key={name} value={name}>{name}</option>)}
+                    </select>
                     <label className="speaker-review__default-toggle">
                       <input
                         type="checkbox"

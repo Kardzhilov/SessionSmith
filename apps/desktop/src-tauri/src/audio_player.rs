@@ -113,6 +113,16 @@ impl DesktopAudioPlayer {
         }
     }
 
+    pub(crate) fn stop_on_exit(&self) {
+        let mut state = self.lock();
+        state.clear_child();
+        state.started_at = None;
+        if state.source.is_some() {
+            state.position_ms = 0;
+            state.status = PlaybackStatus::Stopped;
+        }
+    }
+
     /// Resolve a selected session source, then leave it paused for an explicit
     /// transport action. The source path never leaves this module.
     pub(crate) fn load(
@@ -576,6 +586,7 @@ fn player_args(
         PlayerBackendKind::Mpv => [
             "--no-video".into(),
             "--really-quiet".into(),
+            "--audio-client-name=SessionSmith".into(),
             format!("--volume={volume}").into(),
             format!("--start={offset}").into(),
             path.as_os_str().to_owned(),
@@ -612,6 +623,7 @@ fn spawn_player(path: &Path, position_ms: u64, volume: u8) -> Result<Child, Stri
             );
         }
     };
+    configure_child_lifecycle(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -619,6 +631,36 @@ fn spawn_player(path: &Path, position_ms: u64, volume: u8) -> Result<Child, Stri
         .spawn()
         .map_err(|_| "The desktop audio player could not be started.".into())
 }
+
+#[cfg(target_os = "linux")]
+fn configure_child_lifecycle(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    let parent_pid = std::process::id() as libc::pid_t;
+    command.env("PULSE_PROP_application.name", "SessionSmith");
+    command.env(
+        "PIPEWIRE_PROPS",
+        "{ application.name = SessionSmith node.description = SessionSmith }",
+    );
+    // SAFETY: pre_exec performs only the async-signal-safe prctl syscall.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "SessionSmith exited before the audio player started",
+                ));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_child_lifecycle(_command: &mut Command) {}
 
 fn seconds_to_millis(seconds: f64) -> u64 {
     if !seconds.is_finite() || seconds <= 0.0 {
@@ -777,7 +819,8 @@ fn is_simple_identifier(value: &str) -> bool {
 mod tests {
     use super::{
         approved_audio_path, display_label, is_simple_identifier, metadata_candidates, player_args,
-        select_audio_source, NativePlayerState, PlayerBackendKind, ResolvedAudioSource,
+        select_audio_source, DesktopAudioPlayer, NativePlayerState, PlaybackStatus,
+        PlayerBackendKind, ResolvedAudioSource,
     };
     use std::{
         fs,
@@ -981,7 +1024,30 @@ mod tests {
         );
         assert!(mpv.contains(&"--volume=64".into()));
         assert!(mpv.contains(&"--start=12.345".into()));
+        assert!(mpv.contains(&"--audio-client-name=SessionSmith".into()));
         assert_eq!(mpv.last().map(String::as_str), Some("session audio.flac"));
+    }
+
+    #[test]
+    fn shutdown_stops_and_rewinds_the_active_source() {
+        let player = DesktopAudioPlayer::default();
+        {
+            let mut state = player.lock();
+            state.source = Some(ResolvedAudioSource {
+                path: "session.wav".into(),
+                label: "session.wav".into(),
+            });
+            state.source_id = Some(4);
+            state.status = PlaybackStatus::Playing;
+            state.position_ms = 12_000;
+            state.started_at = Some(std::time::Instant::now());
+        }
+
+        player.stop_on_exit();
+
+        let snapshot = player.snapshot();
+        assert_eq!(snapshot.status, "stopped");
+        assert_eq!(snapshot.position_ms, 0);
     }
 
     #[test]

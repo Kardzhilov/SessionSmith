@@ -579,6 +579,9 @@ pub fn run() {
         ) {
             use tauri::Manager;
             app_handle
+                .state::<audio_player::DesktopAudioPlayer>()
+                .stop_on_exit();
+            app_handle
                 .state::<inbox_watch::InboxWatchService>()
                 .stop_on_exit();
         }

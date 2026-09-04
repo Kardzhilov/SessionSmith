@@ -59,7 +59,10 @@ describe("high-risk surface accessibility", () => {
     const dialog = await screen.findByRole("dialog", { name: "Review speakers" });
 
     expect(screen.getByRole("heading", { name: "Review speakers" })).toHaveFocus();
-    expect(within(dialog).getByRole("combobox", { name: "Assigned name" })).toBeEnabled();
+    const assignedName = within(dialog).getByRole("combobox", { name: "Assigned name" });
+    expect(assignedName).toBeEnabled();
+    expect(within(assignedName).getByRole("option", { name: "Avery" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("checkbox", { name: "Save as campaign default" })).toHaveAttribute("type", "checkbox");
     expect(within(dialog).getByRole("button", { name: "Play SPEAKER_00 sample from 0:12" })).toBeEnabled();
     expect(await axe(container)).toHaveNoViolations();
     await userEvent.keyboard("{Escape}");

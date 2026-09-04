@@ -782,20 +782,19 @@ fn modified_at(path: &Path) -> Option<u64> {
 }
 
 fn speaker_names(campaign: &CampaignConfig) -> Vec<String> {
-    let mut names = BTreeSet::new();
+    let mut names = Vec::new();
+    let mut seen = BTreeSet::new();
     let gm = campaign.campaign.gm.trim();
-    if !gm.is_empty() {
-        names.insert(gm.to_string());
+    if !gm.is_empty() && seen.insert(gm.to_lowercase()) {
+        names.push(gm.to_string());
     }
     for player in &campaign.players {
-        for name in [&player.player, &player.character] {
-            let name = name.trim();
-            if !name.is_empty() {
-                names.insert(name.to_string());
-            }
+        let name = player.player.trim();
+        if !name.is_empty() && seen.insert(name.to_lowercase()) {
+            names.push(name.to_string());
         }
     }
-    names.into_iter().collect()
+    names
 }
 
 fn system_time_epoch(time: SystemTime) -> Option<u64> {
@@ -808,9 +807,31 @@ fn system_time_epoch(time: SystemTime) -> Option<u64> {
 mod tests {
     use super::{
         artifact_write, sanitize_provenance_text, saved_artifact_label, saved_artifact_path,
-        session_name_source, validate_artifact_write, validate_transcript_query, CampaignPaths,
+        session_name_source, speaker_names, validate_artifact_write, validate_transcript_query,
+        CampaignPaths,
     };
+    use sessionsmith::config::{CampaignConfig, Player};
     use sessionsmith::prompts::Artifact;
+
+    #[test]
+    fn speaker_suggestions_are_the_gm_and_player_names_in_campaign_order() {
+        let mut campaign = CampaignConfig::default();
+        campaign.campaign.gm = " Michael ".into();
+        campaign.players = vec![
+            Player {
+                player: "Emilie".into(),
+                character: "Fatethrial".into(),
+                ..Player::default()
+            },
+            Player {
+                player: "Ravn".into(),
+                character: "Jan Simen".into(),
+                ..Player::default()
+            },
+        ];
+
+        assert_eq!(speaker_names(&campaign), ["Michael", "Emilie", "Ravn"]);
+    }
 
     #[test]
     fn saved_artifacts_only_accept_known_alternate_filenames() {

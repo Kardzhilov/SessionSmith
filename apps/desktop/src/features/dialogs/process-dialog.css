@@ -438,8 +438,8 @@
   text-transform: uppercase;
 }
 
-.process-dialog__field input,
-.process-dialog__field select {
+.process-dialog__field > input,
+.process-dialog__field > select {
   width: 100%;
   min-height: 34px;
   border: 1px solid var(--line-strong);
@@ -450,11 +450,11 @@
   font-size: 12px;
 }
 
-.process-dialog__field input {
+.process-dialog__field > input {
   padding: 0 8px;
 }
 
-.process-dialog__field select {
+.process-dialog__field > select {
   padding: 0 6px;
 }
 
@@ -619,6 +619,11 @@
 
 .speaker-review__field {
   align-self: stretch;
+  align-content: center;
+  padding: 10px;
+  border-left: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-raised);
 }
 
 .speaker-review__default-toggle {
@@ -628,6 +633,14 @@
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
+}
+
+.speaker-review__default-toggle input {
+  width: 15px;
+  height: 15px;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--pine);
 }
 
 .speaker-review__reset-confirm {
@@ -665,6 +678,11 @@
 
   .speaker-review__entry {
     grid-template-columns: 1fr;
+  }
+
+  .speaker-review__field {
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 }
 
