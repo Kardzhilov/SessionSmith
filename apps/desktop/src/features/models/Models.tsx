@@ -371,7 +371,9 @@ function ModelCatalogModal({
   const filtered = models
     .filter(({ model }) => engine === "all" || model.engine === engine)
     .filter(({ model }) => state === "all" || model.state === state)
-    .filter(({ model }) => language === "all" || model.languages?.includes(language))
+    .filter(({ model }) => language === "all"
+      || model.languages?.includes(language)
+      || (language !== "Multilingual" && model.languages?.includes("Multilingual")))
     .filter(({ model }) => !normalizedQuery || [
       model.id,
       model.label,
@@ -384,6 +386,7 @@ function ModelCatalogModal({
     ].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery)))
     .sort((left, right) => compareCatalogModels(left.model, right.model, sort));
   const engines = [...new Set(models.map(({ model }) => model.engine))].sort();
+  const states = [...new Set(models.map(({ model }) => model.state))];
   const languages = [...new Set(models.flatMap(({ model }) => model.languages ?? []))].sort();
   const selected = filtered.find(({ model }) => model.id === selectedModelId) ?? filtered[activeModelIndex] ?? filtered[0] ?? null;
 
@@ -457,7 +460,7 @@ function ModelCatalogModal({
         <div className="model-catalog__controls">
           <label className="model-catalog__search"><Search size={15} /><span className="sr-only">Search models</span><input ref={searchRef} type="search" value={query} placeholder="Search models" onChange={(event) => setQuery(event.target.value)} /></label>
           <label><span className="sr-only">Engine</span><select value={engine} onChange={(event) => setEngine(event.target.value)}><option value="all">All engines</option>{engines.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-          <label><span className="sr-only">Install state</span><select value={state} onChange={(event) => setState(event.target.value)}><option value="all">Any state</option><option value="installed">Installed</option><option value="ready">Ready</option><option value="available">Available</option></select></label>
+          <label><span className="sr-only">Install state</span><select value={state} onChange={(event) => setState(event.target.value)}><option value="all">Any state</option>{states.map((value) => <option key={value} value={value}>{modelStateLabel(value)}</option>)}</select></label>
           {languages.length > 0 && <label><span className="sr-only">Language</span><select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="all">All languages</option>{languages.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>}
           <label><span className="sr-only">Sort models</span><select value={sort} onChange={(event) => setSort(event.target.value as CatalogSort)}><option value="name">Name</option><option value="size-desc">Size, largest</option><option value="size-asc">Size, smallest</option><option value="params-desc">Parameters, largest</option><option value="params-asc">Parameters, smallest</option><option value="released-desc">Release date, newest</option><option value="released-asc">Release date, oldest</option></select></label>
         </div>
@@ -670,6 +673,10 @@ function ModelRow({
 
 function formatLanguages(model: ModelEntry) {
   return model.languageSummary ?? model.languages?.join(", ") ?? "Not listed";
+}
+
+function modelStateLabel(state: ModelState) {
+  return state === "ready" ? "Ready" : state === "installed" ? "Installed" : "Available";
 }
 
 function ModelStateIcon({ state }: { state: ModelState }) {

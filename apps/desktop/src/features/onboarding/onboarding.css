@@ -42,6 +42,8 @@
 .setup-status--fail span { color: var(--red); }
 .setup-status small { color: var(--muted); }
 .setup-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.setup-refresh-status { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; color: var(--pine); font-size: 12px; font-weight: 700; }
+.setup-refresh-status--error { color: var(--red); }
 .setup-model-summary { display: grid; grid-template-columns: repeat(3, 1fr); border-block: 1px solid var(--line); }
 .setup-model-summary span { display: grid; gap: 4px; padding: 22px; border-right: 1px solid var(--line); color: var(--muted); text-align: center; }
 .setup-model-summary span:last-child { border-right: 0; }

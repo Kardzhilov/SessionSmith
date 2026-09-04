@@ -41,7 +41,7 @@ const modelBase: Omit<ModelEntry, "id" | "label" | "state" | "isDefault"> = {
 
 export const modelInventory: ModelInventory = {
   whisper: [
-    { ...modelBase, id: "small.en", label: "Small English", state: "ready", isDefault: true },
+    { ...modelBase, id: "small.en", label: "Small English", state: "installed", isDefault: true },
     { ...modelBase, id: "medium.en", label: "Medium English", state: "available", isDefault: false },
   ],
   asr: [],

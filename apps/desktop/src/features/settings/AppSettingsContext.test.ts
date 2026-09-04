@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ThemePalette } from "../../api/types";
-import { accessibleThemeProperties, contrastRatio } from "./AppSettingsContext";
+import { accessibleThemeProperties, contrastRatio, resolveAppearance } from "./AppSettingsContext";
 
 const lowContrastTheme: ThemePalette = {
   id: "washed-out",
@@ -33,5 +33,14 @@ describe("accessible custom themes", () => {
     expect(contrastRatio(colors["--amber"], colors["--amber-soft"])).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(colors["--red"], colors["--red-soft"])).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(colors["--on-primary"], colors["--pine-dark"])).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe("appearance resolution", () => {
+  it("uses fixed modes immediately and resolves system mode", () => {
+    expect(resolveAppearance("light", true)).toBe("light");
+    expect(resolveAppearance("dark", false)).toBe("dark");
+    expect(resolveAppearance("system", false)).toBe("light");
+    expect(resolveAppearance("system", true)).toBe("dark");
   });
 });

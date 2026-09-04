@@ -39,4 +39,35 @@ describe("Model catalog accessibility", () => {
     expect(screen.queryByRole("dialog", { name: "Transcription catalog" })).not.toBeInTheDocument();
     expect(browse).toHaveFocus();
   });
+
+  it("matches multilingual models to named languages and only lists present states", async () => {
+    vi.spyOn(desktop, "modelsInventory").mockResolvedValue({
+      ...modelInventory,
+      whisper: [
+        { ...modelInventory.whisper[0], languages: ["Multilingual"], languageSummary: "99 languages" },
+        modelInventory.whisper[1],
+      ],
+      asr: [{
+        ...modelInventory.whisper[0],
+        id: "granite",
+        label: "Granite Speech",
+        engine: "IBM Granite Speech",
+        languages: ["English", "French"],
+        languageSummary: "English and French",
+      }],
+    });
+    const user = userEvent.setup();
+    render(<ModelInventoryPage refreshKey={0} modelRunning={false} jobError={null} onActionStarting={vi.fn()} onJobStarted={vi.fn()} />);
+    await user.click(await screen.findByRole("button", { name: "Browse catalog (3)" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Transcription catalog" });
+    const stateFilter = within(dialog).getByRole("combobox", { name: "Install state" });
+    expect(within(stateFilter).queryByRole("option", { name: "Ready" })).not.toBeInTheDocument();
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Language" }), "French");
+
+    expect(within(dialog).getByText("2 of 3 models")).toBeInTheDocument();
+    expect(within(dialog).getAllByRole("heading", { name: "Small English" }).length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByRole("heading", { name: "Granite Speech" }).length).toBeGreaterThan(0);
+    expect(within(dialog).queryByRole("heading", { name: "Medium English" })).not.toBeInTheDocument();
+  });
 });

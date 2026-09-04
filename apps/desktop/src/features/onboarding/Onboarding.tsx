@@ -54,7 +54,7 @@ export function OnboardingScreen({
   healthError: string | null;
   initialCampaignId: string | null;
   initialStep?: StepId;
-  onRefreshHealth: () => void;
+  onRefreshHealth: () => Promise<void>;
   onRunChecks: () => void;
   onHandoff: (destination: SetupDestination) => void;
   onCampaignCreated: (result: CampaignCreateResult) => Promise<void>;
@@ -78,6 +78,7 @@ export function OnboardingScreen({
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmSkip, setConfirmSkip] = useState(false);
+  const [healthRefreshStatus, setHealthRefreshStatus] = useState<"idle" | "refreshing" | "complete">("idle");
   const headingRef = useRef<HTMLHeadingElement | null>(null);
 
   useEffect(() => {
@@ -141,6 +142,12 @@ export function OnboardingScreen({
     }
   };
 
+  const refreshHealth = async () => {
+    setHealthRefreshStatus("refreshing");
+    await onRefreshHealth();
+    setHealthRefreshStatus("complete");
+  };
+
   return (
     <main className="onboarding-shell" aria-labelledby="onboarding-title">
       <header className="onboarding-header">
@@ -176,7 +183,16 @@ export function OnboardingScreen({
               {!health && <p>{healthError ?? "Health information is loading."}</p>}
             </div>
             <div className="setup-actions">
-              <button className="button button--quiet" type="button" onClick={onRefreshHealth} disabled={healthLoading}>Refresh</button>
+              {healthRefreshStatus === "complete" && (
+                <span className={healthError ? "setup-refresh-status setup-refresh-status--error" : "setup-refresh-status"} role="status">
+                  {healthError ? <CircleAlert size={15} aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}
+                  {healthError ? `Refresh finished with an error: ${healthError}` : "Health status refreshed just now"}
+                </span>
+              )}
+              <button className="button button--quiet" type="button" onClick={() => void refreshHealth()} disabled={healthLoading || healthRefreshStatus === "refreshing"}>
+                {healthRefreshStatus === "refreshing" && <LoaderCircle className="is-spinning" size={15} aria-hidden="true" />}
+                {healthRefreshStatus === "refreshing" ? "Refreshing" : "Refresh"}
+              </button>
               <button className="button button--quiet" type="button" onClick={() => onHandoff("health")}>Open Health</button>
               <button className="button button--primary" type="button" onClick={onRunChecks}>Run checks</button>
             </div>

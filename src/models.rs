@@ -584,8 +584,8 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "qwen3.8",
         released: "2026-08",
-        langs: None,
-        languages: &[],
+        langs: Some("Multilingual"),
+        languages: &["Multilingual", "English"],
         license: None,
         note: Some("Curated 27B Ollama option."),
         options: &[OllamaOption {
@@ -598,8 +598,8 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "qwen3.5",
         released: "2026-03",
-        langs: None,
-        languages: &[],
+        langs: Some("Multilingual"),
+        languages: &["Multilingual", "English"],
         license: None,
         note: Some("Curated Ollama options from 0.8B through 122B."),
         options: &[
@@ -650,8 +650,8 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "ornith",
         released: "2026-06",
-        langs: None,
-        languages: &[],
+        langs: Some("English"),
+        languages: &["English"],
         license: None,
         note: Some("Curated 9B and 35B Ollama options."),
         options: &[
@@ -672,8 +672,8 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "Agents-A1",
         released: "2026-06",
-        langs: None,
-        languages: &[],
+        langs: Some("English"),
+        languages: &["English"],
         license: None,
         note: Some("Curated 35B Q4_K_M GGUF option served through Ollama."),
         options: &[OllamaOption {
@@ -686,8 +686,17 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "llama3.3",
         released: "2024-12",
-        langs: None,
-        languages: &[],
+        langs: Some("8 languages"),
+        languages: &[
+            "English",
+            "German",
+            "French",
+            "Italian",
+            "Portuguese",
+            "Hindi",
+            "Spanish",
+            "Thai",
+        ],
         license: None,
         note: Some("Curated 70B Ollama option."),
         options: &[OllamaOption {
@@ -700,8 +709,17 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "llama3.2",
         released: "2024-09",
-        langs: None,
-        languages: &[],
+        langs: Some("8 languages"),
+        languages: &[
+            "English",
+            "German",
+            "French",
+            "Italian",
+            "Portuguese",
+            "Hindi",
+            "Spanish",
+            "Thai",
+        ],
         license: None,
         note: Some("Curated compact 1B and 3B Ollama options."),
         options: &[
@@ -722,8 +740,8 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "gemma3",
         released: "2025-03",
-        langs: None,
-        languages: &[],
+        langs: Some("140+ languages"),
+        languages: &["Multilingual", "English"],
         license: None,
         note: Some("Curated 4B, 12B, and 27B Ollama options."),
         options: &[
@@ -750,8 +768,8 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "mistral",
         released: "2023-09",
-        langs: None,
-        languages: &[],
+        langs: Some("English"),
+        languages: &["English"],
         license: None,
         note: Some("Curated 7B Ollama option."),
         options: &[OllamaOption {
@@ -764,8 +782,8 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "phi4",
         released: "2024-12",
-        langs: None,
-        languages: &[],
+        langs: Some("English"),
+        languages: &["English"],
         license: None,
         note: Some("Curated 14B Ollama option."),
         options: &[OllamaOption {
@@ -778,8 +796,8 @@ pub const OLLAMA_CATALOG: &[OllamaModel] = &[
     OllamaModel {
         display: "phi4-mini",
         released: "2025-02",
-        langs: None,
-        languages: &[],
+        langs: Some("24 languages"),
+        languages: &["Multilingual", "English"],
         license: None,
         note: Some("Curated compact 3.8B Ollama option."),
         options: &[OllamaOption {
@@ -998,7 +1016,7 @@ mod tests {
             .find(|option| option.pull == "qwen3.5:9b")
             .expect("qwen3.5:9b is cataloged");
         assert_eq!(option.params, 9_000_000_000);
-        assert_eq!(ollama.languages, &[] as &[&str]);
+        assert_eq!(ollama.languages, &["Multilingual", "English"]);
         assert_eq!(ollama.license, None);
         assert!(ollama.note.is_some());
     }

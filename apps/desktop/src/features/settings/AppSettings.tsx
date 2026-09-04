@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { CircleAlert, LoaderCircle, Palette, Save, SlidersHorizontal } from "lucide-react";
-import { applyTheme, useAppSettings } from "./AppSettingsContext";
+import { applyTheme, resolveAppearance, useAppSettings } from "./AppSettingsContext";
 import { desktop, errorMessage } from "../../api/desktop";
 import type { Appearance, DateFormat } from "../../api/types";
 
@@ -32,9 +32,19 @@ export function AppSettingsPage({ onOpenSetup }: { onOpenSetup: () => void }) {
     || theme !== settings.theme;
 
   useEffect(() => {
-    applyTheme(settings.themes.find((palette) => palette.id === theme));
-    return () => applyTheme(settings.themes.find((palette) => palette.id === settings.theme));
-  }, [settings.theme, settings.themes, theme]);
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const preview = () => {
+      document.documentElement.dataset.appearance = resolveAppearance(appearance, media.matches);
+      applyTheme(settings.themes.find((palette) => palette.id === theme));
+    };
+    preview();
+    media.addEventListener("change", preview);
+    return () => {
+      media.removeEventListener("change", preview);
+      document.documentElement.dataset.appearance = resolveAppearance(settings.appearance, media.matches);
+      applyTheme(settings.themes.find((palette) => palette.id === settings.theme));
+    };
+  }, [appearance, settings.appearance, settings.theme, settings.themes, theme]);
 
   const submit = async () => {
     setSaving(true);

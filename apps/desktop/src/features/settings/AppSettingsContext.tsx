@@ -51,9 +51,7 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
     return () => media.removeEventListener("change", update);
   }, []);
 
-  const resolvedAppearance = settings.appearance === "system"
-    ? (systemDark ? "dark" : "light")
-    : settings.appearance;
+  const resolvedAppearance = resolveAppearance(settings.appearance, systemDark);
 
   useEffect(() => {
     document.documentElement.dataset.appearance = resolvedAppearance;
@@ -62,9 +60,10 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
   }, [resolvedAppearance, settings.theme, settings.themes]);
 
   const save = async (nextSettings: Omit<AppSettingsWriteRequest, "expectedRevision">) => {
+    const current = await desktop.appSettings();
     const saved = await desktop.appSettingsWrite({
       ...nextSettings,
-      expectedRevision: settings.revision,
+      expectedRevision: current.revision,
     });
     setSettings(saved);
     return saved;
@@ -86,6 +85,10 @@ export function applyTheme(theme: AppSettings["themes"][number] | undefined) {
   for (const [property, value] of Object.entries(properties)) root.style.setProperty(property, value);
   root.style.color = theme && theme.id !== "default" ? theme.fg : "";
   root.style.background = theme && theme.id !== "default" ? theme.bg : "";
+}
+
+export function resolveAppearance(appearance: AppSettings["appearance"], systemDark: boolean) {
+  return appearance === "system" ? (systemDark ? "dark" : "light") : appearance;
 }
 
 const themeProperties = ["--canvas", "--canvas-deep", "--surface", "--surface-raised", "--ink", "--muted", "--faint", "--line", "--line-strong", "--pine", "--pine-dark", "--pine-soft", "--amber", "--amber-soft", "--red", "--red-soft", "--blue", "--on-primary"];

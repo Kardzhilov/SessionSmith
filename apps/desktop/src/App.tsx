@@ -931,7 +931,7 @@ function App() {
         healthError={healthError}
         initialCampaignId={activeCampaignId}
         initialStep={onboardingInitialStep}
-        onRefreshHealth={() => void refreshHealth()}
+        onRefreshHealth={refreshHealth}
         onRunChecks={() => void startSystemCheck()}
         onHandoff={handoffOnboarding}
         onCampaignCreated={async (result) => {

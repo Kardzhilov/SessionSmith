@@ -289,7 +289,7 @@ fn asr_entry(model: &asr::AsrModelSpec, installed: bool, is_default: bool) -> Mo
         family: Some(model.engine.label().into()),
         cataloged: true,
         engine: model.engine.label().into(),
-        state: if installed { "ready" } else { "available" }.into(),
+        state: if installed { "installed" } else { "available" }.into(),
         is_default,
         size_bytes: model.size,
         released: model.released.into(),
@@ -335,7 +335,11 @@ mod tests {
         assert!(default.is_default);
         assert_eq!(default.size_bytes, 6_500_000_000);
         assert_eq!(default.params, Some(9_000_000_000));
-        assert_eq!(default.languages, None);
+        assert_eq!(
+            default.languages,
+            Some(vec!["Multilingual".into(), "English".into()])
+        );
+        assert_eq!(default.language_summary.as_deref(), Some("Multilingual"));
         assert_eq!(default.license, None);
         assert!(default.note.is_some());
         assert!(entries.iter().any(|entry| entry.id == "local:latest"));
@@ -375,5 +379,11 @@ mod tests {
         );
         assert_eq!(entry.license.as_deref(), Some("Apache-2.0"));
         assert!(entry.note.is_some());
+    }
+
+    #[test]
+    fn prepared_asr_models_use_the_installed_state() {
+        let model = asr::find("granite-speech-4.1-2b").expect("Granite Speech is cataloged");
+        assert_eq!(asr_entry(model, true, false).state, "installed");
     }
 }
