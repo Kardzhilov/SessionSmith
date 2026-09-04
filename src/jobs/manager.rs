@@ -124,6 +124,11 @@ impl JobManager {
         }
     }
 
+    /// Ensure newly submitted jobs use IDs at or above `next_id`.
+    pub fn ensure_next_id_at_least(&self, next_id: JobId) {
+        self.inner.next_id.fetch_max(next_id, Ordering::Relaxed);
+    }
+
     /// Construct a manager on the Tokio runtime currently executing a host
     /// command. Hosts can use this without depending directly on Tokio.
     pub fn try_current() -> std::result::Result<Self, tokio::runtime::TryCurrentError> {
@@ -296,6 +301,26 @@ impl JobManager {
         })
     }
 
+    /// Remove terminal jobs while preserving queued, running, and cancelling work.
+    pub fn clear_finished(&self) -> Vec<JobId> {
+        self.with_jobs_mut(|jobs| {
+            let finished = jobs
+                .iter()
+                .filter_map(|(&id, record)| {
+                    matches!(
+                        record.state,
+                        JobState::Succeeded | JobState::Failed | JobState::Cancelled
+                    )
+                    .then_some(id)
+                })
+                .collect::<Vec<_>>();
+            for id in &finished {
+                jobs.remove(id);
+            }
+            finished
+        })
+    }
+
     fn with_jobs<T>(&self, read: impl FnOnce(&BTreeMap<JobId, JobRecord>) -> T) -> T {
         let jobs = self.inner.jobs.lock().expect("job manager mutex poisoned");
         read(&jobs)
@@ -390,6 +415,52 @@ mod tests {
         assert_eq!(job.id, id);
         assert_eq!(job.state, JobState::Succeeded);
         assert_eq!(job.summary.as_deref(), Some("notes ready"));
+    }
+
+    #[tokio::test]
+    async fn manager_allocates_above_restored_history_ids() {
+        let manager = JobManager::new(tokio::runtime::Handle::current());
+        manager.ensure_next_id_at_least(42);
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let reporter = Arc::new(ChannelReporter::new(sender, CancellationToken::new()));
+
+        let id = manager.submit(JobKind::Notes, "Generate notes", reporter, |_| async {
+            Ok("notes ready".into())
+        });
+
+        assert_eq!(id, 42);
+        assert_eq!(
+            next_completion(&mut receiver).await,
+            Ok("notes ready".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_finished_jobs_preserves_active_work() {
+        let manager = JobManager::new(tokio::runtime::Handle::current());
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let reporter = Arc::new(ChannelReporter::new(sender, CancellationToken::new()));
+        let finished_id = manager.submit(JobKind::Notes, "Finished", reporter, |_| async {
+            Ok("done".into())
+        });
+        assert_eq!(next_completion(&mut receiver).await, Ok("done".into()));
+
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let reporter = Arc::new(ChannelReporter::new(sender, CancellationToken::new()));
+        let (_release, gate) = oneshot::channel::<()>();
+        let active_id = manager.submit(JobKind::Transcribe, "Active", reporter, move |_| async {
+            gate.await.map_err(anyhow::Error::from)?;
+            Ok("done".into())
+        });
+
+        assert_eq!(manager.clear_finished(), [finished_id]);
+        let remaining = manager.list();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, active_id);
+        assert!(!matches!(
+            remaining[0].state,
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled
+        ));
     }
 
     #[tokio::test]

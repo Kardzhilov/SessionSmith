@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import {
+  Activity,
   AudioLines,
   BookOpenText,
   Bot,
@@ -36,7 +37,7 @@ import { RecordDialog } from "./features/dialogs/RecordDialog";
 import { RenameSessionDialog } from "./features/dialogs/RenameSessionDialog";
 import { SpeakerReviewDialog } from "./features/dialogs/SpeakerReviewDialog";
 import { HealthPage } from "./features/health/Health";
-import { JobsFlyout } from "./features/jobs/Jobs";
+import { JobsPage } from "./features/jobs/Jobs";
 import { ModelInventoryPage } from "./features/models/Models";
 import { NotificationViewport, type AppNotification } from "./features/notifications/Notifications";
 import { OnboardingScreen } from "./features/onboarding/Onboarding";
@@ -65,7 +66,7 @@ import type {
   SpeakerMapping,
 } from "./api/types";
 
-type View = "sessions" | "log" | "settings" | "app-settings" | "models" | "health";
+type View = "sessions" | "jobs" | "log" | "settings" | "app-settings" | "models" | "health";
 type HealthStatus = "pending" | "ok" | "warn" | "fail";
 type CandidateResolutionContext = {
   campaignId: string;
@@ -99,6 +100,7 @@ const navItems: Array<{
   icon: typeof LibraryBig;
 }> = [
   { id: "sessions", label: "Sessions", icon: LibraryBig },
+  { id: "jobs", label: "Jobs", icon: Activity },
   { id: "log", label: "Campaign log", icon: BookOpenText },
   { id: "settings", label: "Campaign settings", icon: Settings2 },
   { id: "app-settings", label: "App settings", icon: SlidersHorizontal },
@@ -126,7 +128,6 @@ function App() {
   const [healthLoading, setHealthLoading] = useState(true);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<DesktopJob[]>([]);
-  const [jobsOpen, setJobsOpen] = useState(false);
   const [jobsError, setJobsError] = useState<string | null>(null);
   const [doctorSubmitting, setDoctorSubmitting] = useState(false);
   const [recordDialogOpen, setRecordDialogOpen] = useState(false);
@@ -185,6 +186,15 @@ function App() {
   const notificationIdRef = useRef(0);
   const exportOutputDirsRef = useRef(new Map<number, string>());
   const pendingExportTerminalsRef = useRef(new Map<number, DesktopJob>());
+
+  function setJobsOpen(open: boolean) {
+    if (!open) return;
+    setActiveView("jobs");
+    setActiveSessionStem(null);
+    setActiveArtifactId(null);
+    setActiveArtifactCandidate(false);
+    setActiveAlternateName(null);
+  }
 
   const dismissNotification = useCallback((id: number) => {
     setNotifications((current) => current.filter((notification) => notification.id !== id));
@@ -554,6 +564,17 @@ function App() {
       await refreshJobs();
     } catch (nextError) {
       setJobsError(errorMessage(nextError));
+    }
+  }
+
+  async function clearJobHistory() {
+    setJobsError(null);
+    try {
+      await desktop.jobsClearHistory();
+      await refreshJobs();
+    } catch (nextError) {
+      setJobsError(errorMessage(nextError));
+      throw nextError;
     }
   }
 
@@ -1114,29 +1135,14 @@ function App() {
                     aria-label={`Health status ${healthStatusLabel(healthStatus)}`}
                   />
                 )}
+                {item.id === "jobs" && activeJobCount > 0 && (
+                  <i className="nav-item__count" aria-label={`${activeJobCount} active jobs`}>{activeJobCount}</i>
+                )}
               </button>
             );
           })}
         </nav>
 
-        <div className="sidebar__bottom">
-          <button
-            className={jobsOpen ? "jobs-stub jobs-stub--open" : "jobs-stub"}
-            type="button"
-            onClick={() => setJobsOpen((open) => !open)}
-            aria-expanded={jobsOpen}
-            aria-label={`Jobs: ${activeJobCount} active`}
-            title="Open jobs"
-          >
-            {activeJobCount > 0 ? (
-              <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />
-            ) : (
-              <CircleDashed size={17} aria-hidden="true" />
-            )}
-            <span>Jobs</span>
-            <span className="jobs-stub__count">{activeJobCount}</span>
-          </button>
-        </div>
       </aside>
 
       <main className="content">
@@ -1275,6 +1281,14 @@ function App() {
               setExportDialogOpen(true);
             }}
           />
+        ) : activeView === "jobs" ? (
+          <JobsPage
+            jobs={jobs}
+            error={jobsError}
+            onCancel={(jobId) => void cancelJob(jobId)}
+            onClearHistory={clearJobHistory}
+            onRefresh={() => void refreshJobs()}
+          />
         ) : activeView === "settings" ? (
           <CampaignSettingsPage
             campaign={library?.campaign}
@@ -1315,13 +1329,6 @@ function App() {
           />
         ) : null}
       </main>
-      <JobsFlyout
-        jobs={jobs}
-        open={jobsOpen}
-        error={jobsError}
-        onClose={() => setJobsOpen(false)}
-        onCancel={(jobId) => void cancelJob(jobId)}
-      />
       <SearchDialog
         open={searchOpen}
         campaignId={activeCampaignId}

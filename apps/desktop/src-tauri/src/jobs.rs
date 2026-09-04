@@ -25,13 +25,15 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub const JOB_UPDATED_EVENT: &str = "job://updated";
 
 const LOG_TAIL_LIMIT: usize = 80;
+const JOB_HISTORY_LIMIT: usize = 200;
+const JOB_HISTORY_FILE: &str = "job-history.json";
 
-#[derive(Debug, Clone, Serialize, specta::Type)]
+#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobProgress {
     pub label: String,
@@ -42,7 +44,7 @@ pub struct JobProgress {
     pub rate: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, specta::Type)]
+#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobSnapshot {
     #[specta(type = specta_typescript::Number)]
@@ -242,6 +244,8 @@ pub struct DesktopJobs {
 struct DesktopJobsInner {
     manager: OnceLock<JobManager>,
     details: Mutex<BTreeMap<JobId, JobDetails>>,
+    history: Mutex<BTreeMap<JobId, JobSnapshot>>,
+    history_path: OnceLock<PathBuf>,
     artifact_mutation_active: Mutex<bool>,
 }
 
@@ -292,6 +296,44 @@ pub(crate) enum WatchJobState {
 }
 
 impl DesktopJobs {
+    pub(crate) fn initialize_history(&self, app: &AppHandle) -> Result<(), String> {
+        let directory = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("locating job history directory: {error}"))?;
+        self.initialize_history_path(directory.join(JOB_HISTORY_FILE))
+    }
+
+    fn initialize_history_path(&self, path: PathBuf) -> Result<(), String> {
+        if self.inner.history_path.set(path.clone()).is_err() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("creating job history directory: {error}"))?;
+        }
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let encoded = fs::read_to_string(&path)
+            .map_err(|error| format!("reading {}: {error}", path.display()))?;
+        let snapshots: Vec<JobSnapshot> = serde_json::from_str(&encoded)
+            .map_err(|error| format!("parsing {}: {error}", path.display()))?;
+        let mut history = self
+            .inner
+            .history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for snapshot in snapshots {
+            if terminal_job_state(&snapshot.state) {
+                history.insert(snapshot.id, snapshot);
+            }
+        }
+        trim_job_history(&mut history);
+        Ok(())
+    }
+
     pub fn submit_doctor(&self, app: AppHandle) -> Result<JobSubmission, String> {
         let manager = self.manager()?;
         let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
@@ -941,15 +983,51 @@ impl DesktopJobs {
     }
 
     pub fn list(&self) -> Vec<JobSnapshot> {
-        let Some(manager) = self.manager_if_initialized() else {
-            return Vec::new();
-        };
+        let mut snapshots = self
+            .inner
+            .history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(manager) = self.manager_if_initialized() {
+            for snapshot in manager.list() {
+                let snapshot = self.snapshot_from_managed(snapshot);
+                snapshots.insert(snapshot.id, snapshot);
+            }
+        }
+        snapshots.into_values().collect()
+    }
 
-        manager
-            .list()
-            .into_iter()
-            .map(|snapshot| self.snapshot_from_managed(snapshot))
-            .collect()
+    pub fn clear_history(&self) -> Result<(), String> {
+        let mut history = self
+            .inner
+            .history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(path) = self.inner.history_path.get() {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("removing {}: {error}", path.display()));
+                }
+            }
+        }
+
+        history.clear();
+        let removed: BTreeSet<_> = self
+            .manager_if_initialized()
+            .map(|manager| manager.clear_finished().into_iter().collect())
+            .unwrap_or_default();
+        drop(history);
+        if !removed.is_empty() {
+            self.inner
+                .details
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|id, _| !removed.contains(id));
+        }
+        Ok(())
     }
 
     pub fn cancel(&self, app: &AppHandle, id: JobId) -> Result<(), String> {
@@ -1007,6 +1085,14 @@ impl DesktopJobs {
         }
 
         let manager = JobManager::new(tauri::async_runtime::handle().inner().clone());
+        let next_id = self
+            .inner
+            .history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_key_value()
+            .map_or(1, |(id, _)| id.saturating_add(1));
+        manager.ensure_next_id_at_least(next_id);
         let _ = self.inner.manager.set(manager);
         self.manager_if_initialized()
             .ok_or_else(|| "Desktop job manager could not be initialized.".into())
@@ -1034,7 +1120,28 @@ impl DesktopJobs {
         let Some(snapshot) = manager.list().into_iter().find(|job| job.id == id) else {
             return;
         };
-        let _ = app.emit(JOB_UPDATED_EVENT, self.snapshot_from_managed(snapshot));
+        let snapshot = self.snapshot_from_managed(snapshot);
+        self.remember_terminal(&snapshot);
+        let _ = app.emit(JOB_UPDATED_EVENT, snapshot);
+    }
+
+    fn remember_terminal(&self, snapshot: &JobSnapshot) {
+        if !terminal_job_state(&snapshot.state) {
+            return;
+        }
+        let mut history = self
+            .inner
+            .history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        history.insert(snapshot.id, snapshot.clone());
+        trim_job_history(&mut history);
+        let Some(path) = self.inner.history_path.get() else {
+            return;
+        };
+        if let Err(error) = write_job_history(path, &history) {
+            eprintln!("warning: could not persist job history: {error}");
+        }
     }
 
     fn snapshot_from_managed(&self, snapshot: ManagedJobSnapshot) -> JobSnapshot {
@@ -1064,6 +1171,33 @@ impl DesktopJobs {
                 && job_supports_cancellation(&snapshot.kind),
         }
     }
+}
+
+fn terminal_job_state(state: &str) -> bool {
+    matches!(state, "succeeded" | "failed" | "cancelled")
+}
+
+fn trim_job_history(history: &mut BTreeMap<JobId, JobSnapshot>) {
+    while history.len() > JOB_HISTORY_LIMIT {
+        let Some(oldest) = history.first_key_value().map(|(id, _)| *id) else {
+            break;
+        };
+        history.remove(&oldest);
+    }
+}
+
+fn write_job_history(
+    path: &Path,
+    history: &BTreeMap<JobId, JobSnapshot>,
+) -> Result<(), String> {
+    let temporary = path.with_extension("json.tmp");
+    let snapshots: Vec<_> = history.values().collect();
+    let encoded = serde_json::to_string_pretty(&snapshots)
+        .map_err(|error| format!("encoding job history: {error}"))?;
+    fs::write(&temporary, encoded)
+        .map_err(|error| format!("writing {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("installing {}: {error}", path.display()))
 }
 
 struct DesktopReporter {
@@ -2225,8 +2359,8 @@ mod tests {
         notes_request, process_request, push_log, recording_request, validate_asr_model,
         validate_backend_kind, validate_language, validate_session_date, CandidateAction,
         CandidateResolveRequest, ExportFormat, ExportRequest, ImportAudioRequest, JobDetails,
-        ModelAction, ModelRequest, NotesRequest, ProcessRequest, RecordRequest, SpeakerMapEntry,
-        SpeakerMapRequest, TranscribeRequest, LOG_TAIL_LIMIT,
+        JobSnapshot, ModelAction, ModelRequest, NotesRequest, ProcessRequest, RecordRequest,
+        SpeakerMapEntry, SpeakerMapRequest, TranscribeRequest, LOG_TAIL_LIMIT,
     };
     use sessionsmith::jobs::report::JobEvent;
     use std::{
@@ -2251,6 +2385,78 @@ mod tests {
     #[test]
     fn desktop_jobs_initialize_from_the_tauri_runtime() {
         assert!(super::DesktopJobs::default().manager().is_ok());
+    }
+
+    #[test]
+    fn terminal_job_history_survives_a_new_desktop_instance() {
+        let directory = temporary_directory("job-history");
+        let path = directory.join("job-history.json");
+        let failed = JobSnapshot {
+            id: 41,
+            kind: "run".into(),
+            title: "Process Thursday session".into(),
+            state: "failed".into(),
+            started_at: Some(1_000),
+            finished_at: Some(1_125),
+            summary: Some("language model request failed".into()),
+            active_children: 0,
+            phase: Some("Notes".into()),
+            progress: None,
+            log_tail: vec!["Error: language model request failed".into()],
+            can_cancel: false,
+        };
+
+        let jobs = super::DesktopJobs::default();
+        jobs.initialize_history_path(path.clone()).unwrap();
+        jobs.remember_terminal(&failed);
+        drop(jobs);
+
+        let restored = super::DesktopJobs::default();
+        restored.initialize_history_path(path).unwrap();
+        let history = restored.list();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, 41);
+        assert_eq!(history[0].state, "failed");
+        assert_eq!(history[0].started_at, Some(1_000));
+        assert_eq!(history[0].finished_at, Some(1_125));
+        assert_eq!(
+            history[0].summary.as_deref(),
+            Some("language model request failed")
+        );
+        assert_eq!(
+            history[0].log_tail,
+            ["Error: language model request failed"]
+        );
+        restored.clear_history().unwrap();
+        assert!(restored.list().is_empty());
+        assert!(!directory.join("job-history.json").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn non_terminal_jobs_are_not_written_to_history() {
+        let directory = temporary_directory("active-job-history");
+        let path = directory.join("job-history.json");
+        let jobs = super::DesktopJobs::default();
+        jobs.initialize_history_path(path.clone()).unwrap();
+        jobs.remember_terminal(&JobSnapshot {
+            id: 1,
+            kind: "transcribe".into(),
+            title: "Transcribe session".into(),
+            state: "running".into(),
+            started_at: Some(1_000),
+            finished_at: None,
+            summary: None,
+            active_children: 1,
+            phase: Some("Transcribe".into()),
+            progress: None,
+            log_tail: Vec::new(),
+            can_cancel: true,
+        });
+
+        assert!(jobs.list().is_empty());
+        assert!(!path.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

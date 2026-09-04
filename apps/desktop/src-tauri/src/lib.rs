@@ -444,6 +444,12 @@ fn jobs_list(jobs: tauri::State<'_, jobs::DesktopJobs>) -> Vec<jobs::JobSnapshot
     jobs.list()
 }
 
+#[tauri::command]
+#[specta::specta]
+fn jobs_clear_history(jobs: tauri::State<'_, jobs::DesktopJobs>) -> Result<(), String> {
+    jobs.clear_history()
+}
+
 #[specta::specta]
 #[tauri::command]
 fn job_cancel(
@@ -533,6 +539,7 @@ fn command_builder() -> tauri_specta::Builder<tauri::Wry> {
             job_submit_session_rename,
             job_submit_candidate_resolve,
             jobs_list,
+            jobs_clear_history,
             job_cancel,
             inbox_watch_start,
             inbox_watch_stop,
@@ -565,6 +572,12 @@ pub fn run() {
             use tauri::Manager;
             commands::recover_campaign_renames()
                 .map_err(|error| format!("campaign rename recovery failed: {error}"))?;
+            if let Err(error) = app
+                .state::<jobs::DesktopJobs>()
+                .initialize_history(app.handle())
+            {
+                eprintln!("warning: job history could not be loaded: {error}");
+            }
             event_builder.mount_events(app);
             app.manage(audio_player::DesktopAudioPlayer::new(app.handle().clone()));
             Ok(())

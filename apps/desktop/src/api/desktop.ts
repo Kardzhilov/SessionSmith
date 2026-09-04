@@ -141,6 +141,7 @@ export const desktop = {
     commands.searchQuery(campaignId, query, sourceKinds).then(adaptSearchResults),
   searchSources: () => commands.searchSources(),
   jobsList: () => commands.jobsList().then((jobs) => jobs.map(adaptDesktopJob)),
+  jobsClearHistory: () => commands.jobsClearHistory().then(() => undefined),
   jobListen: (callback: (job: ReturnType<typeof adaptDesktopJob>) => void) =>
     listen<JobSnapshot>("job://updated", ({ payload }) => callback(adaptDesktopJob(payload))),
   jobSubmitDoctor: () => commands.jobSubmitDoctor(),

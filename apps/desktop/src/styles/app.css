@@ -571,44 +571,19 @@ button:disabled {
   background: var(--red);
 }
 
-.sidebar__bottom {
-  margin-top: auto;
-  padding: 12px 10px;
-}
-
-.jobs-stub {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 10px;
-  min-height: 38px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 650;
-  text-align: left;
-}
-
-.jobs-stub:hover,
-.jobs-stub--open {
-  border-color: var(--line);
-  background: var(--surface-subtle);
-  color: var(--pine);
-}
-
-.jobs-stub__count {
+.nav-item__count {
   display: grid;
-  width: 18px;
+  min-width: 18px;
   height: 18px;
   margin-left: auto;
+  padding: 0 4px;
   place-items: center;
-  border: 1px solid var(--line-strong);
-  border-radius: 50%;
-  color: var(--faint);
-  font-size: 10px;
+  border-radius: 9px;
+  color: var(--surface-raised);
+  background: var(--blue);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
 }
 
 .health-page__actions {
@@ -2651,20 +2626,18 @@ h1 {
 
 .sidebar-collapsed .brand-name,
 .sidebar-collapsed .sidebar__campaign,
-.sidebar-collapsed .nav-item span,
-.sidebar-collapsed .jobs-stub span:not(.jobs-stub__count) {
+.sidebar-collapsed .nav-item span {
   display: none;
 }
 
 .sidebar-collapsed .sidebar__top,
-.sidebar-collapsed .nav-item,
-.sidebar-collapsed .jobs-stub {
+.sidebar-collapsed .nav-item {
   justify-content: center;
   padding-inline: 0;
 }
 
 .sidebar-collapsed .nav-item__health,
-.sidebar-collapsed .jobs-stub__count {
+.sidebar-collapsed .nav-item__count {
   position: absolute;
   margin: 17px 0 0 19px;
 }
@@ -2754,13 +2727,12 @@ h1 {
     border-right: 0;
   }
 
-  .sidebar__top,
-  .sidebar__bottom {
+  .sidebar__top {
     display: none;
   }
 
   .nav-list {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     height: 60px;
     padding: 6px 8px;
   }
@@ -2777,11 +2749,18 @@ h1 {
   }
 
   .nav-item__health,
-  .sidebar-collapsed .nav-item__health {
+  .sidebar-collapsed .nav-item__health,
+  .nav-item__count,
+  .sidebar-collapsed .nav-item__count {
     position: absolute;
     top: 10px;
-    right: 12px;
+    right: max(2px, calc(50% - 21px));
     margin: 0;
+  }
+
+  .nav-item__count,
+  .sidebar-collapsed .nav-item__count {
+    top: 5px;
   }
 
   .content {

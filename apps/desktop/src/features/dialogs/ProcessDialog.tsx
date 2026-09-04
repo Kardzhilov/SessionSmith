@@ -48,8 +48,10 @@ export function ProcessDialog({
   onSubmit: (request: ProcessDialogRequest) => void;
 }) {
   const [mode, setMode] = useState<ProcessDialogRequest["mode"]>("run");
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
-  const [orderedPaths, setOrderedPaths] = useState<string[]>([]);
+  const [{ selectedPaths, orderedPaths }, setAudioSelection] = useState(() => ({
+    selectedPaths: new Set<string>(),
+    orderedPaths: [] as string[],
+  }));
   const [allInbox, setAllInbox] = useState(false);
   const [selectedArtifacts, setSelectedArtifacts] = useState<Set<ArtifactId>>(
     new Set(artifacts.map((artifact) => artifact.id)),
@@ -72,8 +74,7 @@ export function ProcessDialog({
   useEffect(() => {
     if (open) {
       setMode("run");
-      setSelectedPaths(new Set(audio.map((item) => item.path)));
-      setOrderedPaths(audio.map((item) => item.path));
+      setAudioSelection({ selectedPaths: new Set(), orderedPaths: [] });
       setAllInbox(false);
       setSelectedArtifacts(new Set(artifacts.map((artifact) => artifact.id)));
       setResume(true);
@@ -122,10 +123,14 @@ export function ProcessDialog({
   }
 
   const togglePath = (path: string) => {
-    setSelectedPaths((current) => {
-      const selected = current.has(path);
-      setOrderedPaths((paths) => selected ? paths.filter((item) => item !== path) : [...paths, path]);
-      return toggleSetValue(current, path);
+    setAudioSelection((current) => {
+      const selected = current.selectedPaths.has(path);
+      return {
+        selectedPaths: toggleSetValue(current.selectedPaths, path),
+        orderedPaths: selected
+          ? current.orderedPaths.filter((item) => item !== path)
+          : [...current.orderedPaths, path],
+      };
     });
   };
   const toggleArtifact = (artifact: ArtifactId) => {
@@ -149,15 +154,15 @@ export function ProcessDialog({
   const asrModels = modelInventory ? [...modelInventory.whisper, ...modelInventory.asr] : [];
 
   function moveCombinedAudio(path: string, direction: -1 | 1) {
-    setOrderedPaths((paths) => {
-      const index = paths.indexOf(path);
+    setAudioSelection((current) => {
+      const index = current.orderedPaths.indexOf(path);
       const target = index + direction;
-      if (index < 0 || target < 0 || target >= paths.length) {
-        return paths;
+      if (index < 0 || target < 0 || target >= current.orderedPaths.length) {
+        return current;
       }
-      const next = [...paths];
+      const next = [...current.orderedPaths];
       [next[index], next[target]] = [next[target], next[index]];
-      return next;
+      return { ...current, orderedPaths: next };
     });
   }
 
@@ -253,12 +258,13 @@ export function ProcessDialog({
                   setAllInbox(nextAllInbox);
                   if (nextAllInbox) {
                     const inboxPaths = audio.map((item) => item.path);
-                    setSelectedPaths(new Set(inboxPaths));
-                    setOrderedPaths(inboxPaths);
+                    setAudioSelection({ selectedPaths: new Set(inboxPaths), orderedPaths: inboxPaths });
+                  } else {
+                    setAudioSelection({ selectedPaths: new Set(), orderedPaths: [] });
                   }
                 }}
               />
-              <span>Use all current Inbox audio</span>
+              <span>Select all Inbox audio</span>
             </label>
             {!canUseAllInbox && audio.length > 20 && (
               <p className="process-dialog__all-inbox-hint">Select up to 20 files for one processing job.</p>

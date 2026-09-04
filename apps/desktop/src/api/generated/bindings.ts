@@ -52,6 +52,7 @@ export const commands = {
 	jobSubmitSessionRename: (request: SessionRenameRequest) => __TAURI_INVOKE<JobSubmission>("job_submit_session_rename", { request }),
 	jobSubmitCandidateResolve: (request: CandidateResolveRequest) => __TAURI_INVOKE<JobSubmission>("job_submit_candidate_resolve", { request }),
 	jobsList: () => __TAURI_INVOKE<JobSnapshot[]>("jobs_list"),
+	jobsClearHistory: () => __TAURI_INVOKE<null>("jobs_clear_history"),
 	jobCancel: (jobId: number) => __TAURI_INVOKE<null>("job_cancel", { jobId }),
 	inboxWatchStart: (request: InboxWatchStartRequest) => __TAURI_INVOKE<InboxWatchStatus>("inbox_watch_start", { request }),
 	inboxWatchStop: () => __TAURI_INVOKE<InboxWatchStatus>("inbox_watch_stop"),

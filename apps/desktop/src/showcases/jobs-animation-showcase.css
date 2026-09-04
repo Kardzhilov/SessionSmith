@@ -1,0 +1,72 @@
+#root {
+  display: block;
+  height: auto;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow: visible;
+}
+
+.animation-showcase {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--line) 16%, transparent) 1px, transparent 1px) 0 0 / 32px 32px,
+    var(--canvas);
+}
+
+.animation-showcase__toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 10px clamp(24px, 4vw, 56px);
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--surface-glass);
+  backdrop-filter: blur(14px);
+}
+
+.animation-showcase__toolbar strong,
+.animation-showcase__toolbar span {
+  display: block;
+}
+
+.animation-showcase__toolbar strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.animation-showcase__toolbar span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.animation-showcase__controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.animation-showcase__stage--paused *,
+.animation-showcase__stage--paused *::before,
+.animation-showcase__stage--paused *::after {
+  animation-play-state: paused !important;
+}
+
+@media (max-width: 620px) {
+  .animation-showcase__toolbar {
+    position: static;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 9px;
+    padding: 12px 18px;
+  }
+
+  .animation-showcase__controls .button {
+    flex: 1;
+  }
+}
