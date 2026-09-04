@@ -252,6 +252,44 @@ button:disabled {
   margin: 5px 0;
 }
 
+.app-settings-about__actions {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-top: 14px;
+}
+
+.app-update {
+  display: grid;
+  min-width: min(100%, 280px);
+  gap: 8px;
+}
+
+.app-update__status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.app-update__status--error {
+  color: var(--red);
+}
+
+.app-update progress {
+  width: 100%;
+  accent-color: var(--pine);
+}
+
+.app-update__actions {
+  display: flex;
+  gap: 8px;
+}
+
 @media (max-width: 720px) {
   .app-settings-controls {
     grid-template-columns: 1fr;

@@ -321,6 +321,17 @@ and a comparison link describe the changes since the previous published
 release. The workflow can also be dispatched manually to rebuild an existing
 `vMAJOR.MINOR.PATCH` tag without incrementing it.
 
+Desktop releases also publish Tauri updater bundles, detached signatures, and
+`latest.json`. The release remains a draft unless all three platform entries
+contain a signed update. Builds require these GitHub Actions secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+Keep an encrypted backup of the corresponding private key and its password.
+Existing installations trust the public key embedded in the app, so losing the
+private key prevents those installations from accepting future updates.
+
 ---
 
 ## 🧱 Design principles

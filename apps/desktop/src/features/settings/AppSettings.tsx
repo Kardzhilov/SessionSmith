@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { open } from "@tauri-apps/plugin-dialog";
 import { CircleAlert, FolderCog, FolderOpen, LoaderCircle, Palette, Save, SlidersHorizontal } from "lucide-react";
 import { applyTheme, resolveAppearance, useAppSettings } from "./AppSettingsContext";
+import { AppUpdateControl } from "./AppUpdateControl";
 import { desktop, errorMessage } from "../../api/desktop";
 import type { Appearance, DateFormat } from "../../api/types";
 
@@ -199,7 +200,10 @@ export function AppSettingsPage({
         <p className="eyebrow">About</p>
         <h2>SessionSmith {version}</h2>
         <p>Local-first TTRPG transcription and session notes.</p>
-        <button className="button button--quiet" type="button" onClick={onOpenSetup}>Run operational setup</button>
+        <div className="app-settings-about__actions">
+          <button className="button button--quiet" type="button" onClick={onOpenSetup}>Run operational setup</button>
+          <AppUpdateControl currentVersion={version} />
+        </div>
       </section>
     </div>
   );
