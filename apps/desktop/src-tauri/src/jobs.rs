@@ -1186,18 +1186,14 @@ fn trim_job_history(history: &mut BTreeMap<JobId, JobSnapshot>) {
     }
 }
 
-fn write_job_history(
-    path: &Path,
-    history: &BTreeMap<JobId, JobSnapshot>,
-) -> Result<(), String> {
+fn write_job_history(path: &Path, history: &BTreeMap<JobId, JobSnapshot>) -> Result<(), String> {
     let temporary = path.with_extension("json.tmp");
     let snapshots: Vec<_> = history.values().collect();
     let encoded = serde_json::to_string_pretty(&snapshots)
         .map_err(|error| format!("encoding job history: {error}"))?;
     fs::write(&temporary, encoded)
         .map_err(|error| format!("writing {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("installing {}: {error}", path.display()))
+    fs::rename(&temporary, path).map_err(|error| format!("installing {}: {error}", path.display()))
 }
 
 struct DesktopReporter {
@@ -2271,8 +2267,8 @@ fn campaign_config_path(root: &Path, campaign_id: &str) -> Result<PathBuf, Strin
         return Err("Campaign identifiers must be simple campaign file names.".into());
     }
 
-    let campaign_path = resolve_workspace_path(root, &config::campaigns_dir())
-        .join(format!("{campaign_id}.toml"));
+    let campaign_path =
+        resolve_workspace_path(root, &config::campaigns_dir()).join(format!("{campaign_id}.toml"));
     if campaign_path.is_file() {
         return Ok(campaign_path);
     }

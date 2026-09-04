@@ -235,14 +235,13 @@ fn complete_onboarding_at(
     let mut desktop = current.settings;
     desktop.onboarding_completed_version = request.version;
     desktop.onboarding_outcome = request.outcome;
-    let result =
-        sessionsmith::config::write_desktop_settings(
-            path,
-            &request.expected_revision,
-            desktop,
-            current.paths,
-        )
-            .map_err(|error| error.to_string())?;
+    let result = sessionsmith::config::write_desktop_settings(
+        path,
+        &request.expected_revision,
+        desktop,
+        current.paths,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(build_onboarding_state(result))
 }
 
@@ -1168,16 +1167,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let campaigns = directory.path().join("campaigns");
         let output = directory.path().join("output");
-        let created =
-            create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap();
+        let created = create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap();
         assert_eq!(created.campaign_id, "my-game");
         let config =
             CampaignConfig::load(&directory.path().join("campaigns").join("my-game.toml")).unwrap();
         assert_eq!(config.campaign.name, "My Game");
         assert_eq!(config.players[0].character, "Mara");
 
-        let error =
-            create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap_err();
+        let error = create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap_err();
         assert!(error.contains("campaign already exists"));
     }
 
@@ -1187,8 +1184,7 @@ mod tests {
         let campaigns = directory.path().join("campaigns");
         let output = directory.path().join("output");
         std::fs::create_dir_all(output.join("my-game")).unwrap();
-        let error =
-            create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap_err();
+        let error = create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap_err();
         assert!(error.contains("campaign output already exists"));
 
         let mut invalid = create_request("Another Game");
@@ -1196,8 +1192,7 @@ mod tests {
         let error = create_campaign_in(&campaigns, &output, invalid).unwrap_err();
         assert!(error.contains("unknown system preset"));
 
-        let error =
-            create_campaign_in(&campaigns, &output, create_request("   ")).unwrap_err();
+        let error = create_campaign_in(&campaigns, &output, create_request("   ")).unwrap_err();
         assert!(error.contains("campaign name cannot be empty"));
     }
 }

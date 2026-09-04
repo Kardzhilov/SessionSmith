@@ -80,6 +80,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
+          cache-targets: ${{ runner.os != 'Windows' }}
       - name: Check formatting
         if: runner.os == 'Linux'
         run: cargo fmt --check --manifest-path apps/desktop/src-tauri/Cargo.toml

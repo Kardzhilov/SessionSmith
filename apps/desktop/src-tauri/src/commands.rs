@@ -426,7 +426,9 @@ fn latest(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{session_has_audio, session_stage, session_stems, unmapped_speaker_count, CampaignPaths};
+    use super::{
+        session_has_audio, session_stage, session_stems, unmapped_speaker_count, CampaignPaths,
+    };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
 
