@@ -71,8 +71,9 @@ structured      = false                # also emit machine-readable dm-notes.jso
 index           = true                 # maintain SQLite search index
 
 [paths]
-audio_dir  = "audio"                    # where input recordings are read from
-output_dir = "output"                   # where transcripts & notes are written
+audio_dir     = "audio"                  # where input recordings are read from
+campaigns_dir = "campaigns"              # where campaign definitions are stored
+output_dir    = "output"                 # where transcripts & notes are written
 
 [ui]
 mouse  = true                             # terminal mouse capture for the full-screen TUI
@@ -293,24 +294,27 @@ prompt for that artifact. Useful for heavily customized output formats.
 
 ## Input / output directories
 
-By default SessionSmith reads recordings from `audio/` and writes everything
-under `output/` (both relative to the current directory, and created
-automatically on startup). Override them in the **global** config:
+By default SessionSmith reads recordings from `audio/`, reads campaign
+definitions from `campaigns/`, and writes generated artifacts under `output/`.
+All three paths are relative to the current directory. Override them in App
+Settings or in the **global** config:
 
 ```toml
 [paths]
-audio_dir  = "~/Recordings/ttrpg"
-output_dir = "~/Documents/campaign-notes"
+audio_dir     = "~/Recordings/ttrpg"
+campaigns_dir = "~/Documents/ttrpg-campaigns"
+output_dir    = "~/Documents/campaign-notes"
 ```
 
 | Key | Default | Description |
 |---|---|---|
 | `audio_dir` | `audio` | Directory scanned for input recordings. |
+| `campaigns_dir` | `campaigns` | Directory containing campaign TOML definitions. |
 | `output_dir` | `output` | Root for generated output; each campaign gets an `<output_dir>/<slug>/` subdirectory. |
 
 Relative paths resolve against the current working directory; a leading `~`
-expands to your home directory. Both directories are created on startup if
-missing.
+expands to your home directory. Required directories are created when their
+associated workflow first writes to them.
 
 ---
 

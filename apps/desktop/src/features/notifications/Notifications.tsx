@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { CheckCircle2, CircleAlert, Info, X } from "lucide-react";
+import { CheckCircle2, CircleAlert, FolderOpen, Info, X } from "lucide-react";
 
 export type AppNotification = {
   id: number;
@@ -7,6 +7,10 @@ export type AppNotification = {
   tone: "success" | "error" | "info";
   title: string;
   message?: string;
+  action?: {
+    label: string;
+    onClick: () => void;
+  };
 };
 
 export function NotificationViewport({
@@ -17,7 +21,7 @@ export function NotificationViewport({
   onDismiss: (id: number) => void;
 }) {
   useEffect(() => {
-    const timers = notifications.map((notification) => window.setTimeout(
+    const timers = notifications.filter((notification) => !notification.action).map((notification) => window.setTimeout(
       () => onDismiss(notification.id),
       notification.tone === "error" ? 9000 : 6000,
     ));
@@ -61,8 +65,14 @@ function Toast({
       <div>
         <strong>{notification.title}</strong>
         {notification.message && <span>{notification.message}</span>}
+        {notification.action && (
+          <button className="toast__action" type="button" onClick={notification.action.onClick}>
+            <FolderOpen size={14} aria-hidden="true" />
+            {notification.action.label}
+          </button>
+        )}
       </div>
-      <button type="button" onClick={() => onDismiss(notification.id)} aria-label={`Dismiss ${notification.title}`} title="Dismiss">
+      <button className="toast__dismiss" type="button" onClick={() => onDismiss(notification.id)} aria-label={`Dismiss ${notification.title}`} title="Dismiss">
         <X size={15} aria-hidden="true" />
       </button>
     </div>

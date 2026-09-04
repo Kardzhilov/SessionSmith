@@ -11,13 +11,16 @@ const settings: AppSettings = {
   appearance: "system",
   theme: "default",
   playerVolume: 50,
+  audioDir: "audio",
+  campaignsDir: "campaigns",
+  outputDir: "output",
   themes: [],
 };
 
 function SaveHarness() {
   const { loading, save } = useAppSettings();
   if (loading) return <span>Loading</span>;
-  return <button type="button" onClick={() => void save({ dateFormat: "dmy", appearance: "light", theme: "default", playerVolume: 50 })}>Save settings</button>;
+  return <button type="button" onClick={() => void save({ dateFormat: "dmy", appearance: "light", theme: "default", playerVolume: 50, audioDir: "audio", campaignsDir: "campaigns", outputDir: "output" })}>Save settings</button>;
 }
 
 describe("AppSettingsProvider", () => {

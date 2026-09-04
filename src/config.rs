@@ -133,6 +133,9 @@ pub struct PathsConfig {
     /// Directory scanned for input recordings.
     #[serde(default = "default_audio_dir")]
     pub audio_dir: PathBuf,
+    /// Directory containing per-campaign TOML definitions.
+    #[serde(default = "default_campaigns_dir")]
+    pub campaigns_dir: PathBuf,
     /// Root directory for all generated output (per-campaign subdirs live here).
     #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
@@ -140,6 +143,9 @@ pub struct PathsConfig {
 
 fn default_audio_dir() -> PathBuf {
     PathBuf::from("audio")
+}
+fn default_campaigns_dir() -> PathBuf {
+    PathBuf::from("campaigns")
 }
 fn default_output_dir() -> PathBuf {
     PathBuf::from("output")
@@ -149,6 +155,7 @@ impl Default for PathsConfig {
     fn default() -> Self {
         Self {
             audio_dir: default_audio_dir(),
+            campaigns_dir: default_campaigns_dir(),
             output_dir: default_output_dir(),
         }
     }
@@ -169,6 +176,7 @@ static PERMISSIVE_SECRET_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 fn set_global_paths(paths: &PathsConfig) {
     let resolved = PathsConfig {
         audio_dir: expand_tilde(&paths.audio_dir),
+        campaigns_dir: expand_tilde(&paths.campaigns_dir),
         output_dir: expand_tilde(&paths.output_dir),
     };
     if let Ok(mut guard) = PATHS.write() {
@@ -182,6 +190,14 @@ pub fn audio_dir() -> PathBuf {
         .read()
         .map(|p| p.audio_dir.clone())
         .unwrap_or_else(|_| default_audio_dir())
+}
+
+/// The configured campaign definition directory (default `campaigns/`).
+pub fn campaigns_dir() -> PathBuf {
+    PATHS
+        .read()
+        .map(|paths| paths.campaigns_dir.clone())
+        .unwrap_or_else(|_| default_campaigns_dir())
 }
 
 /// The configured output root directory (default `output/`).
@@ -662,6 +678,7 @@ pub struct CampaignEditablePrompts {
 #[derive(Debug, Clone)]
 pub struct DesktopSettingsResult {
     pub settings: DesktopConfig,
+    pub paths: PathsConfig,
     pub revision: String,
 }
 
@@ -887,6 +904,7 @@ pub fn read_desktop_settings(path: &Path) -> Result<DesktopSettingsResult> {
         toml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(DesktopSettingsResult {
         settings: normalize_desktop_settings(config.desktop)?,
+        paths: config.paths,
         revision: crate::util::content_revision(&contents),
     })
 }
@@ -895,6 +913,7 @@ pub fn write_desktop_settings(
     path: &Path,
     expected_revision: &str,
     settings: DesktopConfig,
+    paths: PathsConfig,
 ) -> Result<DesktopSettingsResult> {
     validate_revision(expected_revision)?;
     let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -923,14 +942,37 @@ pub fn write_desktop_settings(
     );
     desktop.insert("onboarding_outcome", value(&settings.onboarding_outcome));
 
+    let paths_table = document
+        .as_table_mut()
+        .entry("paths")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[paths] must be a TOML table to edit app settings"))?;
+    paths_table.insert(
+        "audio_dir",
+        value(paths.audio_dir.to_string_lossy().as_ref()),
+    );
+    paths_table.insert(
+        "campaigns_dir",
+        value(paths.campaigns_dir.to_string_lossy().as_ref()),
+    );
+    paths_table.insert(
+        "output_dir",
+        value(paths.output_dir.to_string_lossy().as_ref()),
+    );
+
     let updated = document.to_string();
     let _: GlobalConfig = toml::from_str(&updated)
         .with_context(|| format!("validating updated {}", path.display()))?;
     match crate::util::atomic_replace_if_revision(path, expected_revision, updated.as_bytes()) {
-        Ok(()) => Ok(DesktopSettingsResult {
-            settings,
-            revision: crate::util::content_revision(updated.as_bytes()),
-        }),
+        Ok(()) => {
+            set_global_paths(&paths);
+            Ok(DesktopSettingsResult {
+                settings,
+                paths,
+                revision: crate::util::content_revision(updated.as_bytes()),
+            })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             bail!("app settings changed since they were read")
         }
@@ -1729,6 +1771,11 @@ mod tests {
             "# Keep this comment.\n[backend]\nkind = \"ollama\"\n\n[future]\nenabled = true\n";
         std::fs::write(&path, source).unwrap();
 
+        let paths = PathsConfig {
+            audio_dir: "recordings".into(),
+            campaigns_dir: "tables".into(),
+            output_dir: "generated".into(),
+        };
         let result = write_desktop_settings(
             &path,
             &crate::util::content_revision(source.as_bytes()),
@@ -1740,6 +1787,7 @@ mod tests {
                 onboarding_completed_version: 1,
                 onboarding_outcome: "finished".into(),
             },
+            paths,
         )
         .unwrap();
         let updated = std::fs::read_to_string(&path).unwrap();
@@ -1749,6 +1797,12 @@ mod tests {
         assert_eq!(result.settings.player_volume, 64);
         assert_eq!(result.settings.onboarding_completed_version, 1);
         assert_eq!(result.settings.onboarding_outcome, "finished");
+        assert_eq!(result.paths.audio_dir, PathBuf::from("recordings"));
+        assert_eq!(result.paths.campaigns_dir, PathBuf::from("tables"));
+        assert_eq!(result.paths.output_dir, PathBuf::from("generated"));
+        assert!(updated.contains("audio_dir = \"recordings\""));
+        assert!(updated.contains("campaigns_dir = \"tables\""));
+        assert!(updated.contains("output_dir = \"generated\""));
 
         let invalid = write_desktop_settings(
             &path,
@@ -1757,6 +1811,7 @@ mod tests {
                 appearance: "sepia".into(),
                 ..result.settings
             },
+            result.paths,
         )
         .unwrap_err();
         assert!(invalid.to_string().contains("appearance must be"));
@@ -1774,6 +1829,7 @@ mod tests {
             &path,
             &crate::util::content_revision(b"stale"),
             DesktopConfig::default(),
+            PathsConfig::default(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("changed since they were read"));

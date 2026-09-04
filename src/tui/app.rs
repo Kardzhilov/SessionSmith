@@ -689,7 +689,7 @@ impl App {
 
     fn load_campaigns(&mut self) {
         let mut entries = Vec::new();
-        let dir = PathBuf::from("campaigns");
+        let dir = crate::config::campaigns_dir();
         if dir.is_dir() {
             if let Ok(rd) = std::fs::read_dir(&dir) {
                 let mut paths: Vec<PathBuf> = rd

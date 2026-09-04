@@ -570,6 +570,9 @@ export function SessionWorkspacePage({
             appearance: appSettings.appearance,
             theme: appSettings.theme,
             playerVolume: nextVolume,
+            audioDir: appSettings.audioDir,
+            campaignsDir: appSettings.campaignsDir,
+            outputDir: appSettings.outputDir,
           });
         })
         .catch((nextError) => {

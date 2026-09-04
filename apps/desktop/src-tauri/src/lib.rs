@@ -209,6 +209,12 @@ fn app_settings() -> Result<settings::AppSettings, String> {
 
 #[tauri::command]
 #[specta::specta]
+fn export_default_dir() -> Result<String, String> {
+    settings::default_export_dir()
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn app_settings_write(
     request: settings::AppSettingsWriteRequest,
 ) -> Result<settings::AppSettings, String> {
@@ -358,7 +364,7 @@ fn job_submit_export(
     app: tauri::AppHandle,
     jobs: tauri::State<'_, jobs::DesktopJobs>,
     request: jobs::ExportRequest,
-) -> Result<jobs::JobSubmission, String> {
+) -> Result<jobs::ExportSubmission, String> {
     jobs.submit_export(app, request)
 }
 
@@ -504,6 +510,7 @@ fn command_builder() -> tauri_specta::Builder<tauri::Wry> {
             model_set_default,
             app_settings,
             app_settings_write,
+            export_default_dir,
             onboarding_state,
             onboarding_complete,
             campaign_create,

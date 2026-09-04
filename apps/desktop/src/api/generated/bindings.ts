@@ -29,6 +29,7 @@ export const commands = {
 	modelSetDefault: (request: ModelDefaultRequest) => __TAURI_INVOKE<null>("model_set_default", { request }),
 	appSettings: () => __TAURI_INVOKE<AppSettings>("app_settings"),
 	appSettingsWrite: (request: AppSettingsWriteRequest) => __TAURI_INVOKE<AppSettings>("app_settings_write", { request }),
+	exportDefaultDir: () => __TAURI_INVOKE<string>("export_default_dir"),
 	onboardingState: () => __TAURI_INVOKE<OnboardingState>("onboarding_state"),
 	onboardingComplete: (request: OnboardingCompleteRequest) => __TAURI_INVOKE<OnboardingState>("onboarding_complete", { request }),
 	campaignCreate: (request: CampaignCreateRequest) => __TAURI_INVOKE<CampaignCreateResult>("campaign_create", { request }),
@@ -42,7 +43,7 @@ export const commands = {
 	jobSubmitProcess: (request: ProcessRequest) => __TAURI_INVOKE<JobSubmission>("job_submit_process", { request }),
 	jobSubmitLogRebuild: (campaignId: string) => __TAURI_INVOKE<JobSubmission>("job_submit_log_rebuild", { campaignId }),
 	jobSubmitReindex: (campaignId: string) => __TAURI_INVOKE<JobSubmission>("job_submit_reindex", { campaignId }),
-	jobSubmitExport: (request: ExportRequest) => __TAURI_INVOKE<JobSubmission>("job_submit_export", { request }),
+	jobSubmitExport: (request: ExportRequest) => __TAURI_INVOKE<ExportSubmission>("job_submit_export", { request }),
 	jobSubmitNotes: (request: NotesRequest) => __TAURI_INVOKE<JobSubmission>("job_submit_notes", { request }),
 	jobSubmitTranscribe: (request: TranscribeRequest) => __TAURI_INVOKE<JobSubmission>("job_submit_transcribe", { request }),
 	jobSubmitModel: (request: ModelRequest) => __TAURI_INVOKE<JobSubmission>("job_submit_model", { request }),
@@ -77,6 +78,9 @@ export type AppSettings = {
 	appearance: string,
 	theme: string,
 	playerVolume: number,
+	audioDir: string,
+	campaignsDir: string,
+	outputDir: string,
 	themes: ThemePalette[],
 };
 
@@ -86,6 +90,9 @@ export type AppSettingsWriteRequest = {
 	appearance: string,
 	theme: string,
 	playerVolume: number,
+	audioDir: string,
+	campaignsDir: string,
+	outputDir: string,
 };
 
 export type ArtifactDocument = {
@@ -288,10 +295,16 @@ export type ExportFormat = "html" | "obsidian";
 
 export type ExportRequest = {
 	campaignId: string,
+	outputDir: string,
 	stems?: string[],
 	all?: boolean,
 	format: ExportFormat,
 	playerSafe?: boolean,
+};
+
+export type ExportSubmission = {
+	id: number,
+	outputDir: string,
 };
 
 export type HealthCheck = {

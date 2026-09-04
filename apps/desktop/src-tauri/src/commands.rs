@@ -93,7 +93,8 @@ pub fn app_bootstrap() -> Result<AppBootstrap, String> {
 pub(crate) fn recover_campaign_renames() -> Result<(), String> {
     let root = workspace_root();
     let output_root = resolve_workspace_path(&root, &config::output_dir());
-    sessionsmith::campaign_ops::recover_campaign_renames(&root.join("campaigns"), &output_root)
+    let campaigns_dir = resolve_workspace_path(&root, &config::campaigns_dir());
+    sessionsmith::campaign_ops::recover_campaign_renames(&campaigns_dir, &output_root)
         .map_err(|error| error.to_string())
 }
 
@@ -164,7 +165,7 @@ fn campaign_records(root: &Path, global: &GlobalConfig) -> Vec<CampaignRecord> {
 }
 
 fn campaign_config_paths(root: &Path) -> Vec<PathBuf> {
-    let campaigns_dir = root.join("campaigns");
+    let campaigns_dir = resolve_workspace_path(root, &config::campaigns_dir());
     let mut paths: Vec<_> = fs::read_dir(campaigns_dir)
         .into_iter()
         .flatten()

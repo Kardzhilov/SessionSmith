@@ -723,7 +723,7 @@ fn campaign_paths(campaign_id: &str) -> Result<CampaignPaths, String> {
 }
 
 pub(crate) fn campaign_config_path(root: &Path, campaign_id: &str) -> Result<PathBuf, String> {
-    let campaigns_dir = root.join("campaigns");
+    let campaigns_dir = resolve_workspace_path(root, &config::campaigns_dir());
     let campaign_path = fs::read_dir(&campaigns_dir)
         .into_iter()
         .flatten()

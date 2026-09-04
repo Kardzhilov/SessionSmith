@@ -117,8 +117,10 @@ button:disabled {
 .toast div { display: grid; gap: 3px; }
 .toast strong { font-size: 13px; }
 .toast span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.toast button { display: grid; width: 26px; height: 26px; place-items: center; border: 0; border-radius: 4px; color: var(--muted); background: transparent; }
-.toast button:hover { background: var(--canvas-deep); }
+.toast__dismiss { display: grid; width: 26px; height: 26px; place-items: center; border: 0; border-radius: 4px; color: var(--muted); background: transparent; }
+.toast__dismiss:hover { background: var(--canvas-deep); }
+.toast .toast__action { display: inline-flex; width: fit-content; min-height: 30px; align-items: center; gap: 6px; margin-top: 5px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--ink); background: var(--surface); font-size: 12px; font-weight: 750; }
+.toast .toast__action:hover { border-color: var(--pine); background: var(--pine-soft); }
 
 .app-shell {
   display: grid;
@@ -201,6 +203,37 @@ button:disabled {
   border-radius: 5px;
   color: var(--ink);
   background: var(--surface-raised);
+}
+
+.app-storage-fields {
+  display: grid;
+  gap: 13px;
+  margin-top: 18px;
+}
+
+.app-storage-field {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.app-storage-field__control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+}
+
+.app-storage-field input {
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  color: var(--ink);
+  background: var(--surface-raised);
+  font: 12px "IBM Plex Mono", "Cascadia Mono", monospace;
 }
 
 .app-settings-about {

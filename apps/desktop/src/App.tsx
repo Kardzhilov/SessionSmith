@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import {
   AudioLines,
   BookOpenText,
@@ -181,6 +181,8 @@ function App() {
   const topbarSearchRef = useRef<HTMLInputElement | null>(null);
   const notificationKeysRef = useRef(new Set<string>());
   const notificationIdRef = useRef(0);
+  const exportOutputDirsRef = useRef(new Map<number, string>());
+  const pendingExportTerminalsRef = useRef(new Map<number, DesktopJob>());
 
   const dismissNotification = useCallback((id: number) => {
     setNotifications((current) => current.filter((notification) => notification.id !== id));
@@ -294,12 +296,13 @@ function App() {
       }
       setJobs((currentJobs) => upsertJob(currentJobs, payload));
       if (isTerminalJob(payload)) {
-        pushNotification({
-          key: `job:${payload.id}:${payload.state}`,
-          tone: payload.state === "failed" ? "error" : payload.state === "succeeded" ? "success" : "info",
-          title: payload.state === "succeeded" ? `${payload.title} completed` : payload.state === "failed" ? `${payload.title} failed` : `${payload.title} cancelled`,
-          message: payload.summary ?? undefined,
-        });
+        const exportOutputDir = payload.kind === "export" ? exportOutputDirsRef.current.get(payload.id) : undefined;
+        if (payload.kind === "export" && !exportOutputDir) {
+          pendingExportTerminalsRef.current.set(payload.id, payload);
+        } else {
+          if (payload.kind === "export") exportOutputDirsRef.current.delete(payload.id);
+          notifyTerminalJob(payload, exportOutputDir);
+        }
       }
       if (payload.kind === "doctor" && isTerminalJob(payload)) {
         void refreshHealth();
@@ -390,6 +393,24 @@ function App() {
     notificationKeysRef.current.add(notification.key);
     notificationIdRef.current += 1;
     setNotifications((current) => [...current, { ...notification, id: notificationIdRef.current }].slice(-5));
+  }
+
+  function notifyTerminalJob(job: DesktopJob, exportOutputDir?: string) {
+    pushNotification({
+      key: `job:${job.id}:${job.state}`,
+      tone: job.state === "failed" ? "error" : job.state === "succeeded" ? "success" : "info",
+      title: job.state === "succeeded" ? `${job.title} completed` : job.state === "failed" ? `${job.title} failed` : `${job.title} cancelled`,
+      message: job.summary ?? undefined,
+      action: job.state === "succeeded" && exportOutputDir ? {
+        label: "Open folder",
+        onClick: () => {
+          void openPath(exportOutputDir).catch((nextError) => {
+            const message = errorMessage(nextError);
+            pushNotification({ key: `export:open:${message}`, tone: "error", title: "Export folder could not be opened", message });
+          });
+        },
+      } : undefined,
+    });
   }
 
   async function loadOnboarding() {
@@ -621,7 +642,17 @@ function App() {
     setExportSubmitting(true);
     setExportError(null);
     try {
-      await desktop.jobSubmitExport({ campaignId, ...request });
+      const defaultPath = await desktop.exportDefaultDir();
+      const selected = await open({ directory: true, multiple: false, defaultPath });
+      if (typeof selected !== "string") return;
+      const submission = await desktop.jobSubmitExport({ campaignId, outputDir: selected, ...request });
+      exportOutputDirsRef.current.set(submission.id, submission.outputDir);
+      const pendingTerminal = pendingExportTerminalsRef.current.get(submission.id);
+      if (pendingTerminal) {
+        pendingExportTerminalsRef.current.delete(submission.id);
+        exportOutputDirsRef.current.delete(submission.id);
+        notifyTerminalJob(pendingTerminal, submission.outputDir);
+      }
       setExportDialogOpen(false);
       setExportInitialStems(null);
       setJobsOpen(true);
@@ -1248,7 +1279,7 @@ function App() {
             onCampaignRenamed={(campaignId) => void refresh(campaignId)}
           />
         ) : activeView === "app-settings" ? (
-          <AppSettingsPage onOpenSetup={() => openOnboarding()} />
+          <AppSettingsPage onOpenSetup={() => openOnboarding()} onStorageSaved={() => refresh()} />
         ) : activeView === "models" ? (
           <ModelInventoryPage
             refreshKey={modelReloadKey}

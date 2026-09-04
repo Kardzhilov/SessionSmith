@@ -33,7 +33,7 @@ pub fn resolve_campaign(override_path: Option<&PathBuf>) -> Result<PathBuf> {
         return Ok(PathBuf::from(p));
     }
 
-    let campaigns_dir = PathBuf::from("campaigns");
+    let campaigns_dir = crate::config::campaigns_dir();
     if campaigns_dir.is_dir() {
         let mut options: Vec<PathBuf> = std::fs::read_dir(&campaigns_dir)
             .into_iter()

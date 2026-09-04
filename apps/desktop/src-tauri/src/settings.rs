@@ -19,6 +19,9 @@ pub struct AppSettings {
     pub appearance: String,
     pub theme: String,
     pub player_volume: u8,
+    pub audio_dir: String,
+    pub campaigns_dir: String,
+    pub output_dir: String,
     pub themes: Vec<ThemePalette>,
 }
 
@@ -70,6 +73,9 @@ pub struct AppSettingsWriteRequest {
     pub appearance: String,
     pub theme: String,
     pub player_volume: u8,
+    pub audio_dir: String,
+    pub campaigns_dir: String,
+    pub output_dir: String,
 }
 
 #[derive(Debug, Serialize, specta::Type)]
@@ -124,11 +130,23 @@ pub(crate) fn app_settings() -> Result<AppSettings, String> {
         appearance: result.settings.appearance,
         theme: result.settings.theme,
         player_volume: result.settings.player_volume,
+        audio_dir: result.paths.audio_dir.to_string_lossy().into_owned(),
+        campaigns_dir: result.paths.campaigns_dir.to_string_lossy().into_owned(),
+        output_dir: result.paths.output_dir.to_string_lossy().into_owned(),
         themes: sessionsmith::themes::load_all()
             .into_iter()
             .map(ThemePalette::from)
             .collect(),
     })
+}
+
+pub(crate) fn default_export_dir() -> Result<String, String> {
+    let root = workspace_root();
+    let campaigns_dir = resolve_workspace_path(&root, &sessionsmith::config::campaigns_dir());
+    let export_dir = campaigns_dir.join("exports");
+    std::fs::create_dir_all(&export_dir)
+        .map_err(|error| format!("Could not prepare {}: {error}", export_dir.display()))?;
+    Ok(export_dir.to_string_lossy().into_owned())
 }
 
 pub(crate) fn write_app_settings(request: AppSettingsWriteRequest) -> Result<AppSettings, String> {
@@ -139,6 +157,11 @@ pub(crate) fn write_app_settings(request: AppSettingsWriteRequest) -> Result<App
     if !themes.iter().any(|theme| theme.id == request.theme) {
         return Err("Select an available application theme.".into());
     }
+    let paths = sessionsmith::config::PathsConfig {
+        audio_dir: settings_path(&request.audio_dir, "audio")?,
+        campaigns_dir: settings_path(&request.campaigns_dir, "campaign")?,
+        output_dir: settings_path(&request.output_dir, "generated output")?,
+    };
     let path = GlobalConfig::path().map_err(|error| error.to_string())?;
     let current =
         sessionsmith::config::read_desktop_settings(&path).map_err(|error| error.to_string())?;
@@ -156,6 +179,7 @@ pub(crate) fn write_app_settings(request: AppSettingsWriteRequest) -> Result<App
             onboarding_completed_version: current.settings.onboarding_completed_version,
             onboarding_outcome: current.settings.onboarding_outcome,
         },
+        paths,
     )
     .map_err(|error| error.to_string())?;
     Ok(AppSettings {
@@ -164,8 +188,19 @@ pub(crate) fn write_app_settings(request: AppSettingsWriteRequest) -> Result<App
         appearance: result.settings.appearance,
         theme: result.settings.theme,
         player_volume: result.settings.player_volume,
+        audio_dir: result.paths.audio_dir.to_string_lossy().into_owned(),
+        campaigns_dir: result.paths.campaigns_dir.to_string_lossy().into_owned(),
+        output_dir: result.paths.output_dir.to_string_lossy().into_owned(),
         themes,
     })
+}
+
+fn settings_path(value: &str, label: &str) -> Result<PathBuf, String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(format!("Select a valid {label} directory."));
+    }
+    Ok(PathBuf::from(value))
 }
 
 pub(crate) fn onboarding_state() -> Result<OnboardingState, String> {
@@ -201,7 +236,12 @@ fn complete_onboarding_at(
     desktop.onboarding_completed_version = request.version;
     desktop.onboarding_outcome = request.outcome;
     let result =
-        sessionsmith::config::write_desktop_settings(path, &request.expected_revision, desktop)
+        sessionsmith::config::write_desktop_settings(
+            path,
+            &request.expected_revision,
+            desktop,
+            current.paths,
+        )
             .map_err(|error| error.to_string())?;
     Ok(build_onboarding_state(result))
 }
@@ -267,9 +307,9 @@ fn create_campaign_in(
         preset_id,
         request.notes.trim().to_string(),
     );
-    let path =
-        sessionsmith::campaign_ops::create_campaign(&root.join("campaigns"), output_dir, &config)
-            .map_err(|error| error.to_string())?;
+    let campaigns_dir = resolve_workspace_path(root, &sessionsmith::config::campaigns_dir());
+    let path = sessionsmith::campaign_ops::create_campaign(&campaigns_dir, output_dir, &config)
+        .map_err(|error| error.to_string())?;
     let campaign_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -610,7 +650,7 @@ pub(crate) fn rename_campaign(request: CampaignRenameRequest) -> Result<Campaign
     let library = commands::campaign_library(campaign_id.into())?;
     let old_config_path = campaign_config_path(&library.campaign.id)?;
     let root = workspace_root();
-    let campaigns_dir = root.join("campaigns");
+    let campaigns_dir = resolve_workspace_path(&root, &sessionsmith::config::campaigns_dir());
     let configured_output = sessionsmith::config::output_dir();
     let output_dir = if configured_output.is_absolute() {
         configured_output
@@ -652,7 +692,8 @@ fn campaign_config_path(campaign_id: &str) -> Result<PathBuf, String> {
         return Err("Campaign identifiers must be simple campaign file names.".into());
     }
     let root = workspace_root();
-    let campaign_path = root.join("campaigns").join(format!("{campaign_id}.toml"));
+    let campaign_path = resolve_workspace_path(&root, &sessionsmith::config::campaigns_dir())
+        .join(format!("{campaign_id}.toml"));
     if campaign_path.is_file() {
         return Ok(campaign_path);
     }
@@ -687,6 +728,14 @@ fn workspace_root() -> PathBuf {
         .nth(3)
         .expect("desktop app must live at apps/desktop/src-tauri")
         .to_path_buf()
+}
+
+fn resolve_workspace_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
 }
 
 fn build_campaign_settings(
@@ -1074,6 +1123,7 @@ mod tests {
         };
         let state = build_onboarding_state(sessionsmith::config::DesktopSettingsResult {
             settings,
+            paths: sessionsmith::config::PathsConfig::default(),
             revision: "revision".into(),
         });
         assert!(state.required);

@@ -8,6 +8,9 @@ const fallbackSettings: AppSettings = {
   appearance: "system",
   theme: "default",
   playerVolume: 50,
+  audioDir: "audio",
+  campaignsDir: "campaigns",
+  outputDir: "output",
   themes: [],
 };
 

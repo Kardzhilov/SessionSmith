@@ -124,6 +124,7 @@ export const desktop = {
   appSettings: () => commands.appSettings().then(adaptAppSettings),
   appSettingsWrite: (request: AppSettingsWriteRequest) =>
     commands.appSettingsWrite(request).then(adaptAppSettings),
+  exportDefaultDir: () => commands.exportDefaultDir(),
   onboardingState: () => commands.onboardingState(),
   onboardingComplete: (request: OnboardingCompleteRequest) =>
     commands.onboardingComplete(request),

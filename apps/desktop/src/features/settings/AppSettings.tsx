@@ -1,16 +1,26 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { CircleAlert, LoaderCircle, Palette, Save, SlidersHorizontal } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { CircleAlert, FolderCog, FolderOpen, LoaderCircle, Palette, Save, SlidersHorizontal } from "lucide-react";
 import { applyTheme, resolveAppearance, useAppSettings } from "./AppSettingsContext";
 import { desktop, errorMessage } from "../../api/desktop";
 import type { Appearance, DateFormat } from "../../api/types";
 
-export function AppSettingsPage({ onOpenSetup }: { onOpenSetup: () => void }) {
+export function AppSettingsPage({
+  onOpenSetup,
+  onStorageSaved,
+}: {
+  onOpenSetup: () => void;
+  onStorageSaved: () => Promise<void> | void;
+}) {
   const { settings, loading, error, save, reload } = useAppSettings();
   const [dateFormat, setDateFormat] = useState<DateFormat>(settings.dateFormat);
   const [appearance, setAppearance] = useState<Appearance>(settings.appearance);
   const [playerVolume, setPlayerVolume] = useState(settings.playerVolume);
   const [theme, setTheme] = useState(settings.theme);
+  const [audioDir, setAudioDir] = useState(settings.audioDir);
+  const [campaignsDir, setCampaignsDir] = useState(settings.campaignsDir);
+  const [outputDir, setOutputDir] = useState(settings.outputDir);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [version, setVersion] = useState("1.0.0");
@@ -20,6 +30,9 @@ export function AppSettingsPage({ onOpenSetup }: { onOpenSetup: () => void }) {
     setAppearance(settings.appearance);
     setPlayerVolume(settings.playerVolume);
     setTheme(settings.theme);
+    setAudioDir(settings.audioDir);
+    setCampaignsDir(settings.campaignsDir);
+    setOutputDir(settings.outputDir);
   }, [settings]);
 
   useEffect(() => {
@@ -29,7 +42,10 @@ export function AppSettingsPage({ onOpenSetup }: { onOpenSetup: () => void }) {
   const dirty = dateFormat !== settings.dateFormat
     || appearance !== settings.appearance
     || playerVolume !== settings.playerVolume
-    || theme !== settings.theme;
+    || theme !== settings.theme
+    || audioDir !== settings.audioDir
+    || campaignsDir !== settings.campaignsDir
+    || outputDir !== settings.outputDir;
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -52,13 +68,27 @@ export function AppSettingsPage({ onOpenSetup }: { onOpenSetup: () => void }) {
     setSaving(true);
     setSaveError(null);
     try {
-      await save({ dateFormat, appearance, theme, playerVolume });
+      const storageChanged = audioDir !== settings.audioDir
+        || campaignsDir !== settings.campaignsDir
+        || outputDir !== settings.outputDir;
+      await save({ dateFormat, appearance, theme, playerVolume, audioDir, campaignsDir, outputDir });
       const audio = await desktop.audioState();
       await desktop.audioSetVolume(audio.sourceId, playerVolume);
+      if (storageChanged) await onStorageSaved();
     } catch (nextError) {
       setSaveError(errorMessage(nextError));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const chooseDirectory = async (current: string, update: (path: string) => void) => {
+    setSaveError(null);
+    try {
+      const selected = await open({ directory: true, multiple: false, defaultPath: current });
+      if (typeof selected === "string") update(selected);
+    } catch (nextError) {
+      setSaveError(errorMessage(nextError));
     }
   };
 
@@ -87,6 +117,30 @@ export function AppSettingsPage({ onOpenSetup }: { onOpenSetup: () => void }) {
           {error && <button type="button" onClick={() => void reload()}>Retry</button>}
         </div>
       )}
+
+      <section className="settings-section app-settings-section">
+        <div className="settings-section__heading">
+          <div className="settings-section__icon"><FolderCog size={17} /></div>
+          <div><h2>Storage directories</h2><p>Choose where SessionSmith reads and writes local campaign data.</p></div>
+        </div>
+        <div className="app-storage-fields">
+          {[
+            { id: "audio-directory", label: "Audio files", value: audioDir, update: setAudioDir },
+            { id: "campaign-directory", label: "Campaign files", value: campaignsDir, update: setCampaignsDir },
+            { id: "output-directory", label: "Generated output", value: outputDir, update: setOutputDir },
+          ].map((field) => (
+            <label className="app-storage-field" htmlFor={field.id} key={field.id}>
+              <span>{field.label}</span>
+              <span className="app-storage-field__control">
+                <input id={field.id} type="text" value={field.value} onChange={(event) => field.update(event.target.value)} />
+                <button className="icon-button" type="button" title={`Choose ${field.label.toLowerCase()} directory`} aria-label={`Choose ${field.label.toLowerCase()} directory`} onClick={() => void chooseDirectory(field.value, field.update)}>
+                  <FolderOpen size={17} aria-hidden="true" />
+                </button>
+              </span>
+            </label>
+          ))}
+        </div>
+      </section>
 
       <section className="settings-section app-settings-section">
         <div className="settings-section__heading">

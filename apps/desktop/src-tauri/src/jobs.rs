@@ -70,6 +70,14 @@ pub struct JobSubmission {
     pub id: JobId,
 }
 
+#[derive(Debug, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSubmission {
+    #[specta(type = specta_typescript::Number)]
+    pub id: JobId,
+    pub output_dir: String,
+}
+
 #[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordRequest {
@@ -94,6 +102,7 @@ pub enum ExportFormat {
 #[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
     pub campaign_id: String,
+    pub output_dir: String,
     #[serde(default)]
     pub stems: Vec<String>,
     #[serde(default)]
@@ -544,7 +553,7 @@ impl DesktopJobs {
         &self,
         app: AppHandle,
         request: ExportRequest,
-    ) -> Result<JobSubmission, String> {
+    ) -> Result<ExportSubmission, String> {
         let request = export_request(request)?;
         let manager = self.manager()?;
         if self.artifact_mutation_active() || pipeline_job_active(&manager) {
@@ -562,6 +571,7 @@ impl DesktopJobs {
 
         let title = request.title;
         let export = request.export;
+        let output_dir = export.output_dir.to_string_lossy().into_owned();
         let format = export_format_label(export.format);
         let player_safe = export.player_safe;
         let reporter = Arc::new(DesktopReporter::new(self.clone(), app.clone()));
@@ -598,7 +608,7 @@ impl DesktopJobs {
         );
         reporter.bind(id);
         self.emit_snapshot(&app, id);
-        Ok(JobSubmission { id })
+        Ok(ExportSubmission { id, output_dir })
     }
 
     pub fn submit_transcribe(
@@ -1328,7 +1338,7 @@ fn export_request(request: ExportRequest) -> Result<ValidatedExportRequest, Stri
         export_format_label(format),
         campaign.campaign.name
     );
-    let output_dir = managed_export_dir(&root, &campaign.slug())?;
+    let output_dir = managed_export_dir(Path::new(request.output_dir.trim()), &campaign.slug())?;
 
     Ok(ValidatedExportRequest {
         title,
@@ -1361,7 +1371,7 @@ fn export_format_label(format: CoreExportFormat) -> &'static str {
     }
 }
 
-fn managed_export_dir(workspace_root: &Path, campaign_slug: &str) -> Result<PathBuf, String> {
+fn managed_export_dir(exports_root: &Path, campaign_slug: &str) -> Result<PathBuf, String> {
     if campaign_slug.is_empty()
         || Path::new(campaign_slug)
             .file_name()
@@ -1370,15 +1380,15 @@ fn managed_export_dir(workspace_root: &Path, campaign_slug: &str) -> Result<Path
     {
         return Err("The selected campaign has no valid managed export folder.".into());
     }
-    let workspace_root = fs::canonicalize(workspace_root)
-        .map_err(|_| "The workspace export folder could not be prepared.".to_string())?;
-    let exports_root = workspace_root.join("exports");
-    fs::create_dir_all(&exports_root)
-        .map_err(|_| "The workspace export folder could not be prepared.".to_string())?;
-    let exports_root = fs::canonicalize(&exports_root)
-        .map_err(|_| "The workspace export folder could not be prepared.".to_string())?;
-    if !exports_root.is_dir() || !exports_root.starts_with(&workspace_root) {
-        return Err("The workspace export folder is outside the approved workspace.".into());
+    if exports_root.as_os_str().is_empty() {
+        return Err("Select a destination folder for the export.".into());
+    }
+    fs::create_dir_all(exports_root)
+        .map_err(|_| "The selected export folder could not be prepared.".to_string())?;
+    let exports_root = fs::canonicalize(exports_root)
+        .map_err(|_| "The selected export folder could not be prepared.".to_string())?;
+    if !exports_root.is_dir() {
+        return Err("The selected export destination is not a directory.".into());
     }
 
     let destination = exports_root.join(campaign_slug);
@@ -2127,7 +2137,8 @@ fn campaign_config_path(root: &Path, campaign_id: &str) -> Result<PathBuf, Strin
         return Err("Campaign identifiers must be simple campaign file names.".into());
     }
 
-    let campaign_path = root.join("campaigns").join(format!("{campaign_id}.toml"));
+    let campaign_path = resolve_workspace_path(root, &config::campaigns_dir())
+        .join(format!("{campaign_id}.toml"));
     if campaign_path.is_file() {
         return Ok(campaign_path);
     }
@@ -2311,6 +2322,7 @@ mod tests {
     fn export_request_requires_an_explicit_nonempty_scope() {
         let request = ExportRequest {
             campaign_id: "test".into(),
+            output_dir: "/tmp".into(),
             stems: Vec::new(),
             all: false,
             format: ExportFormat::Html,
@@ -2320,13 +2332,18 @@ mod tests {
     }
 
     #[test]
-    fn managed_export_dir_stays_under_the_workspace() {
-        let workspace = temporary_directory("managed-export");
-        let output = managed_export_dir(&workspace, "test-campaign").unwrap();
-        let exports = fs::canonicalize(workspace.join("exports")).unwrap();
-        assert!(output.starts_with(exports));
+    fn managed_export_dir_stays_under_the_selected_root() {
+        let export_root = temporary_directory("managed-export");
+        let output = managed_export_dir(&export_root, "test-campaign").unwrap();
+        let export_root = fs::canonicalize(&export_root).unwrap();
+        assert!(output.starts_with(&export_root));
         assert!(output.is_dir());
-        fs::remove_dir_all(workspace).unwrap();
+        fs::remove_dir_all(export_root).unwrap();
+    }
+
+    #[test]
+    fn managed_export_dir_requires_a_selected_root() {
+        assert!(managed_export_dir(std::path::Path::new(""), "test-campaign").is_err());
     }
 
     #[cfg(unix)]
@@ -2334,14 +2351,12 @@ mod tests {
     fn managed_export_dir_rejects_a_campaign_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let workspace = temporary_directory("managed-export-workspace");
+        let export_root = temporary_directory("managed-export-root");
         let outside = temporary_directory("managed-export-outside");
-        let exports = workspace.join("exports");
-        std::fs::create_dir_all(&exports).unwrap();
-        symlink(&outside, exports.join("test-campaign")).unwrap();
+        symlink(&outside, export_root.join("test-campaign")).unwrap();
 
-        assert!(managed_export_dir(&workspace, "test-campaign").is_err());
-        fs::remove_dir_all(workspace).unwrap();
+        assert!(managed_export_dir(&export_root, "test-campaign").is_err());
+        fs::remove_dir_all(export_root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }
 
