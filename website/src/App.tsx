@@ -23,7 +23,7 @@ import {
   TerminalSquare,
   Users,
 } from 'lucide-react'
-import ScrollScene from './ScrollScene'
+import SignalForgeScene from './SignalForgeScene'
 import './App.css'
 
 type Platform = 'linux' | 'macos' | 'windows'
@@ -119,7 +119,7 @@ function App() {
   return (
     <div className="site-shell">
       <a className="skip-link" href="#main-content">Skip to content</a>
-      <ScrollScene screenshotUrl={asset('desktop-workspace.png')} />
+      <SignalForgeScene screenshotUrl={asset('desktop-workspace.png')} />
 
       <header className="site-header" aria-label="Primary navigation">
         <a className="brand-lockup" href="#top" aria-label="SessionSmith home">
