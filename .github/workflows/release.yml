@@ -102,8 +102,8 @@ jobs:
           npm --prefix apps/desktop version "$RELEASE_VERSION" --no-git-tag-version
           sed -i "0,/^version = \".*\"/s//version = \"$RELEASE_VERSION\"/" Cargo.toml
           sed -i "0,/^version = \".*\"/s//version = \"$RELEASE_VERSION\"/" apps/desktop/src-tauri/Cargo.toml
-          cargo metadata --format-version 1 --no-deps >/dev/null
-          cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --format-version 1 --no-deps >/dev/null
+          cargo metadata --format-version 1 >/dev/null
+          cargo metadata --manifest-path apps/desktop/src-tauri/Cargo.toml --format-version 1 >/dev/null
 
           package_version="$(node -p "require('./apps/desktop/package.json').version")"
           desktop_version="$(awk -F '"' '/^version = / { print $2; exit }' apps/desktop/src-tauri/Cargo.toml)"
