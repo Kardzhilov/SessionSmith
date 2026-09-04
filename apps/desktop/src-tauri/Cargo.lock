@@ -4332,7 +4332,7 @@ dependencies = [
 
 [[package]]
 name = "sessionsmith"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4375,7 +4375,7 @@ dependencies = [
 
 [[package]]
 name = "sessionsmith-desktop"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "libc",
  "serde",
