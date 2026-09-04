@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "The SessionSmith desktop GUI"
 authors = ["SessionSmith contributors"]
 edition = "2021"
+default-run = "sessionsmith-desktop"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
