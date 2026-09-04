@@ -34,15 +34,17 @@ export function AppSettingsPage({ onOpenSetup }: { onOpenSetup: () => void }) {
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const preview = () => {
-      document.documentElement.dataset.appearance = resolveAppearance(appearance, media.matches);
-      applyTheme(settings.themes.find((palette) => palette.id === theme));
+      const resolvedAppearance = resolveAppearance(appearance, media.matches);
+      document.documentElement.dataset.appearance = resolvedAppearance;
+      applyTheme(settings.themes.find((palette) => palette.id === theme), resolvedAppearance);
     };
     preview();
     media.addEventListener("change", preview);
     return () => {
       media.removeEventListener("change", preview);
-      document.documentElement.dataset.appearance = resolveAppearance(settings.appearance, media.matches);
-      applyTheme(settings.themes.find((palette) => palette.id === settings.theme));
+      const resolvedAppearance = resolveAppearance(settings.appearance, media.matches);
+      document.documentElement.dataset.appearance = resolvedAppearance;
+      applyTheme(settings.themes.find((palette) => palette.id === settings.theme), resolvedAppearance);
     };
   }, [appearance, settings.appearance, settings.theme, settings.themes, theme]);
 

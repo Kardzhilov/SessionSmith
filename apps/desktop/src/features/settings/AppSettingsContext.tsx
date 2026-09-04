@@ -56,7 +56,7 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     document.documentElement.dataset.appearance = resolvedAppearance;
     document.documentElement.dataset.theme = settings.theme;
-    applyTheme(settings.themes.find((theme) => theme.id === settings.theme));
+    applyTheme(settings.themes.find((theme) => theme.id === settings.theme), resolvedAppearance);
   }, [resolvedAppearance, settings.theme, settings.themes]);
 
   const save = async (nextSettings: Omit<AppSettingsWriteRequest, "expectedRevision">) => {
@@ -76,33 +76,44 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
   );
 }
 
-export function applyTheme(theme: AppSettings["themes"][number] | undefined) {
+export function applyTheme(
+  theme: AppSettings["themes"][number] | undefined,
+  appearance: "light" | "dark",
+) {
   const root = document.documentElement;
   const properties: Record<string, string> = theme && theme.id !== "default"
-    ? accessibleThemeProperties(theme)
+    ? accessibleThemeProperties(theme, appearance)
     : {};
   for (const property of themeProperties) root.style.removeProperty(property);
   for (const [property, value] of Object.entries(properties)) root.style.setProperty(property, value);
-  root.style.color = theme && theme.id !== "default" ? theme.fg : "";
-  root.style.background = theme && theme.id !== "default" ? theme.bg : "";
+  root.style.color = properties["--ink"] ?? "";
+  root.style.background = properties["--canvas"] ?? "";
 }
 
 export function resolveAppearance(appearance: AppSettings["appearance"], systemDark: boolean) {
   return appearance === "system" ? (systemDark ? "dark" : "light") : appearance;
 }
 
-const themeProperties = ["--canvas", "--canvas-deep", "--surface", "--surface-raised", "--ink", "--muted", "--faint", "--line", "--line-strong", "--pine", "--pine-dark", "--pine-soft", "--amber", "--amber-soft", "--red", "--red-soft", "--blue", "--on-primary"];
+const themeProperties = ["--canvas", "--canvas-deep", "--surface", "--surface-raised", "--ink", "--muted", "--faint", "--line", "--line-strong", "--pine", "--pine-dark", "--pine-soft", "--amber", "--amber-soft", "--red", "--red-soft", "--blue", "--on-primary", "--focus"];
 
-export function accessibleThemeProperties(theme: AppSettings["themes"][number]) {
-  const surface = mixHex(theme.bg, theme.fg, 0.04);
-  const raised = mixHex(theme.bg, theme.fg, 0.09);
+export function accessibleThemeProperties(
+  theme: AppSettings["themes"][number],
+  appearance: "light" | "dark",
+) {
+  const nativeDark = relativeLuminance(theme.bg) < 0.32;
+  const canvas = appearance === "dark"
+    ? (nativeDark ? theme.bg : mixHex(theme.bg, "#000000", 0.82))
+    : (nativeDark ? mixHex(theme.bg, "#ffffff", 0.88) : theme.bg);
+  const surface = mixHex(canvas, "#ffffff", appearance === "dark" ? 0.07 : 0.55);
+  const raised = mixHex(canvas, "#ffffff", appearance === "dark" ? 0.12 : 0.86);
+  const canvasDeep = mixHex(canvas, appearance === "dark" ? "#ffffff" : "#000000", appearance === "dark" ? 0.04 : 0.06);
   const primaryBackground = ensureContrast(theme.primary, "#ffffff", 4.5);
   const primarySoft = mixHex(raised, theme.primary, 0.16);
   const accentSoft = mixHex(raised, theme.accent, 0.16);
   const errorSoft = mixHex(raised, theme.error, 0.16);
   return {
-    "--canvas": theme.bg,
-    "--canvas-deep": mixHex(theme.bg, theme.fg, 0.08),
+    "--canvas": canvas,
+    "--canvas-deep": canvasDeep,
     "--surface": surface,
     "--surface-raised": raised,
     "--ink": ensureContrast(theme.fg, raised, 4.5),
@@ -119,6 +130,7 @@ export function accessibleThemeProperties(theme: AppSettings["themes"][number]) 
     "--red-soft": errorSoft,
     "--blue": ensureContrast(theme.borderFocus, raised, 4.5),
     "--on-primary": "#ffffff",
+    "--focus": ensureContrast(theme.borderFocus, canvas, 3),
   };
 }
 
