@@ -29,6 +29,11 @@ import {
   UsersRound,
 } from "lucide-react";
 import { desktop, errorMessage } from "./api/desktop";
+import {
+  loadLastActiveCampaignId,
+  selectAvailableCampaign,
+  storeLastActiveCampaignId,
+} from "./campaignPreference";
 import { useGlobalAudio } from "./features/audio/GlobalAudioPlayer";
 import { ExportDialog, type ExportDialogRequest } from "./features/dialogs/ExportDialog";
 import { NotesDialog } from "./features/dialogs/NotesDialog";
@@ -112,7 +117,7 @@ function App() {
   const { playFrom } = useGlobalAudio();
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [library, setLibrary] = useState<CampaignLibrary | null>(null);
-  const [activeCampaignId, setActiveCampaignId] = useState<string | null>(null);
+  const [activeCampaignId, setActiveCampaignId] = useState<string | null>(loadLastActiveCampaignId);
   const [activeView, setActiveView] = useState<View>("sessions");
   const [campaignPickerOpen, setCampaignPickerOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -202,6 +207,7 @@ function App() {
 
   useEffect(() => {
     activeCampaignIdRef.current = activeCampaignId;
+    storeLastActiveCampaignId(activeCampaignId);
   }, [activeCampaignId]);
 
   useEffect(() => {
@@ -481,10 +487,7 @@ function App() {
       const nextBootstrap = await desktop.bootstrap();
       setBootstrap(nextBootstrap);
 
-      const selectedCampaign =
-        nextBootstrap.campaigns.find(
-          (campaign) => campaign.id === preferredCampaignId && !campaign.loadError,
-        ) ?? nextBootstrap.campaigns.find((campaign) => !campaign.loadError);
+      const selectedCampaign = selectAvailableCampaign(nextBootstrap.campaigns, preferredCampaignId);
 
       if (selectedCampaign) {
         if (inboxWatchStatus.running && inboxWatchStatus.campaignId !== selectedCampaign.id) {
