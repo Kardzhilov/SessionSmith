@@ -1,71 +1,30 @@
-# ─────────────────────────────────────────────────────────────
-#  SessionSmith — launcher
-#  Runs sessionsmith subcommands; builds the release binary
-#  automatically when it is missing or outdated.
-#
-#  Developer targets (build, test, fmt, clippy…) live in src/Makefile.
-#  Run them with:  make dev TARGET=<target>
-# ─────────────────────────────────────────────────────────────
-
+DESKTOP_DIR := apps/desktop
+NPM := npm --prefix $(DESKTOP_DIR)
+NODE_MODULES_LOCK := $(DESKTOP_DIR)/node_modules/.package-lock.json
 BINARY := target/release/sessionsmith
-SOURCES := $(shell find src -name '*.rs') Cargo.toml Cargo.lock
 
-# Ensure cargo is on PATH even if the shell didn't source ~/.cargo/env
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: all run init transcribe notes log doctor systems models dev bump-version check-version help
+.DEFAULT_GOAL := help
 
-# Default: full interactive pipeline
-all: run
+.PHONY: app browser binary deps help
 
-# Build the release binary only when sources are newer than the binary.
-$(BINARY): $(SOURCES)
-	@$(MAKE) -C src release
+app: deps ## Launch the desktop app from the current repository source
+	$(NPM) run tauri -- dev
 
-## Start the full interactive pipeline (transcribe → notes)
-run: $(BINARY)
-	$(BINARY)
+browser: deps ## Open the desktop frontend in the default browser
+	$(NPM) run dev -- --open
 
-## Interactive campaign initialisation wizard
-init: $(BINARY)
-	$(BINARY) init
+binary: ## Compile only the optimized SessionSmith command-line binary
+	cargo build --release
+	@printf '\nBuilt %s\n' "$(BINARY)"
 
-## Transcribe audio files in audio/
-transcribe: $(BINARY)
-	$(BINARY) transcribe
+deps: $(NODE_MODULES_LOCK) ## Install frontend dependencies when the lockfile changes
 
-## Generate notes from an existing transcript
-notes: $(BINARY)
-	$(BINARY) notes
+$(NODE_MODULES_LOCK): $(DESKTOP_DIR)/package.json $(DESKTOP_DIR)/package-lock.json
+	$(NPM) ci
 
-## Show or update the campaign log
-log: $(BINARY)
-	$(BINARY) log
-
-## Check dependencies and configuration
-doctor: $(BINARY)
-	$(BINARY) doctor
-
-## List available game-system presets
-systems: $(BINARY)
-	$(BINARY) systems list
-
-## Manage Whisper / Ollama models
-models: $(BINARY)
-	$(BINARY) models list
-
-## Delegate to src/Makefile — usage: make dev TARGET=test
-dev:
-	@$(MAKE) -C src $(TARGET)
-
-## Synchronize the release version — usage: make bump-version VERSION=1.2.3
-bump-version:
-	@scripts/bump-version.sh "$(VERSION)"
-
-## Verify all release version fields match — optionally set VERSION=1.2.3
-check-version:
-	@scripts/bump-version.sh --check $(if $(VERSION),$(VERSION))
-
-## Print this help
-help:
-	@awk '/^## /{h=substr($$0,4)} /^[a-z][a-z-]*:/{if(h) printf "  \033[36m%-14s\033[0m %s\n", substr($$1,1,length($$1)-1), h; h=""}' Makefile
+help: ## Show available commands
+	@printf 'SessionSmith desktop commands\n\n'
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(lastword $(MAKEFILE_LIST))
+	@printf '\nExamples:\n  make app\n  make browser\n  make binary\n'
