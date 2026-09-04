@@ -1,12 +1,14 @@
+import { useEffect, useState } from 'react'
 import {
+  ArrowDown,
   ArrowRight,
   AudioLines,
-  BookOpen,
+  BookOpenText,
   Check,
   ChevronRight,
   CircleDot,
   Cloud,
-  Cpu,
+  Command,
   Download,
   ExternalLink,
   FileAudio,
@@ -16,204 +18,305 @@ import {
   Library,
   LockKeyhole,
   Search,
-  Settings2,
   ShieldCheck,
-  SquareTerminal,
+  Sparkles,
+  TerminalSquare,
   Users,
 } from 'lucide-react'
+import ScrollScene from './ScrollScene'
 import './App.css'
 
+type Platform = 'linux' | 'macos' | 'windows'
+
+const version = '1.2.0'
 const releaseUrl = 'https://github.com/Kardzhilov/SessionSmith/releases/latest'
 const repositoryUrl = 'https://github.com/Kardzhilov/SessionSmith'
 const docsUrl = `${repositoryUrl}/tree/main/docs`
 const setupUrl = `${repositoryUrl}/blob/main/docs/setup.md`
-const configurationUrl = `${repositoryUrl}/blob/main/docs/configuration.md`
 const asset = (name: string) => `${import.meta.env.BASE_URL}assets/${name}`
+const releaseAsset = (name: string) => `${repositoryUrl}/releases/download/v${version}/${name}`
+
+const installOptions: Record<Platform, {
+  label: string
+  eyebrow: string
+  note: string
+  downloads: Array<{ label: string; detail: string; href: string }>
+}> = {
+  linux: {
+    label: 'Linux',
+    eyebrow: 'Linux · x86_64',
+    note: 'AppImage runs without installation. Debian/Ubuntu and RPM packages integrate with your desktop environment.',
+    downloads: [
+      { label: 'Download AppImage', detail: 'Universal · 91 MB', href: releaseAsset(`SessionSmith_${version}_amd64.AppImage`) },
+      { label: 'Download DEB', detail: 'Debian / Ubuntu · 19 MB', href: releaseAsset(`SessionSmith_${version}_amd64.deb`) },
+      { label: 'Download RPM', detail: 'Fedora / RHEL · 19 MB', href: releaseAsset(`SessionSmith-${version}-1.x86_64.rpm`) },
+    ],
+  },
+  macos: {
+    label: 'macOS',
+    eyebrow: 'macOS · Apple silicon',
+    note: 'Open the DMG, drag SessionSmith into Applications, then complete the guided local model setup.',
+    downloads: [
+      { label: 'Download DMG', detail: 'Apple silicon · 16 MB', href: releaseAsset(`SessionSmith_${version}_aarch64.dmg`) },
+    ],
+  },
+  windows: {
+    label: 'Windows',
+    eyebrow: 'Windows · x64',
+    note: 'Use the guided setup executable for the simplest install, or the MSI for managed environments.',
+    downloads: [
+      { label: 'Download setup', detail: 'Recommended · 11 MB', href: releaseAsset(`SessionSmith_${version}_x64-setup.exe`) },
+      { label: 'Download MSI', detail: 'Windows Installer · 16 MB', href: releaseAsset(`SessionSmith_${version}_x64_en-US.msi`) },
+    ],
+  },
+}
 
 const workflow = [
   {
     number: '01',
     icon: FileAudio,
     title: 'Bring the table audio',
-    body: 'Record from the desktop app or import an existing session. SessionSmith keeps each campaign and its Inbox separate.',
+    body: 'Record in the app or import the file you already have. Every campaign gets its own clean workspace.',
   },
   {
     number: '02',
     icon: AudioLines,
-    title: 'Transcribe and review',
-    body: 'Run local Whisper or an advanced ASR model, inspect timestamped lines, and map detected speakers to your players and NPCs.',
+    title: 'Transcribe and inspect',
+    body: 'Local Whisper turns speech into timestamped text. Listen back, search lines, and map speakers before notes are made.',
   },
   {
     number: '03',
-    icon: FileText,
-    title: 'Forge useful notes',
-    body: 'Generate bullets, GM notes, recaps, summaries, stories, and quotes, then roll each session into a living campaign log.',
+    icon: Sparkles,
+    title: 'Forge campaign memory',
+    body: 'Focused passes produce GM notes, recaps, summaries, stories, and quotes, then update the living campaign log.',
   },
 ]
 
 const capabilities = [
-  { icon: Library, title: 'Campaign workspace', body: 'Sessions, source audio, transcripts, notes, and the campaign log stay organized under one campaign.' },
-  { icon: Cpu, title: 'Model catalog', body: 'Browse, filter, install, select, and remove supported local transcription and Ollama models.' },
-  { icon: Search, title: 'Search across sessions', body: 'Find a name, place, quote, or loose thread across notes and transcripts, with filters and direct jumps.' },
-  { icon: Users, title: 'Speaker mapping', body: 'Review diarized labels beside transcript samples and consistently map them to campaign participants.' },
-  { icon: BookOpen, title: 'Living campaign log', body: 'Rebuild a rolling, arc-aware campaign record from the summaries you choose to keep.' },
-  { icon: HardDrive, title: 'Portable exports', body: 'Export campaign material as offline HTML or an Obsidian-ready folder for use away from the app.' },
+  { icon: Library, title: 'Campaign workspace', body: 'Audio, transcript, generated documents, edits, and history stay together.' },
+  { icon: Search, title: 'Cross-session search', body: 'Find the name, promise, place, or loose thread hiding three sessions back.' },
+  { icon: Users, title: 'Speaker mapping', body: 'Turn diarized labels into the players, characters, and voices you recognize.' },
+  { icon: BookOpenText, title: 'Living campaign log', body: 'Carry decisions and open arcs forward without rereading every transcript.' },
+  { icon: FileText, title: 'Reviewable notes', body: 'Compare candidate generations and edit ordinary Markdown in the app.' },
+  { icon: HardDrive, title: 'Portable exports', body: 'Take the campaign with you as offline HTML or an Obsidian-ready folder.' },
 ]
 
-const presets = ['D&D 5e', 'Pathfinder 2e', 'Call of Cthulhu', 'Blades in the Dark', 'Daggerheart', 'Wordsmith', 'Generic RPG']
+const systems = ['D&D 5e', 'Pathfinder 2e', 'Call of Cthulhu', 'Blades in the Dark', 'Daggerheart', 'Wordsmith', 'Any RPG']
+
+function detectPlatform(): Platform {
+  const hint = `${navigator.platform} ${navigator.userAgent}`.toLowerCase()
+  if (hint.includes('mac')) return 'macos'
+  if (hint.includes('win')) return 'windows'
+  return 'linux'
+}
 
 function App() {
+  const [platform, setPlatform] = useState<Platform>('linux')
+  const selectedInstall = installOptions[platform]
+
+  useEffect(() => setPlatform(detectPlatform()), [])
+
   return (
     <div className="site-shell">
       <a className="skip-link" href="#main-content">Skip to content</a>
+      <ScrollScene screenshotUrl={asset('desktop-workspace.png')} />
 
       <header className="site-header" aria-label="Primary navigation">
         <a className="brand-lockup" href="#top" aria-label="SessionSmith home">
-          <img src={asset('sessionsmith-icon.png')} alt="" width="36" height="36" />
+          <img src={asset('sessionsmith-app-icon.png')} alt="" width="38" height="38" />
           <span>SessionSmith</span>
         </a>
         <nav className="nav-links" aria-label="Main navigation">
-          <a href="#workflow">Workflow</a>
+          <a href="#how-it-works">How it works</a>
           <a href="#features">Features</a>
-          <a href="#local-first">Privacy</a>
-          <a href={docsUrl}>Docs</a>
+          <a href="#privacy">Privacy</a>
+          <a href="#install">Install</a>
         </nav>
-        <a className="header-github" href={repositoryUrl} target="_blank" rel="noreferrer">
-          <GitFork aria-hidden="true" size={19} /><span>GitHub</span>
+        <a className="header-source" href={repositoryUrl} target="_blank" rel="noreferrer">
+          <GitFork aria-hidden="true" size={18} /><span>GitHub</span>
         </a>
       </header>
 
       <main id="main-content">
         <section className="hero" id="top" aria-labelledby="hero-title">
-          <img className="hero-background" src={asset('dashboard.svg')} alt="" aria-hidden="true" />
-          <div className="hero-shade" aria-hidden="true" />
-          <div className="hero-content">
-            <p className="eyebrow"><span className="status-dot" aria-hidden="true" />Desktop release v1.0.0</p>
+          <div className="hero-copy">
+            <p className="eyebrow"><span />Open source · Local first · v{version}</p>
             <h1 id="hero-title">SessionSmith</h1>
+            <p className="hero-tagline">The session ends.<br />The story stays.</p>
             <p className="hero-deck">
-              Turn a night of table audio into a searchable transcript, useful session notes,
-              and a campaign history you can actually pick up next week.
+              Turn tabletop audio into a searchable transcript, useful GM notes,
+              a player-ready recap, and campaign history you can pick up next week.
             </p>
-            <div className="hero-actions" aria-label="Download and source links">
-              <a className="button button-primary" href={releaseUrl}><Download aria-hidden="true" size={20} />Download v1.0.0</a>
-              <a className="button button-quiet" href={repositoryUrl} target="_blank" rel="noreferrer"><GitFork aria-hidden="true" size={20} />View source</a>
+            <div className="hero-actions">
+              <a className="button button--primary" href="#install">
+                <Download aria-hidden="true" size={19} />Get SessionSmith
+              </a>
+              <a className="button button--ghost" href="#product">
+                See it in action <ArrowRight aria-hidden="true" size={18} />
+              </a>
             </div>
-            <p className="hero-note"><LockKeyhole aria-hidden="true" size={16} />Local-first by default. Cloud backends are always an explicit choice.</p>
+            <p className="hero-assurance"><LockKeyhole aria-hidden="true" size={15} />Your recordings stay on your machine by default.</p>
           </div>
-          <div className="hero-index" aria-hidden="true">
-            <span>Audio</span><ChevronRight size={14} /><span>Transcript</span><ChevronRight size={14} /><span>Notes</span>
-          </div>
+          <a className="scroll-cue" href="#how-it-works">
+            <span>Follow the signal</span><ArrowDown aria-hidden="true" size={17} />
+          </a>
         </section>
 
-        <section className="opening-statement section-pad" aria-labelledby="opening-title">
-          <p className="section-label">The working loop</p>
-          <h2 id="opening-title">Your session ends. The story stays usable.</h2>
-          <p>
-            SessionSmith is a desktop workbench for tabletop campaign continuity. It keeps the
-            source recording, transcript, generated artifacts, corrections, and campaign context
-            together, so prep starts from what really happened at the table.
-          </p>
-        </section>
-
-        <section className="workflow section-pad" id="workflow" aria-labelledby="workflow-title">
-          <div className="section-heading">
-            <div><p className="section-label">Audio to campaign memory</p><h2 id="workflow-title">A visible pipeline, not a black box.</h2></div>
-            <p>Run the whole flow or stop after transcription. Every stage stays reviewable, and candidate notes can be compared before replacing current work.</p>
-          </div>
-          <ol className="workflow-list">
+        <section className="scene-journey" id="how-it-works" data-scene-journey aria-labelledby="journey-title">
+          <header className="journey-intro">
+            <p className="section-kicker">One visible pipeline</p>
+            <h2 id="journey-title">From voices in a room<br />to a world you remember.</h2>
+          </header>
+          <ol className="journey-steps">
             {workflow.map(({ number, icon: Icon, title, body }) => (
-              <li key={title}>
-                <span className="step-number">{number}</span><Icon className="step-icon" aria-hidden="true" size={25} />
-                <h3>{title}</h3><p>{body}</p>
+              <li key={number}>
+                <div className="step-index"><span>{number}</span><Icon aria-hidden="true" size={22} /></div>
+                <div><h3>{title}</h3><p>{body}</p></div>
               </li>
             ))}
           </ol>
-          <figure className="wide-capture">
-            <img src={asset('pipeline.svg')} alt="SessionSmith pipeline view showing transcription and notes jobs progressing in the application" />
-            <figcaption><span>Live pipeline</span>Progress, phases, logs, and cancellation stay visible in the desktop Jobs Center.</figcaption>
+        </section>
+
+        <section className="product-proof" id="product" aria-labelledby="product-title">
+          <div className="proof-heading section-wrap">
+            <div>
+              <p className="section-kicker">Built for the week between games</p>
+              <h2 id="product-title">Not another transcript dump.</h2>
+            </div>
+            <p>SessionSmith keeps the source recording, timestamped transcript, generated documents, corrections, and campaign context in one working surface.</p>
+          </div>
+          <figure className="app-capture">
+            <img src={asset('desktop-workspace.png')} alt="SessionSmith desktop workspace showing The Bell in the Fog summary beside a speaker-labelled transcript" />
+            <figcaption><span>Session workspace</span><span>Notes and evidence, side by side</span></figcaption>
           </figure>
         </section>
 
-        <section className="capabilities section-pad" id="features" aria-labelledby="features-title">
-          <div className="section-heading compact-heading"><div><p className="section-label">Built around the campaign</p><h2 id="features-title">The parts that make recordings useful.</h2></div></div>
-          <div className="capability-grid">
-            {capabilities.map(({ icon: Icon, title, body }) => (
-              <article key={title}><Icon aria-hidden="true" size={23} /><h3>{title}</h3><p>{body}</p></article>
-            ))}
+        <section className="feature-section" id="features" aria-labelledby="features-title">
+          <div className="section-wrap">
+            <div className="section-heading">
+              <p className="section-kicker">Campaign continuity</p>
+              <h2 id="features-title">Everything that makes<br />a recording useful.</h2>
+            </div>
+            <div className="feature-grid">
+              {capabilities.map(({ icon: Icon, title, body }, index) => (
+                <article key={title}>
+                  <span className="feature-number">0{index + 1}</span>
+                  <Icon aria-hidden="true" size={24} />
+                  <h3>{title}</h3>
+                  <p>{body}</p>
+                </article>
+              ))}
+            </div>
           </div>
         </section>
 
-        <section className="workspace-showcase section-pad" aria-labelledby="workspace-title">
-          <div className="showcase-copy">
-            <p className="section-label">Fast in a long campaign</p>
-            <h2 id="workspace-title">Find the thread before the players do.</h2>
-            <p>Search across every transcript and note, jump back to the exact artifact, then work with keyboard-first commands or the mouse. Themes can match the room without changing your campaign data.</p>
-            <a className="text-link" href={configurationUrl}>Explore configuration <ArrowRight aria-hidden="true" size={17} /></a>
+        <section className="search-story" aria-labelledby="search-title">
+          <div className="search-copy">
+            <p className="section-kicker">Three months later</p>
+            <h2 id="search-title">Find the thread before the players do.</h2>
+            <p>Search every note and transcript, jump to the right session, and hear the moment in context. Names, promises, clues, and accidental prophecies stay within reach.</p>
+            <a className="text-link" href={docsUrl}>Explore the documentation <ArrowRight aria-hidden="true" size={17} /></a>
           </div>
-          <div className="capture-pair">
-            <figure><img src={asset('palette.svg')} alt="SessionSmith command palette listing searchable desktop actions" /><figcaption>Command palette</figcaption></figure>
-            <figure><img src={asset('themes.svg')} alt="SessionSmith theme picker showing interface theme choices" /><figcaption>Theme picker</figcaption></figure>
+          <figure>
+            <img src={asset('desktop-library.png')} alt="SessionSmith campaign library showing three complete sessions and an audio Inbox" />
+            <figcaption>A campaign library that grows with the table.</figcaption>
+          </figure>
+        </section>
+
+        <section className="privacy-section" id="privacy" aria-labelledby="privacy-title">
+          <div className="privacy-icon" aria-hidden="true"><ShieldCheck size={52} strokeWidth={1.35} /></div>
+          <div className="privacy-main">
+            <p className="section-kicker">Local-first means local</p>
+            <h2 id="privacy-title">Your campaign is not training data.</h2>
+            <p>Built-in Whisper can transcribe on your machine. Ollama can generate every document locally. Your workspace remains ordinary audio, Markdown, JSON, TOML, and a local search index.</p>
+          </div>
+          <div className="privacy-choice">
+            <Cloud aria-hidden="true" size={22} />
+            <h3>Cloud when you choose it</h3>
+            <p>OpenAI, Anthropic, OpenRouter, Groq, LM Studio, vLLM, and compatible endpoints are explicit options, never invisible defaults.</p>
           </div>
         </section>
 
-        <section className="local-first section-pad" id="local-first" aria-labelledby="privacy-title">
-          <div className="privacy-mark" aria-hidden="true"><ShieldCheck size={44} strokeWidth={1.5} /></div>
-          <div className="privacy-copy">
-            <p className="section-label">Local-first architecture</p><h2 id="privacy-title">Your campaign files live on your machine.</h2>
-            <p>Local Whisper handles speech recognition and Ollama can handle note generation without sending recordings or notes to a hosted service. Campaigns are isolated on disk, and exports are written to a host-managed local destination.</p>
+        <section className="systems-section" aria-labelledby="systems-title">
+          <div className="systems-heading">
+            <p className="section-kicker">System-aware notes</p>
+            <h2 id="systems-title">It speaks your game.</h2>
           </div>
-          <div className="privacy-caveat">
-            <Cloud aria-hidden="true" size={22} /><h3>Cloud is optional, not invisible</h3>
-            <p>If you configure OpenAI, Anthropic, OpenRouter, Groq, or another OpenAI-compatible backend, the text required for that request leaves your machine and is subject to that provider&apos;s privacy and retention policies.</p>
+          <ul>{systems.map((system) => <li key={system}><CircleDot aria-hidden="true" size={13} />{system}</li>)}</ul>
+        </section>
+
+        <section className="install-section" id="install" aria-labelledby="install-title">
+          <div className="install-shell section-wrap">
+            <div className="install-intro">
+              <p className="section-kicker">Desktop release · v{version}</p>
+              <h2 id="install-title">Ready before<br />the next session.</h2>
+              <p>Choose your platform, install ffmpeg, then let the first-run guide check your machine and set up local or hosted models.</p>
+              <a className="text-link text-link--dark" href={releaseUrl}>See every release asset <ExternalLink aria-hidden="true" size={16} /></a>
+            </div>
+
+            <div className="installer">
+              <div className="platform-tabs" role="tablist" aria-label="Operating system">
+                {(Object.keys(installOptions) as Platform[]).map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    role="tab"
+                    aria-selected={platform === id}
+                    className={platform === id ? 'platform-tab platform-tab--active' : 'platform-tab'}
+                    onClick={() => setPlatform(id)}
+                  >
+                    {installOptions[id].label}
+                  </button>
+                ))}
+              </div>
+              <div className="platform-panel" role="tabpanel">
+                <p className="platform-eyebrow">{selectedInstall.eyebrow}</p>
+                <p className="platform-note">{selectedInstall.note}</p>
+                <div className="download-list">
+                  {selectedInstall.downloads.map((download, index) => (
+                    <a className={index === 0 ? 'download-row download-row--primary' : 'download-row'} href={download.href} key={download.label}>
+                      <Download aria-hidden="true" size={20} />
+                      <span><strong>{download.label}</strong><small>{download.detail}</small></span>
+                      <ChevronRight aria-hidden="true" size={18} />
+                    </a>
+                  ))}
+                </div>
+                <div className="install-requirements">
+                  <span><Check aria-hidden="true" size={15} />Built-in local Whisper</span>
+                  <span><Check aria-hidden="true" size={15} />Signed updates</span>
+                  <span><Check aria-hidden="true" size={15} />MIT licensed</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="source-install section-wrap">
+            <div>
+              <TerminalSquare aria-hidden="true" size={25} />
+              <span><strong>Prefer to build it yourself?</strong><small>Rust, Node.js, npm, CMake, Clang, and platform webview dependencies required.</small></span>
+            </div>
+            <code>git clone https://github.com/Kardzhilov/SessionSmith.git<br />cd SessionSmith &amp;&amp; make app</code>
+            <a href={setupUrl}>Full setup guide <ArrowRight aria-hidden="true" size={16} /></a>
           </div>
         </section>
 
-        <section className="presets section-pad" aria-labelledby="presets-title">
-          <div>
-            <p className="section-label">System-aware output</p><h2 id="presets-title">Notes that speak your game.</h2>
-            <p>Presets give the notes pipeline the terminology and structure that matter to each system. Start bundled, then customize the TOML when your table needs its own vocabulary.</p>
+        <section className="closing-section" aria-labelledby="closing-title">
+          <div className="closing-mark" aria-hidden="true"><AudioLines size={48} strokeWidth={1.3} /></div>
+          <p className="section-kicker">The table made a story</p>
+          <h2 id="closing-title">Keep it alive.</h2>
+          <div className="closing-actions">
+            <a className="button button--primary" href="#install"><Download aria-hidden="true" size={18} />Download v{version}</a>
+            <a className="button button--ghost" href={repositoryUrl}><GitFork aria-hidden="true" size={18} />View on GitHub</a>
           </div>
-          <ul aria-label="Bundled game system presets">{presets.map((preset) => <li key={preset}><CircleDot aria-hidden="true" size={14} />{preset}</li>)}</ul>
-        </section>
-
-        <section className="requirements section-pad" id="requirements" aria-labelledby="requirements-title">
-          <div className="requirements-intro">
-            <p className="section-label">Before the first session</p><h2 id="requirements-title">Bring a machine and an LLM backend.</h2>
-            <p>Current releases support the full local workflow on Linux and macOS. Windows has portable build coverage, while local audio tooling still needs validation on the target machine.</p>
-          </div>
-          <ul className="requirements-list">
-            <li><Check aria-hidden="true" size={18} /><span><strong>ffmpeg + ffprobe</strong> for audio decoding and inspection</span></li>
-            <li><Check aria-hidden="true" size={18} /><span><strong>Ollama</strong> for fully local notes, or a configured external backend</span></li>
-            <li><Check aria-hidden="true" size={18} /><span><strong>Whisper is built in</strong>; WhisperX is only needed for speaker diarization</span></li>
-            <li><Check aria-hidden="true" size={18} /><span><strong>GPU acceleration is optional</strong> through CUDA, Vulkan, or Metal builds</span></li>
-          </ul>
-          <div className="requirements-links">
-            <a href={setupUrl}><BookOpen aria-hidden="true" size={18} /> Setup guide</a>
-            <a href={configurationUrl}><Settings2 aria-hidden="true" size={18} /> Configuration</a>
-          </div>
-        </section>
-
-        <section className="download-section section-pad" id="download" aria-labelledby="download-title">
-          <div className="download-heading">
-            <img src={asset('sessionsmith-icon.png')} alt="" width="72" height="72" />
-            <div><p className="section-label">Latest release · v1.0.0</p><h2 id="download-title">Put the next session to work.</h2><p>Choose your platform on GitHub Releases. Downloads are never selected automatically.</p></div>
-          </div>
-          <div className="platform-links" aria-label="Platform download links">
-            <a href={releaseUrl}><Download aria-hidden="true" size={19} /><span>Linux <small>release files</small></span></a>
-            <a href={releaseUrl}><Download aria-hidden="true" size={19} /><span>macOS <small>release files</small></span></a>
-            <a href={releaseUrl}><Download aria-hidden="true" size={19} /><span>Windows <small>release files</small></span></a>
-          </div>
-          <p className="download-footnote">Building from source? Follow the setup guide for the Rust, CMake, Clang, and optional GPU requirements.</p>
         </section>
       </main>
 
       <footer className="site-footer">
-        <div className="footer-brand"><img src={asset('sessionsmith-icon.png')} alt="" width="34" height="34" /><span>SessionSmith</span></div>
+        <a className="footer-brand" href="#top"><img src={asset('sessionsmith-app-icon.png')} alt="" width="34" height="34" /><span>SessionSmith</span></a>
         <nav aria-label="Footer navigation">
-          <a href={setupUrl}>Setup</a><a href={configurationUrl}>Configuration</a><a href={docsUrl}>Docs</a>
-          <a href={repositoryUrl} target="_blank" rel="noreferrer">GitHub <ExternalLink aria-hidden="true" size={13} /></a>
+          <a href={setupUrl}>Setup</a><a href={docsUrl}>Docs</a><a href={repositoryUrl}>Source</a><a href={`${repositoryUrl}/issues`}>Issues</a>
         </nav>
-        <p><SquareTerminal aria-hidden="true" size={15} /> Open source under the MIT License · 2026 SessionSmith contributors</p>
+        <p><Command aria-hidden="true" size={14} />Built in the open · MIT License</p>
       </footer>
     </div>
   )
