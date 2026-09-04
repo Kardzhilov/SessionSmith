@@ -1449,6 +1449,7 @@ function SessionLibrary({
   onInboxWatchStop: () => void;
 }) {
   const { settings: appSettings } = useAppSettings();
+  const [inboxOpen, setInboxOpen] = useState(false);
 
   if (loading) {
     return <LibraryLoading />;
@@ -1527,6 +1528,50 @@ function SessionLibrary({
             {exporting ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <FileOutput size={16} aria-hidden="true" />}
             {exporting ? "Exporting" : "Export"}
           </button>
+          <details className="extras-menu">
+            <summary className="button button--quiet">
+              <SlidersHorizontal size={16} aria-hidden="true" />
+              Extras
+              {inboxWatchStatus.running && <i className="extras-menu__active" aria-label="Inbox watch active" />}
+              <ChevronDown className="extras-menu__chevron" size={15} aria-hidden="true" />
+            </summary>
+            <div className="extras-menu__panel">
+              <div className="inbox-watch" aria-label="Inbox watch">
+                <div className={inboxWatchStatus.running ? "inbox-watch__signal inbox-watch__signal--active" : "inbox-watch__signal"}>
+                  <Radio size={17} aria-hidden="true" />
+                </div>
+                <div className="inbox-watch__body">
+                  <strong>Inbox watch</strong>
+                  <span>{formatInboxWatchStatus(inboxWatchStatus, library.campaign.name)}</span>
+                  {(inboxWatchError || inboxWatchStatus.lastError) && (
+                    <small role="status">{inboxWatchError ?? inboxWatchStatus.lastError}</small>
+                  )}
+                </div>
+                <label className="inbox-watch__interval">
+                  <span>Interval</span>
+                  <select
+                    value={inboxWatchInterval}
+                    onChange={(event) => onInboxWatchIntervalChange(Number(event.target.value))}
+                    disabled={inboxWatchStatus.running || inboxWatchSubmitting}
+                  >
+                    <option value={2}>2 seconds</option>
+                    <option value={5}>5 seconds</option>
+                    <option value={10}>10 seconds</option>
+                    <option value={30}>30 seconds</option>
+                  </select>
+                </label>
+                <button
+                  className={inboxWatchStatus.running ? "button button--quiet" : "button button--primary"}
+                  type="button"
+                  disabled={inboxWatchSubmitting}
+                  onClick={inboxWatchStatus.running ? onInboxWatchStop : onInboxWatchStart}
+                >
+                  {inboxWatchSubmitting ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <Radio size={16} aria-hidden="true" />}
+                  {inboxWatchStatus.running ? "Stop watch" : "Start watch"}
+                </button>
+              </div>
+            </div>
+          </details>
           <button
             className="button button--primary"
             type="button"
@@ -1539,61 +1584,6 @@ function SessionLibrary({
           </button>
         </div>
       </header>
-
-      <section className="inbox-watch" aria-label="Inbox watch">
-        <div className={inboxWatchStatus.running ? "inbox-watch__signal inbox-watch__signal--active" : "inbox-watch__signal"}>
-          <Radio size={17} aria-hidden="true" />
-        </div>
-        <div className="inbox-watch__body">
-          <strong>Inbox watch</strong>
-          <span>{formatInboxWatchStatus(inboxWatchStatus, library.campaign.name)}</span>
-          {(inboxWatchError || inboxWatchStatus.lastError) && (
-            <small role="status">{inboxWatchError ?? inboxWatchStatus.lastError}</small>
-          )}
-        </div>
-        <label className="inbox-watch__interval">
-          <span>Interval</span>
-          <select
-            value={inboxWatchInterval}
-            onChange={(event) => onInboxWatchIntervalChange(Number(event.target.value))}
-            disabled={inboxWatchStatus.running || inboxWatchSubmitting}
-          >
-            <option value={2}>2 seconds</option>
-            <option value={5}>5 seconds</option>
-            <option value={10}>10 seconds</option>
-            <option value={30}>30 seconds</option>
-          </select>
-        </label>
-        <button
-          className={inboxWatchStatus.running ? "button button--quiet" : "button button--primary"}
-          type="button"
-          disabled={inboxWatchSubmitting}
-          onClick={inboxWatchStatus.running ? onInboxWatchStop : onInboxWatchStart}
-        >
-          {inboxWatchSubmitting ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <Radio size={16} aria-hidden="true" />}
-          {inboxWatchStatus.running ? "Stop watch" : "Start watch"}
-        </button>
-      </section>
-
-      {library.inbox.length > 0 && (
-        <section className="library-section">
-          <SectionHeader label="Inbox" count={library.inbox.length} detail="Audio waiting to become a session" />
-          <div className="inbox-grid">
-            {library.inbox.map((audio) => (
-              <article className="inbox-row" key={audio.path}>
-                <div className="inbox-row__icon">
-                  <AudioLines size={18} aria-hidden="true" />
-                </div>
-                <div className="inbox-row__body">
-                  <strong>{audio.name}</strong>
-                  <span>{formatBytes(audio.sizeBytes)} · {formatTimestamp(audio.modifiedAt, appSettings.dateFormat)}</span>
-                </div>
-                <span className="inbox-row__status">Ready</span>
-              </article>
-            ))}
-          </div>
-        </section>
-      )}
 
       <section className="library-section library-section--sessions">
         <SectionHeader label="Sessions" count={library.sessions.length} detail="Audio, transcript, and notes in one place" />
@@ -1610,6 +1600,48 @@ function SessionLibrary({
               <strong>No completed sessions yet</strong>
               <span>When SessionSmith finds a transcript or notes folder, it will appear here.</span>
             </div>
+          </div>
+        )}
+      </section>
+
+      <section className="library-section library-section--inbox">
+        <button
+          className="inbox-section__toggle"
+          type="button"
+          onClick={() => setInboxOpen((open) => !open)}
+          aria-expanded={inboxOpen}
+          aria-controls="session-audio-inbox"
+        >
+          <span className="section-header">
+            <span>
+              <strong>Inbox <i>{library.inbox.length}</i></strong>
+              <small>Audio waiting to become a session</small>
+            </span>
+          </span>
+          <ChevronDown className={inboxOpen ? "inbox-section__chevron inbox-section__chevron--open" : "inbox-section__chevron"} size={18} aria-hidden="true" />
+        </button>
+        {inboxOpen && (
+          <div className="inbox-grid" id="session-audio-inbox">
+            {library.inbox.length > 0 ? library.inbox.map((audio) => (
+              <article className="inbox-row" key={audio.path}>
+                <div className="inbox-row__icon">
+                  <AudioLines size={18} aria-hidden="true" />
+                </div>
+                <div className="inbox-row__body">
+                  <strong>{audio.name}</strong>
+                  <span>{formatBytes(audio.sizeBytes)} · {formatTimestamp(audio.modifiedAt, appSettings.dateFormat)}</span>
+                </div>
+                <span className="inbox-row__status">Ready</span>
+              </article>
+            )) : (
+              <div className="empty-list empty-list--compact">
+                <AudioLines size={20} aria-hidden="true" />
+                <div>
+                  <strong>Inbox is empty</strong>
+                  <span>Record or import audio to add it here.</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </section>
