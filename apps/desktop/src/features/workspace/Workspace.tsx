@@ -16,26 +16,20 @@ import {
   Info,
   LoaderCircle,
   LocateFixed,
-  Pause,
   Pencil,
   Play,
   RefreshCw,
   Save,
   Search,
   Sparkles,
-  Square,
   Trash2,
   UsersRound,
-  Volume2,
-  VolumeX,
   X,
 } from "lucide-react";
 import { desktop, errorMessage } from "../../api/desktop";
-import { adaptAudioPlayerTransition } from "../../api/adapters";
-import { events } from "../../api/generated/bindings";
+import { useGlobalAudio } from "../audio/GlobalAudioPlayer";
 import { formatTimestamp, useAppSettings } from "../settings/AppSettingsContext";
 import type {
-  AudioPlayerSnapshot,
   ArtifactDocument,
   ArtifactId,
   CandidateAction,
@@ -52,16 +46,6 @@ const transcriptPageSize = 240;
 const speakerToneCount = 8;
 const documentConflictMessage = "This document changed on disk. Reload it before saving.";
 const artifactDraftStoragePrefix = "sessionsmith:artifact-draft:";
-const unloadedAudioSnapshot: AudioPlayerSnapshot = {
-  status: "unloaded",
-  label: null,
-  sourceId: null,
-  revision: 0,
-  positionMs: 0,
-  durationMs: null,
-  volume: 50,
-  error: null,
-};
 const MarkdownEditor = lazy(async () => {
   const module = await import("./MarkdownEditor");
   return { default: module.MarkdownEditor };
@@ -128,7 +112,14 @@ export function SessionWorkspacePage({
   onDismissSessionName: () => void;
   refreshKey: number;
 }) {
-  const { settings: appSettings, save: saveAppSettings } = useAppSettings();
+  const { settings: appSettings } = useAppSettings();
+  const {
+    snapshot: audioSnapshot,
+    busy: audioBusy,
+    activeSource: activeAudioSource,
+    playSession,
+    seekSession,
+  } = useGlobalAudio();
   const [workspace, setWorkspace] = useState<SessionWorkspaceData | null>(null);
   const [workspaceLoading, setWorkspaceLoading] = useState(true);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
@@ -152,36 +143,7 @@ export function SessionWorkspacePage({
   const [saveWarning, setSaveWarning] = useState<string | null>(null);
   const [conflictDocument, setConflictDocument] = useState<ArtifactDocument | null>(null);
   const [comparingEditConflict, setComparingEditConflict] = useState(false);
-  const [audioSnapshot, setAudioSnapshot] = useState<AudioPlayerSnapshot>(unloadedAudioSnapshot);
-  const [audioBusy, setAudioBusy] = useState<"toggle" | "seek" | "stop" | null>(null);
-  const [audioError, setAudioError] = useState<string | null>(null);
   const draftRef = useRef("");
-  const volumeTimerRef = useRef<number | null>(null);
-  const previousVolumeRef = useRef(Math.max(appSettings.playerVolume, 50));
-  const audioSourceIdRef = useRef<number | null>(null);
-  const audioRevisionRef = useRef(0);
-  const audioSessionKey = JSON.stringify([campaignId, stem]);
-  const audioSessionKeyRef = useRef(audioSessionKey);
-  audioSessionKeyRef.current = audioSessionKey;
-
-  const applyAudioSnapshot = useEffectEvent((
-    nextSnapshot: AudioPlayerSnapshot,
-    sessionKey: string,
-    adoptSource = false,
-  ) => {
-    if (sessionKey !== audioSessionKeyRef.current || nextSnapshot.revision < audioRevisionRef.current) {
-      return;
-    }
-    if (!adoptSource && nextSnapshot.sourceId !== audioSourceIdRef.current) {
-      return;
-    }
-    if (adoptSource) {
-      audioSourceIdRef.current = nextSnapshot.sourceId;
-    }
-    audioRevisionRef.current = nextSnapshot.revision;
-    setAudioSnapshot(nextSnapshot);
-    setAudioError(nextSnapshot.error);
-  });
 
   useEffect(() => {
     let cancelled = false;
@@ -388,200 +350,6 @@ export function SessionWorkspacePage({
     window.addEventListener("keydown", handleSave, true);
     return () => window.removeEventListener("keydown", handleSave, true);
   }, [editing]);
-
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    const sessionKey = audioSessionKey;
-    audioSourceIdRef.current = null;
-    audioRevisionRef.current = 0;
-    setAudioSnapshot(unloadedAudioSnapshot);
-    setAudioBusy(null);
-    setAudioError(null);
-    void events.audioTransition.listen(({ payload }) => {
-      if (active) {
-        applyAudioSnapshot(adaptAudioPlayerTransition(payload).snapshot, sessionKey);
-      }
-    }).then((stopListening) => {
-      if (active) {
-        unlisten = stopListening;
-      } else {
-        stopListening();
-      }
-    });
-    return () => {
-      active = false;
-      unlisten?.();
-      if (volumeTimerRef.current !== null) {
-        window.clearTimeout(volumeTimerRef.current);
-      }
-      const sourceId = audioSourceIdRef.current;
-      audioSourceIdRef.current = null;
-      audioRevisionRef.current = 0;
-      void desktop.audioStop(sourceId).catch(() => undefined);
-    };
-  }, [audioSessionKey]);
-
-  useEffect(() => {
-    if (audioSnapshot.status !== "playing") {
-      return;
-    }
-
-    let cancelled = false;
-    const refreshPlayback = async () => {
-      try {
-        const nextSnapshot = await desktop.audioState();
-        if (!cancelled) {
-          applyAudioSnapshot(nextSnapshot, audioSessionKey);
-        }
-      } catch (nextError) {
-        if (!cancelled) {
-          setAudioError(errorMessage(nextError));
-        }
-      }
-    };
-    const timer = window.setInterval(() => void refreshPlayback(), 1_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [audioSessionKey, audioSnapshot.status]);
-
-  async function toggleAudioPlayback() {
-    if (audioBusy) {
-      return;
-    }
-    setAudioBusy("toggle");
-    setAudioError(null);
-    const sessionKey = audioSessionKey;
-    try {
-      if (audioSnapshot.status === "playing") {
-        const sourceId = audioSourceIdRef.current;
-        if (sourceId === null) {
-          throw new Error("The session audio source is no longer active.");
-        }
-        const nextSnapshot = await desktop.audioPause(sourceId);
-        applyAudioSnapshot(nextSnapshot, sessionKey);
-      } else {
-        let sourceId = audioSourceIdRef.current;
-        if (audioSnapshot.status === "unloaded") {
-          const loadedSnapshot = await desktop.audioLoad(campaignId, stem);
-          if (sessionKey !== audioSessionKeyRef.current) {
-            if (loadedSnapshot.sourceId !== null) {
-              void desktop.audioStop(loadedSnapshot.sourceId).catch(() => undefined);
-            }
-            return;
-          }
-          applyAudioSnapshot(loadedSnapshot, sessionKey, true);
-          sourceId = loadedSnapshot.sourceId;
-        }
-        if (sourceId === null) {
-          throw new Error("The session audio source could not be loaded.");
-        }
-        const nextSnapshot = await desktop.audioPlay(sourceId);
-        applyAudioSnapshot(nextSnapshot, sessionKey);
-      }
-    } catch (nextError) {
-      if (sessionKey === audioSessionKeyRef.current) {
-        setAudioError(errorMessage(nextError));
-      }
-    } finally {
-      if (sessionKey === audioSessionKeyRef.current) {
-        setAudioBusy(null);
-      }
-    }
-  }
-
-  async function seekAudio(positionMs: number) {
-    if (audioBusy) {
-      return;
-    }
-    const target = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.round(positionMs)));
-    setAudioBusy("seek");
-    setAudioError(null);
-    const sessionKey = audioSessionKey;
-    try {
-      let sourceId = audioSourceIdRef.current;
-      if (audioSnapshot.status === "unloaded") {
-        const loadedSnapshot = await desktop.audioLoad(campaignId, stem);
-        if (sessionKey !== audioSessionKeyRef.current) {
-          if (loadedSnapshot.sourceId !== null) {
-            void desktop.audioStop(loadedSnapshot.sourceId).catch(() => undefined);
-          }
-          return;
-        }
-        applyAudioSnapshot(loadedSnapshot, sessionKey, true);
-        sourceId = loadedSnapshot.sourceId;
-      }
-      if (sourceId === null) {
-        throw new Error("The session audio source could not be loaded.");
-      }
-      const nextSnapshot = await desktop.audioSeek(sourceId, target);
-      applyAudioSnapshot(nextSnapshot, sessionKey);
-    } catch (nextError) {
-      if (sessionKey === audioSessionKeyRef.current) {
-        setAudioError(errorMessage(nextError));
-      }
-    } finally {
-      if (sessionKey === audioSessionKeyRef.current) {
-        setAudioBusy(null);
-      }
-    }
-  }
-
-  async function stopAudioPlayback() {
-    if (audioBusy || audioSnapshot.status === "unloaded") {
-      return;
-    }
-    setAudioBusy("stop");
-    setAudioError(null);
-    const sessionKey = audioSessionKey;
-    try {
-      const nextSnapshot = await desktop.audioStop(audioSourceIdRef.current);
-      applyAudioSnapshot(nextSnapshot, sessionKey);
-    } catch (nextError) {
-      if (sessionKey === audioSessionKeyRef.current) {
-        setAudioError(errorMessage(nextError));
-      }
-    } finally {
-      if (sessionKey === audioSessionKeyRef.current) {
-        setAudioBusy(null);
-      }
-    }
-  }
-
-  function setAudioVolume(volume: number) {
-    const nextVolume = Math.max(0, Math.min(100, Math.round(volume)));
-    if (nextVolume > 0) {
-      previousVolumeRef.current = nextVolume;
-    }
-    setAudioSnapshot((current) => ({ ...current, volume: nextVolume }));
-    if (volumeTimerRef.current !== null) {
-      window.clearTimeout(volumeTimerRef.current);
-    }
-    volumeTimerRef.current = window.setTimeout(() => {
-      volumeTimerRef.current = null;
-      const sessionKey = audioSessionKey;
-      void desktop.audioSetVolume(audioSourceIdRef.current, nextVolume)
-        .then((nextSnapshot) => {
-          applyAudioSnapshot(nextSnapshot, sessionKey);
-          return saveAppSettings({
-            dateFormat: appSettings.dateFormat,
-            appearance: appSettings.appearance,
-            theme: appSettings.theme,
-            playerVolume: nextVolume,
-            audioDir: appSettings.audioDir,
-            campaignsDir: appSettings.campaignsDir,
-            outputDir: appSettings.outputDir,
-          });
-        })
-        .catch((nextError) => {
-          if (sessionKey === audioSessionKeyRef.current) {
-            setAudioError(errorMessage(nextError));
-          }
-        });
-    }, 250);
-  }
 
   function selectArtifact(artifactId: ArtifactId) {
     if (navigationLocked) {
@@ -802,21 +570,19 @@ export function SessionWorkspacePage({
               Transcript
             </button>
           )}
+          {hasSessionAudio && (
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={audioBusy !== null}
+              onClick={() => void playSession(campaignId, stem)}
+            >
+              {audioBusy === "toggle" ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
+              {activeAudioSource?.campaignId === campaignId && activeAudioSource.stem === stem && audioSnapshot.status === "playing" ? "Pause audio" : "Play audio"}
+            </button>
+          )}
         </div>
       </header>
-
-      {hasSessionAudio && (
-        <AudioTransport
-          snapshot={audioSnapshot}
-          busy={audioBusy}
-          error={audioError}
-          onToggle={() => void toggleAudioPlayback()}
-          onSeek={(positionMs) => void seekAudio(positionMs)}
-          onStop={() => void stopAudioPlayback()}
-          onVolume={setAudioVolume}
-          onToggleMute={() => setAudioVolume(audioSnapshot.volume === 0 ? previousVolumeRef.current : 0)}
-        />
-      )}
 
       <div className={transcriptOpen ? "workspace-grid workspace-grid--transcript-open" : "workspace-grid"}>
         <aside className="document-nav" aria-label="Session documents">
@@ -1151,9 +917,9 @@ export function SessionWorkspacePage({
             totalLines={workspace.transcript.totalLines}
             initialTranscriptLine={initialTranscriptLine}
             refreshKey={refreshKey}
-            onSeekTo={hasSessionAudio ? (positionMs) => void seekAudio(positionMs) : undefined}
-            playbackPositionMs={audioSnapshot.positionMs}
-            playing={audioSnapshot.status === "playing"}
+            onSeekTo={hasSessionAudio ? (positionMs) => void seekSession(campaignId, stem, positionMs) : undefined}
+            playbackPositionMs={activeAudioSource?.campaignId === campaignId && activeAudioSource.stem === stem ? audioSnapshot.positionMs : 0}
+            playing={activeAudioSource?.campaignId === campaignId && activeAudioSource.stem === stem && audioSnapshot.status === "playing"}
           />
         )}
       </div>
@@ -1806,135 +1572,6 @@ export function TranscriptPanel({
   );
 }
 
-function AudioTransport({
-  snapshot,
-  busy,
-  error,
-  onToggle,
-  onSeek,
-  onStop,
-  onVolume,
-  onToggleMute,
-}: {
-  snapshot: AudioPlayerSnapshot;
-  busy: "toggle" | "seek" | "stop" | null;
-  error: string | null;
-  onToggle: () => void;
-  onSeek: (positionMs: number) => void;
-  onStop: () => void;
-  onVolume: (volume: number) => void;
-  onToggleMute: () => void;
-}) {
-  const [scrubbing, setScrubbing] = useState(false);
-  const [seekPosition, setSeekPosition] = useState(0);
-  const loaded = snapshot.status !== "unloaded";
-  const playing = snapshot.status === "playing";
-  const canSeek = loaded && snapshot.durationMs !== null;
-  const maximum = Math.max(snapshot.durationMs ?? 0, 1);
-  const position = scrubbing ? seekPosition : snapshot.positionMs;
-  const message = error ?? snapshot.error;
-
-  useEffect(() => {
-    if (!scrubbing) {
-      setSeekPosition(snapshot.positionMs);
-    }
-  }, [scrubbing, snapshot.positionMs]);
-
-  function beginSeeking(positionMs: number) {
-    setScrubbing(true);
-    setSeekPosition(positionMs);
-  }
-
-  function finishSeeking(positionMs: number) {
-    if (!scrubbing) {
-      return;
-    }
-    const target = Math.max(0, Math.min(maximum, Math.round(positionMs)));
-    setScrubbing(false);
-    setSeekPosition(target);
-    onSeek(target);
-  }
-
-  return (
-    <section className="audio-transport" aria-label="Session audio">
-      <div className="audio-transport__identity">
-        <AudioLines size={17} aria-hidden="true" />
-        <span title={snapshot.label ?? "Session audio"}>{snapshot.label ?? "Session audio"}</span>
-      </div>
-      <div className="audio-transport__controls">
-        <button
-          className="icon-button audio-transport__button audio-transport__button--play"
-          type="button"
-          onClick={onToggle}
-          disabled={busy !== null}
-          title={playing ? "Pause audio" : loaded ? "Play audio" : "Load and play audio"}
-          aria-label={playing ? "Pause audio" : loaded ? "Play audio" : "Load and play audio"}
-        >
-          {busy === "toggle" ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : playing ? <Pause size={17} aria-hidden="true" /> : <Play size={17} aria-hidden="true" />}
-        </button>
-        <button
-          className="icon-button audio-transport__button"
-          type="button"
-          onClick={onStop}
-          disabled={!loaded || busy !== null}
-          title="Stop audio"
-          aria-label="Stop audio"
-        >
-          {busy === "stop" ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <Square size={15} aria-hidden="true" />}
-        </button>
-      </div>
-      <div className="audio-transport__timeline">
-        <span className="audio-transport__time">{formatPlaybackTime(position)}</span>
-        <input
-          type="range"
-          min="0"
-          max={maximum}
-          value={Math.min(position, maximum)}
-          step="100"
-          disabled={!canSeek || busy !== null}
-          aria-label="Audio position"
-          onPointerDown={(event) => beginSeeking(Number(event.currentTarget.value))}
-          onChange={(event) => beginSeeking(Number(event.currentTarget.value))}
-          onPointerUp={(event) => finishSeeking(Number(event.currentTarget.value))}
-          onBlur={(event) => finishSeeking(Number(event.currentTarget.value))}
-          onKeyUp={(event) => {
-            if (["ArrowLeft", "ArrowRight", "Home", "End", "PageDown", "PageUp"].includes(event.key)) {
-              finishSeeking(Number(event.currentTarget.value));
-            }
-          }}
-        />
-        <span className="audio-transport__time">{snapshot.durationMs === null ? "--:--" : formatPlaybackTime(snapshot.durationMs)}</span>
-      </div>
-      <div className="audio-transport__volume">
-        <button
-          className="icon-button audio-transport__button"
-          type="button"
-          onClick={onToggleMute}
-          title={snapshot.volume === 0 ? "Restore audio volume" : "Mute audio"}
-          aria-label={snapshot.volume === 0 ? "Restore audio volume" : "Mute audio"}
-        >
-          {snapshot.volume === 0 ? <VolumeX size={16} aria-hidden="true" /> : <Volume2 size={16} aria-hidden="true" />}
-        </button>
-        <input
-          type="range"
-          min="0"
-          max="100"
-          value={snapshot.volume}
-          aria-label={`Audio volume ${snapshot.volume}%`}
-          onChange={(event) => onVolume(Number(event.currentTarget.value))}
-        />
-      </div>
-      <span className="audio-transport__status">{formatAudioStatus(snapshot.status)}</span>
-      {message && (
-        <p className="audio-transport__error" role="alert">
-          <CircleAlert size={15} aria-hidden="true" />
-          {message}
-        </p>
-      )}
-    </section>
-  );
-}
-
 function formatArtifact(artifact: string) {
   return artifact
     .split("-")
@@ -1997,24 +1634,6 @@ function formatTranscriptTime(seconds: number) {
   return hours > 0 ? `${hours}:${paddedMinutes}:${paddedSeconds}` : `${paddedMinutes}:${paddedSeconds}`;
 }
 
-function formatPlaybackTime(milliseconds: number) {
-  return formatTranscriptTime(milliseconds / 1_000);
-}
-
-function formatAudioStatus(status: AudioPlayerSnapshot["status"]) {
-  switch (status) {
-    case "playing":
-      return "Playing";
-    case "paused":
-      return "Paused";
-    case "stopped":
-      return "Stopped";
-    case "ended":
-      return "Finished";
-    default:
-      return "Ready";
-  }
-}
 function artifactDraftStorageKey(
   campaignId: string | undefined,
   stem: string | undefined,

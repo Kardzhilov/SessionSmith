@@ -116,7 +116,7 @@ pub fn campaign_library(campaign_id: String) -> Result<CampaignLibrary, String> 
     })?;
     let paths = campaign_paths(&root, &config);
     let stems = session_stems(&paths.transcripts, &paths.notes);
-    let sessions = session_summaries(&stems, &paths, &config.transcription.speakers);
+    let sessions = session_summaries(&root, &stems, &paths, &config.transcription.speakers);
     let inbox = inbox_audio(&stems, &paths);
 
     Ok(CampaignLibrary {
@@ -240,6 +240,7 @@ fn campaign_record(root: &Path, global: &GlobalConfig, path: PathBuf) -> Campaig
 
 struct CampaignPaths {
     audio: PathBuf,
+    output: PathBuf,
     transcripts: PathBuf,
     notes: PathBuf,
 }
@@ -248,6 +249,7 @@ fn campaign_paths(root: &Path, campaign: &CampaignConfig) -> CampaignPaths {
     let output_root = resolve_workspace_path(root, &config::output_dir()).join(campaign.slug());
     CampaignPaths {
         audio: resolve_workspace_path(root, &config::audio_dir()),
+        output: output_root.clone(),
         transcripts: output_root.join("transcripts"),
         notes: output_root.join("notes"),
     }
@@ -290,6 +292,7 @@ fn session_stems(transcripts: &Path, notes: &Path) -> BTreeSet<String> {
 }
 
 fn session_summaries(
+    root: &Path,
     stems: &BTreeSet<String>,
     paths: &CampaignPaths,
     speaker_defaults: &BTreeMap<String, String>,
@@ -305,7 +308,7 @@ fn session_summaries(
                 .map(|artifact| artifact.id().to_string())
                 .collect();
             let has_transcript = transcript.is_file();
-            let has_audio = audio::find_by_stem(&paths.audio, stem).is_some();
+            let has_audio = session_has_audio(root, paths, stem);
             let mut m_at = modified_at(&transcript);
             for artifact in ALL_ARTIFACTS {
                 m_at = latest(m_at, modified_at(&note_dir.join(artifact.filename())));
@@ -328,6 +331,25 @@ fn session_summaries(
         .collect();
     sessions.sort_by_key(|session| std::cmp::Reverse(session.modified_at.unwrap_or_default()));
     sessions
+}
+
+fn session_has_audio(root: &Path, paths: &CampaignPaths, stem: &str) -> bool {
+    let metadata_source =
+        meta::load(&paths.transcripts, stem).and_then(|metadata| metadata.source_audio);
+    let legacy_source = metadata_source
+        .is_none()
+        .then(|| audio::find_by_stem(&paths.audio, stem))
+        .flatten();
+    let approved_roots = [paths.audio.as_path(), paths.output.as_path()];
+    crate::audio_player::select_audio_source(
+        metadata_source.as_deref(),
+        legacy_source.as_deref(),
+        root,
+        &paths.audio,
+        &paths.output,
+        &approved_roots,
+    )
+    .is_ok()
 }
 
 fn unmapped_speaker_count(
@@ -404,7 +426,7 @@ fn latest(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{session_stage, session_stems, unmapped_speaker_count};
+    use super::{session_has_audio, session_stage, session_stems, unmapped_speaker_count, CampaignPaths};
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
 
@@ -450,5 +472,30 @@ mod tests {
             2
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn merged_audio_referenced_by_metadata_is_available_for_playback() {
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("audio");
+        let output = directory.path().join("output/campaign");
+        let transcripts = output.join("transcripts");
+        let merged = audio.join("merged/combined.wav");
+        fs::create_dir_all(merged.parent().unwrap()).unwrap();
+        fs::create_dir_all(&transcripts).unwrap();
+        fs::write(&merged, "audio").unwrap();
+        fs::write(
+            transcripts.join("combined.ssmeta.json"),
+            r#"{"model":"test","source_audio":"audio/merged/combined.wav"}"#,
+        )
+        .unwrap();
+        let paths = CampaignPaths {
+            audio,
+            output: output.clone(),
+            transcripts,
+            notes: output.join("notes"),
+        };
+
+        assert!(session_has_audio(directory.path(), &paths, "combined"));
     }
 }

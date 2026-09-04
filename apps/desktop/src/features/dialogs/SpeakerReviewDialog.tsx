@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { CircleAlert, LoaderCircle, Play, RotateCcw, UserRoundCheck, X } from "lucide-react";
 import { desktop, errorMessage } from "../../api/desktop";
 import type { SpeakerMapping, SpeakerReview } from "../../api/types";
@@ -10,6 +10,7 @@ export function SpeakerReviewDialog({
   stem,
   submitting,
   error,
+  onPreviewSample,
   onClose,
   onSubmit,
   onReset,
@@ -19,6 +20,7 @@ export function SpeakerReviewDialog({
   stem: string | null;
   submitting: boolean;
   error: string | null;
+  onPreviewSample: (campaignId: string, stem: string, startMs: number) => Promise<void>;
   onClose: () => void;
   onSubmit: (mappings: SpeakerMapping[], defaultMappings: SpeakerMapping[]) => void;
   onReset: () => void;
@@ -32,6 +34,53 @@ export function SpeakerReviewDialog({
   const [resetPending, setResetPending] = useState(false);
   const [saveDefaults, setSaveDefaults] = useState<Record<string, boolean>>({});
   const suggestionsId = useId();
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+  const closeDialog = useEffectEvent(() => {
+    if (!submitting) {
+      onClose();
+    }
+  });
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    headingRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDialog();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) {
+        return;
+      }
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        headingRef.current?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === headingRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open || !campaignId || !stem) {
@@ -90,12 +139,7 @@ export function SpeakerReviewDialog({
     setPreviewing(key);
     setPreviewError(null);
     try {
-      const loaded = await desktop.audioLoad(campaignId!, stem!);
-      if (loaded.sourceId === null) {
-        throw new Error("The session audio source could not be loaded.");
-      }
-      await desktop.audioSeek(loaded.sourceId, startMs);
-      await desktop.audioPlay(loaded.sourceId);
+      await onPreviewSample(campaignId!, stem!, startMs);
     } catch (nextError) {
       setPreviewError(errorMessage(nextError));
     } finally {
@@ -112,11 +156,11 @@ export function SpeakerReviewDialog({
         }
       }}
     >
-      <section className="process-dialog speaker-review-dialog" role="dialog" aria-modal="true" aria-labelledby="speaker-review-title">
+      <section ref={dialogRef} className="process-dialog speaker-review-dialog" role="dialog" aria-modal="true" aria-labelledby="speaker-review-title">
         <header className="process-dialog__header">
           <div>
             <p className="eyebrow">Transcript</p>
-            <h2 id="speaker-review-title">Review speakers</h2>
+            <h2 ref={headingRef} id="speaker-review-title" tabIndex={-1}>Review speakers</h2>
           </div>
           <button
             className="icon-button"
@@ -172,7 +216,7 @@ export function SpeakerReviewDialog({
                         <div className="speaker-review__sample" key={key}>
                           {sample.startMs !== null ? (
                             <button className="icon-button" type="button" disabled={previewing !== null || submitting} onClick={() => void previewSample(key, sample.startMs!)} title={`Play from ${formatTimestamp(sample.startMs)}`} aria-label={`Play ${speaker.label} sample from ${formatTimestamp(sample.startMs)}`}>
-                              {previewing === key ? <LoaderCircle className="is-spinning" size={14} /> : <Play size={14} />}
+                              {previewing === key ? <LoaderCircle className="is-spinning" size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
                             </button>
                           ) : null}
                           <p><time>{sample.startMs !== null ? formatTimestamp(sample.startMs) : "Untimed"}</time>{sample.text}</p>

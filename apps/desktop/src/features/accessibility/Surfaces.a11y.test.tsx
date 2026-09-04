@@ -54,12 +54,16 @@ describe("high-risk surface accessibility", () => {
 
   it("covers Speaker Review labels and actions", async () => {
     vi.spyOn(desktop, "speakerReview").mockResolvedValue(speakerReview);
-    const { container } = render(<SpeakerReviewDialog open campaignId="thursday-game" stem="2026-08-27" submitting={false} error={null} onClose={vi.fn()} onSubmit={vi.fn()} onReset={vi.fn()} />);
+    const onClose = vi.fn();
+    const { container } = render(<SpeakerReviewDialog open campaignId="thursday-game" stem="2026-08-27" submitting={false} error={null} onPreviewSample={vi.fn().mockResolvedValue(undefined)} onClose={onClose} onSubmit={vi.fn()} onReset={vi.fn()} />);
     const dialog = await screen.findByRole("dialog", { name: "Review speakers" });
 
+    expect(screen.getByRole("heading", { name: "Review speakers" })).toHaveFocus();
     expect(within(dialog).getByRole("combobox", { name: "Assigned name" })).toBeEnabled();
     expect(within(dialog).getByRole("button", { name: "Play SPEAKER_00 sample from 0:12" })).toBeEnabled();
     expect(await axe(container)).toHaveNoViolations();
+    await userEvent.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("covers assertive and polite Notifications regions", async () => {

@@ -10,7 +10,7 @@ target/
 output/
 
 # session audio (large files, user-owned)
-audio/
+/audio/
 
 # campaign configs are personal — track only the example
 campaigns/*.toml

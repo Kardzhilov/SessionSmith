@@ -28,6 +28,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { desktop, errorMessage } from "./api/desktop";
+import { useGlobalAudio } from "./features/audio/GlobalAudioPlayer";
 import { ExportDialog, type ExportDialogRequest } from "./features/dialogs/ExportDialog";
 import { NotesDialog } from "./features/dialogs/NotesDialog";
 import { ProcessDialog, type ProcessDialogRequest } from "./features/dialogs/ProcessDialog";
@@ -106,6 +107,7 @@ const navItems: Array<{
 ];
 
 function App() {
+  const { playFrom } = useGlobalAudio();
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
   const [library, setLibrary] = useState<CampaignLibrary | null>(null);
   const [activeCampaignId, setActiveCampaignId] = useState<string | null>(null);
@@ -1379,6 +1381,7 @@ function App() {
         stem={speakerStem}
         submitting={speakerSubmitting}
         error={speakerError}
+        onPreviewSample={(campaignId, stem, startMs) => playFrom(campaignId, stem, startMs)}
         onClose={() => setSpeakerDialogOpen(false)}
         onSubmit={(mappings, defaultMappings) => void startSpeakerMapping(mappings, defaultMappings)}
         onReset={() => void resetSpeakerMapping()}

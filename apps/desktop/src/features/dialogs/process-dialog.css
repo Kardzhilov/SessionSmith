@@ -572,7 +572,7 @@
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: rgba(251, 252, 247, 0.72);
+  background: var(--surface-subtle);
 }
 
 .speaker-review__evidence {

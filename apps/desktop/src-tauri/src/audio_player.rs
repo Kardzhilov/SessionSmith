@@ -677,7 +677,7 @@ pub(crate) fn resolve_source(campaign_id: &str, stem: &str) -> Result<ResolvedAu
     })
 }
 
-fn select_audio_source(
+pub(crate) fn select_audio_source(
     metadata_source: Option<&Path>,
     legacy_source: Option<&Path>,
     workspace_root: &Path,
