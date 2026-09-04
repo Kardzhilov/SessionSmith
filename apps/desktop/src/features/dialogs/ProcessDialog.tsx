@@ -355,7 +355,7 @@ export function ProcessDialog({
               </div>
               <div className="process-dialog__artifact-grid">
                 {artifacts.map((artifact) => (
-                  <label className="process-dialog__artifact" key={artifact.id}>
+                  <label className={selectedArtifacts.has(artifact.id) ? "process-dialog__artifact process-dialog__artifact--selected" : "process-dialog__artifact"} key={artifact.id}>
                     <input
                       type="checkbox"
                       checked={selectedArtifacts.has(artifact.id)}

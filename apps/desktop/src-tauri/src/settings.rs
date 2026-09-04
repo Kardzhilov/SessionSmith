@@ -278,11 +278,12 @@ fn create_campaign_at(
     } else {
         root.join(configured_output)
     };
-    create_campaign_in(root, &output_dir, request)
+    let campaigns_dir = resolve_workspace_path(root, &sessionsmith::config::campaigns_dir());
+    create_campaign_in(&campaigns_dir, &output_dir, request)
 }
 
 fn create_campaign_in(
-    root: &Path,
+    campaigns_dir: &Path,
     output_dir: &Path,
     request: CampaignCreateRequest,
 ) -> Result<CampaignCreateResult, String> {
@@ -307,8 +308,7 @@ fn create_campaign_in(
         preset_id,
         request.notes.trim().to_string(),
     );
-    let campaigns_dir = resolve_workspace_path(root, &sessionsmith::config::campaigns_dir());
-    let path = sessionsmith::campaign_ops::create_campaign(&campaigns_dir, output_dir, &config)
+    let path = sessionsmith::campaign_ops::create_campaign(campaigns_dir, output_dir, &config)
         .map_err(|error| error.to_string())?;
     let campaign_id = path
         .file_stem()
@@ -1166,9 +1166,10 @@ mod tests {
     #[test]
     fn campaign_creation_uses_core_scaffolding_and_rejects_config_collision() {
         let directory = tempfile::tempdir().unwrap();
+        let campaigns = directory.path().join("campaigns");
         let output = directory.path().join("output");
         let created =
-            create_campaign_in(directory.path(), &output, create_request("My Game")).unwrap();
+            create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap();
         assert_eq!(created.campaign_id, "my-game");
         let config =
             CampaignConfig::load(&directory.path().join("campaigns").join("my-game.toml")).unwrap();
@@ -1176,26 +1177,27 @@ mod tests {
         assert_eq!(config.players[0].character, "Mara");
 
         let error =
-            create_campaign_in(directory.path(), &output, create_request("My Game")).unwrap_err();
+            create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap_err();
         assert!(error.contains("campaign already exists"));
     }
 
     #[test]
     fn campaign_creation_rejects_output_collision_and_unknown_preset() {
         let directory = tempfile::tempdir().unwrap();
+        let campaigns = directory.path().join("campaigns");
         let output = directory.path().join("output");
         std::fs::create_dir_all(output.join("my-game")).unwrap();
         let error =
-            create_campaign_in(directory.path(), &output, create_request("My Game")).unwrap_err();
+            create_campaign_in(&campaigns, &output, create_request("My Game")).unwrap_err();
         assert!(error.contains("campaign output already exists"));
 
         let mut invalid = create_request("Another Game");
         invalid.preset_id = "not-a-preset".into();
-        let error = create_campaign_in(directory.path(), &output, invalid).unwrap_err();
+        let error = create_campaign_in(&campaigns, &output, invalid).unwrap_err();
         assert!(error.contains("unknown system preset"));
 
         let error =
-            create_campaign_in(directory.path(), &output, create_request("   ")).unwrap_err();
+            create_campaign_in(&campaigns, &output, create_request("   ")).unwrap_err();
         assert!(error.contains("campaign name cannot be empty"));
     }
 }

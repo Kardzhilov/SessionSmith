@@ -55,8 +55,12 @@
 .campaign-create-form select,
 .campaign-create-form textarea { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--ink); background: var(--surface-raised); font: inherit; }
 .campaign-create-form textarea { resize: vertical; }
-.campaign-create-form fieldset { grid-template-columns: 1fr 1fr; grid-column: 1 / -1; padding: 14px; border: 1px solid var(--line); border-radius: 6px; }
+.campaign-create-form fieldset { grid-column: 1 / -1; padding: 14px; border: 1px solid var(--line); border-radius: 6px; }
 .campaign-create-form legend { padding: 0 5px; }
+.campaign-create-form__players { display: grid; gap: 12px; }
+.campaign-create-player { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); }
+.campaign-create-player__heading { display: flex; grid-column: 1 / -1; min-height: 28px; align-items: center; justify-content: space-between; gap: 8px; color: var(--ink); }
+.campaign-create-form__add-player { justify-self: start; }
 .campaign-create-form__notes,
 .campaign-create-form .setup-actions { grid-column: 1 / -1; }
 .setup-complete-line,
@@ -77,6 +81,8 @@
   .setup-status small { grid-column: 2; }
   .campaign-create-form { grid-template-columns: 1fr; }
   .campaign-create-form > *, .campaign-create-form fieldset { grid-column: 1; }
+  .campaign-create-player { grid-template-columns: 1fr; }
+  .campaign-create-player__heading { grid-column: 1; }
   .setup-model-summary { grid-template-columns: 1fr; }
   .setup-model-summary span { border-right: 0; border-bottom: 1px solid var(--line); }
   .onboarding-footer { align-items: flex-start; padding: 12px 0; }

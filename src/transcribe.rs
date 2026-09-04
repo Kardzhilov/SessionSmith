@@ -966,14 +966,22 @@ fn apply_vad(audio: &Path, stem: &str, children: Option<&ChildRegistry>) -> Resu
     })
 }
 
-/// Concatenate multiple audio files into one using ffmpeg's concat demuxer.
+/// Concatenate multiple audio files into one using normalized ffmpeg streams.
 /// Returns the path to the merged file in `out_dir/<stem>.wav`.
 /// If only one file is provided, returns it directly (no concat).
-fn concat_list_entry(path: &Path) -> String {
-    format!(
-        "file '{}'\n",
-        path.display().to_string().replace('\'', "'\\''")
-    )
+fn reencode_concat_filter(input_count: usize) -> String {
+    let normalized = (0..input_count)
+        .map(|index| {
+            format!(
+                "[{index}:a:0]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[a{index}]"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    let inputs = (0..input_count)
+        .map(|index| format!("[a{index}]"))
+        .collect::<String>();
+    format!("{normalized};{inputs}concat=n={input_count}:v=0:a=1[outa]")
 }
 
 pub async fn concat_audio_files(files: &[PathBuf], stem: &str, out_dir: &Path) -> Result<PathBuf> {
@@ -1002,7 +1010,7 @@ pub async fn concat_audio_files_with_children(
         .sum();
     let complete_existing = crate::audio::probe_duration_with_children(&out, children)
         .zip(expected_duration)
-        .map(|(duration, expected)| duration >= expected * 0.9)
+        .map(|(duration, expected)| duration >= expected * 0.9 && duration <= expected * 1.1)
         .unwrap_or(false);
     if complete_existing {
         return Ok(out);
@@ -1010,48 +1018,36 @@ pub async fn concat_audio_files_with_children(
     std::fs::remove_file(&out).ok();
     let part = out.with_extension("wav.part");
     std::fs::remove_file(&part).ok();
-    let list_path = out_dir.join(format!("_{stem}_concat.txt"));
-    let content: String = files
-        .iter()
-        .map(|f| {
-            let abs = f.canonicalize().unwrap_or_else(|_| f.clone());
-            concat_list_entry(&abs)
-        })
-        .collect();
-    std::fs::write(&list_path, &content)?;
     let pb = crate::ui::spinner(&format!("merging {} files with ffmpeg", files.len()));
     let mut command = Command::new("ffmpeg");
+    command.arg("-y");
+    for file in files {
+        command.arg("-i").arg(file);
+    }
     command
-        .args(["-y", "-f", "concat", "-safe", "0", "-i"])
-        .arg(&list_path)
-        .args(["-c", "copy"])
+        .arg("-filter_complex")
+        .arg(reencode_concat_filter(files.len()))
+        .args([
+            "-map",
+            "[outa]",
+            "-c:a",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-f",
+            "wav",
+        ])
         .arg(&part)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let status = run_command_status(&mut command, children, "ffmpeg audio merge")
         .with_context(|| "ffmpeg not found — install ffmpeg")?;
     pb.finish_and_clear();
-    std::fs::remove_file(&list_path).ok();
     if !status.success() {
-        // Re-encode fallback (handles mismatched codecs/sample rates).
-        let list2 = out_dir.join(format!("_{stem}_concat2.txt"));
-        std::fs::write(&list2, &content)?;
-        let pb2 = crate::ui::spinner("re-encoding merge (codec mismatch)");
-        let mut fallback = Command::new("ffmpeg");
-        fallback
-            .args(["-y", "-f", "concat", "-safe", "0", "-i"])
-            .arg(&list2)
-            .args(["-ar", "16000", "-ac", "1"])
-            .arg(&part)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let st2 = run_command_status(&mut fallback, children, "ffmpeg audio re-encode")?;
-        pb2.finish_and_clear();
-        std::fs::remove_file(&list2).ok();
-        if !st2.success() {
-            std::fs::remove_file(&part).ok();
-            bail!("ffmpeg could not concatenate audio files");
-        }
+        std::fs::remove_file(&part).ok();
+        bail!("ffmpeg could not concatenate audio files");
     }
     std::fs::rename(&part, &out)?;
     crate::ui::ok(&format!("merged audio → {}", out.display()));
@@ -1253,11 +1249,99 @@ mod tests {
     }
 
     #[test]
-    fn concat_list_entry_escapes_apostrophes() {
+    fn reencode_concat_filter_normalizes_each_input_before_joining() {
         assert_eq!(
-            concat_list_entry(Path::new("Bob's session.wav")),
-            "file 'Bob'\\''s session.wav'\n"
+            reencode_concat_filter(2),
+            "[0:a:0]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[a0];[1:a:0]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[a1];[a0][a1]concat=n=2:v=0:a=1[outa]"
         );
+    }
+
+    #[tokio::test]
+    async fn concat_audio_normalizes_mismatched_inputs() {
+        if path_of("ffmpeg").is_none() || path_of("ffprobe").is_none() {
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.wav");
+        let second = directory.path().join("second.flac");
+        let stale = directory.path().join("merged.wav");
+        let first_status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-ar",
+                "22050",
+                "-ac",
+                "1",
+            ])
+            .arg(&first)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let second_status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=660:duration=1.25",
+                "-ar",
+                "44100",
+                "-ac",
+                "2",
+            ])
+            .arg(&second)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let stale_status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:duration=4",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+            ])
+            .arg(&stale)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(first_status.success() && second_status.success() && stale_status.success());
+
+        let merged = concat_audio_files(&[first, second], "merged", directory.path())
+            .await
+            .unwrap();
+        let stream = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_name,sample_rate,channels",
+                "-of",
+                "default=noprint_wrappers=1",
+            ])
+            .arg(&merged)
+            .output()
+            .unwrap();
+        let metadata = String::from_utf8(stream.stdout).unwrap();
+        assert!(metadata.contains("codec_name=pcm_s16le"), "{metadata}");
+        assert!(metadata.contains("sample_rate=16000"), "{metadata}");
+        assert!(metadata.contains("channels=1"), "{metadata}");
+        let duration = crate::audio::probe_duration(&merged).unwrap();
+        assert!((2.1..=2.4).contains(&duration), "duration was {duration}");
     }
 
     #[test]

@@ -348,9 +348,21 @@
 .process-dialog__artifact {
   min-height: 36px;
   padding: 0 8px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 5px;
-  background: rgba(251, 252, 247, 0.7);
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+
+.process-dialog__artifact--selected {
+  border-color: var(--pine);
+  color: var(--ink);
+  background: var(--pine-soft);
+}
+
+.process-dialog__artifact:focus-within {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .process-dialog__options {

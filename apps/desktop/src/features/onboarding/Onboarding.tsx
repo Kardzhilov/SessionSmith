@@ -7,7 +7,9 @@ import {
   CircleAlert,
   HeartPulse,
   LoaderCircle,
+  Plus,
   Settings2,
+  Trash2,
   UsersRound,
   X,
 } from "lucide-react";
@@ -148,6 +150,26 @@ export function OnboardingScreen({
     setHealthRefreshStatus("complete");
   };
 
+  const updatePlayer = (index: number, field: keyof typeof emptyPlayer, value: string) => {
+    setDraft((current) => ({
+      ...current,
+      players: current.players.map((player, playerIndex) => (
+        playerIndex === index ? { ...player, [field]: value } : player
+      )),
+    }));
+  };
+
+  const addPlayer = () => {
+    setDraft((current) => ({ ...current, players: [...current.players, { ...emptyPlayer }] }));
+  };
+
+  const removePlayer = (index: number) => {
+    setDraft((current) => ({
+      ...current,
+      players: current.players.filter((_, playerIndex) => playerIndex !== index),
+    }));
+  };
+
   return (
     <main className="onboarding-shell" aria-labelledby="onboarding-title">
       <header className="onboarding-header">
@@ -220,7 +242,29 @@ export function OnboardingScreen({
                 <label>Game system<select value={draft.presetId} onChange={(event) => setDraft({ ...draft, presetId: event.target.value })} disabled={loadingOptions}>{options?.presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.name}</option>)}</select></label>
                 <label>GM<input maxLength={100} value={draft.gm} onChange={(event) => setDraft({ ...draft, gm: event.target.value })} /></label>
                 <label>Setting<input maxLength={240} value={draft.setting} onChange={(event) => setDraft({ ...draft, setting: event.target.value })} /></label>
-                <fieldset><legend>First player</legend><label>Player<input maxLength={100} value={draft.players[0].player} onChange={(event) => setDraft({ ...draft, players: [{ ...draft.players[0], player: event.target.value }] })} /></label><label>Character<input maxLength={100} value={draft.players[0].character} onChange={(event) => setDraft({ ...draft, players: [{ ...draft.players[0], character: event.target.value }] })} /></label></fieldset>
+                <fieldset className="campaign-create-form__players">
+                  <legend>Players and characters</legend>
+                  {draft.players.map((player, index) => (
+                    <div className="campaign-create-player" key={index}>
+                      <div className="campaign-create-player__heading">
+                        <strong>Player {index + 1}</strong>
+                        {draft.players.length > 1 && (
+                          <button className="icon-button" type="button" onClick={() => removePlayer(index)} title={`Remove player ${index + 1}`} aria-label={`Remove player ${index + 1}`}>
+                            <Trash2 size={15} aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
+                      <label>Player<input maxLength={100} value={player.player} onChange={(event) => updatePlayer(index, "player", event.target.value)} /></label>
+                      <label>Character<input maxLength={100} value={player.character} onChange={(event) => updatePlayer(index, "character", event.target.value)} /></label>
+                      <label>Ancestry<input maxLength={100} value={player.ancestry} onChange={(event) => updatePlayer(index, "ancestry", event.target.value)} /></label>
+                      <label>Class<input maxLength={100} value={player.class} onChange={(event) => updatePlayer(index, "class", event.target.value)} /></label>
+                    </div>
+                  ))}
+                  <button className="button button--quiet campaign-create-form__add-player" type="button" onClick={addPlayer}>
+                    <Plus size={16} aria-hidden="true" />
+                    Add player
+                  </button>
+                </fieldset>
                 <label className="campaign-create-form__notes">Campaign notes<textarea rows={3} maxLength={8000} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
                 <div className="setup-actions"><button className="button button--primary" type="submit" disabled={creating || !draft.name.trim()}>{creating ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <UsersRound size={16} aria-hidden="true" />}{creating ? "Creating" : "Create campaign"}</button></div>
               </form>
